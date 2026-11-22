@@ -72,6 +72,7 @@ const LINES = {
   download: '<path d="M12 3.5V15M7.5 10.5 12 15l4.5-4.5M5 13v6.5h14V13"/>',
   star: '<path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.9-5.2-2.8-5.2 2.8 1-5.9-4.3-4.1 5.9-.8L12 3.5z"/>',
   route: '<circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M8.5 18H15a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h6.5"/>',
+  bluetooth: '<path d="M6.5 7.5l11 9-5.5 4.5V3l5.5 4.5-11 9"/>',
 };
 
 /** SVG nét mảnh cho nút bấm. */

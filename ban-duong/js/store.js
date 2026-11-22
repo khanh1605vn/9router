@@ -32,8 +32,21 @@ export const DEFAULT_SETTINGS = {
   customMax: 0, // km/h, 0 = tắt; dùng khi đường chưa có dữ liệu giới hạn
   alertCamera: true,
   alertToll: true,
-  alertRail: true,
+  alertRail: true, // đường ngang đường sắt (nay do bộ máy biển báo đọc)
   alertReport: true,
+  // Nhóm biển báo phía trước (xem SIGN_CATEGORIES trong signs.js)
+  signSpeed: true,
+  signProhibit: true,
+  signPriority: true,
+  signDanger: true,
+  signSignals: true,
+  signCalming: true,
+  signCrossing: false, // vạch qua đường rất dày ở đô thị nên mặc định tắt
+  signInfo: true,
+  // Kết nối với ô tô
+  obdUseSpeed: true, // dùng tốc độ do xe báo khi có
+  obdAutoSerial: false, // tự mở lại bộ OBD Bluetooth thường đã dùng lần trước
+  carUi: 'auto', // giao diện màn hình ô tô: 'auto' | 'on' | 'off'
   theme: 'auto', // 'auto' | 'light' | 'dark'
   keepAwake: true,
 };

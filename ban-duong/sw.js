@@ -1,7 +1,7 @@
 // Service worker: giúp ứng dụng mở được khi mất mạng và giữ lại các ô bản đồ đã xem.
 // Đổi VERSION mỗi lần phát hành để máy người dùng nhận bản mới.
 
-const VERSION = 'v1';
+const VERSION = 'v2';
 const SHELL = `banduong-shell-${VERSION}`;
 const TILES = 'banduong-tiles-v1';
 const TILE_LIMIT = 800;
@@ -23,6 +23,11 @@ const SHELL_FILES = [
   'js/voice.js',
   'js/search.js',
   'js/icons.js',
+  'js/signs.js',
+  'js/signart.js',
+  'js/signengine.js',
+  'js/elm327.js',
+  'js/obd.js',
   'vendor/maplibre-gl/maplibre-gl.js',
   'vendor/maplibre-gl/maplibre-gl.css',
   'icons/icon.svg',

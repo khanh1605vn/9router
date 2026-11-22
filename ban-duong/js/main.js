@@ -11,6 +11,21 @@ import { AlertEngine, describePoint, SpeedMonitor } from './alerts.js';
 import { PRIORITY, voice } from './voice.js';
 import { reverseGeocode, searchPlaces } from './search.js';
 import { GLYPH_COLORS, glyphIcon, lineIcon, maneuverIcon } from './icons.js';
+import { SignEngine } from './signengine.js';
+import { categoryEnabled, formatNumberVi, lookupSign, SIGN_CATEGORIES } from './signs.js';
+import { signSvg } from './signart.js';
+import {
+  CarWatch,
+  createBleTransport,
+  createSerialTransport,
+  describeConnectError,
+  detectSupport,
+  ObdClient,
+  ObdError,
+  reopenSerial,
+  requestBleDevice,
+  requestSerialPort,
+} from './obd.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -45,7 +60,12 @@ const state = {
   trip: null,
   dark: false,
   wakeLock: null,
-  alertId: null,
+  alertKey: null, // mục đang hiện trên thanh cảnh báo: 'p:<id điểm>' hoặc 's:<khoá biển>'
+  alertSign: null, // { item, distance } khi thanh cảnh báo đang hiện một biển báo
+  stripKey: '',
+  limitSaid: new Map(), // giới hạn tốc độ (km/h) → lúc bộ máy biển báo vừa đọc (ms)
+  lastFixAt: 0, // lúc nhận lần định vị gần nhất (đồng hồ máy, ms)
+  lastMatch: null, // đoạn đường khớp gần nhất, dùng khi mất GPS mà xe vẫn báo tốc độ
   navIconKey: '',
   movingCount: 0,
   noAutoDriveUntil: 0,
@@ -57,7 +77,22 @@ const state = {
 const locator = new LocationService();
 const roads = new RoadData();
 const alerts = new AlertEngine();
+const signs = new SignEngine();
 let speedMon = new SpeedMonitor();
+
+// Kết nối với ô tô qua bộ OBD-II.
+const car = {
+  support: detectSupport(),
+  client: null,
+  state: 'idle',
+  info: null,
+  snap: null,
+  watch: new CarWatch(),
+  dtc: null, // kết quả đọc mã lỗi gần nhất: { loading } | { codes } | { error }
+  onlyAt: 0, // lần gần nhất cập nhật tốc độ chỉ bằng dữ liệu xe (lúc mất GPS)
+};
+
+const isDriving = () => state.mode === 'nav' || state.mode === 'drive';
 
 const map = new MapView($('map'), {
   onFollowChange: (mode) => $('btnLocate').classList.toggle('active', mode !== 'free'),
@@ -80,7 +115,30 @@ function toast(message, ms = 3200) {
 function syncLayout() {
   const sheetH = $('sheet').offsetHeight;
   document.documentElement.style.setProperty('--sheet-h', `${sheetH}px`);
-  map.setPadding($('top').offsetHeight + 8, sheetH);
+  if (document.documentElement.classList.contains('car-ui')) {
+    // Màn hình ô tô: thanh trên và bảng dưới là một cột bên trái, bản đồ dùng phần còn lại.
+    map.setPadding(12, 12, Math.round($('top').getBoundingClientRect().right));
+  } else {
+    map.setPadding($('top').offsetHeight + 8, sheetH);
+  }
+}
+
+// Giao diện màn hình ô tô: bật tay, hoặc tự bật trên màn hình cảm ứng nằm ngang, rộng mà thấp (màn hình trên xe).
+const CAR_QUERY = '(orientation: landscape) and (min-width: 800px) and (max-height: 760px) and (pointer: coarse)';
+let carQuery = null;
+
+function applyCarUi() {
+  if (!carQuery && typeof window.matchMedia === 'function') {
+    carQuery = window.matchMedia(CAR_QUERY);
+    if (carQuery.addEventListener) carQuery.addEventListener('change', applyCarUi);
+    else carQuery.addListener?.(applyCarUi);
+  }
+  const pref = store.settings.carUi;
+  const on = pref === 'on' || (pref === 'auto' && Boolean(carQuery?.matches));
+  const root = document.documentElement;
+  if (root.classList.contains('car-ui') === on) return;
+  root.classList.toggle('car-ui', on);
+  syncLayout();
 }
 
 function setMode(mode) {
@@ -89,7 +147,10 @@ function setMode(mode) {
   $('searchBar').hidden = mode === 'nav';
   $('navSign').hidden = mode !== 'nav';
   if (mode !== 'nav') $('navThen').hidden = true;
-  if (mode !== 'nav' && mode !== 'drive') renderAlert({ active: null });
+  if (mode !== 'nav' && mode !== 'drive') {
+    renderAlert({ active: null });
+    renderStrip(null);
+  }
   updateWakeLock();
   syncLayout();
 }
@@ -278,28 +339,129 @@ function renderSpeed(fix, sp) {
   sign.classList.toggle('custom', sp.source === 'custom');
 }
 
-function renderAlert(result) {
+/** Âm báo và lời nhắc về tốc độ (dùng cho cả định vị GPS lẫn tốc độ từ xe khi mất GPS). */
+function speakSpeed(sp) {
+  if (sp.sound === 'voice') {
+    voice.chime('over');
+    voice.speak(`Bạn đang chạy quá tốc độ. Giới hạn ${sp.limit} ki lô mét trên giờ`, PRIORITY.alert);
+  } else if (sp.sound === 'beep') voice.chime('over');
+  else if (sp.announce && store.settings.speakLimit) {
+    // Bộ máy biển báo vừa báo trước đúng giới hạn này thì không đọc lại khi xe sang đoạn đường mới.
+    const said = state.limitSaid.get(sp.announce);
+    if (said == null || Date.now() - said > 60e3) {
+      voice.speak(`Giới hạn tốc độ ${sp.announce} ki lô mét trên giờ`, PRIORITY.info);
+    }
+  }
+}
+
+/** Hai mục là cùng một biển (cùng mã và trị số), để dải biển kế tiếp không lặp lại biển trên thanh cảnh báo. */
+const sameSign = (a, b) =>
+  a.key === b.key || ((a.code ?? a.kind) === (b.code ?? b.kind) && (a.value ?? null) === (b.value ?? null));
+
+/**
+ * Thanh cảnh báo vàng, dùng chung cho điểm cảnh báo (camera, trạm thu phí, điểm tự đánh dấu) và biển báo
+ * phía trước: mục nào gần hơn thì hiện, mục còn lại vẫn được đọc. Với biển báo, ô biểu tượng là hình biển.
+ */
+function renderAlert(pointResult, signResult = null) {
   const bar = $('alertBar');
-  if (!result.active) {
+  const p = pointResult?.active || null;
+  const s = signResult?.active || null;
+  let show = null;
+  if (p && (!s || p.distance <= s.distance)) {
+    show = { key: `p:${p.point.id}`, distance: p.distance, reach: p.reach, info: p.info };
+  } else if (s) {
+    show = { key: `s:${s.item.key}`, distance: s.distance, reach: s.reach, sign: s.item };
+  }
+  if (!show) {
     if (!bar.hidden) {
       bar.hidden = true;
       syncLayout();
     }
-    state.alertId = null;
+    state.alertKey = null;
+    state.alertSign = null;
     return;
   }
-  const { point, distance: d, info, reach } = result.active;
-  if (state.alertId !== point.id) {
-    state.alertId = point.id;
-    $('alertIcon').innerHTML = glyphIcon(info.icon, 26);
-    $('alertTitle').textContent = info.title;
+  if (state.alertKey !== show.key) {
+    state.alertKey = show.key;
+    const icon = $('alertIcon');
+    icon.classList.toggle('is-sign', Boolean(show.sign));
+    if (show.sign) {
+      // SVG do signart.js sinh từ hằng số nội bộ; trị số trên biển đã được lọc theo mẫu số.
+      icon.innerHTML = signSvg(show.sign.art, { size: 50, value: show.sign.value });
+      $('alertTitle').textContent = show.sign.title;
+    } else {
+      icon.innerHTML = glyphIcon(show.info.icon, 26);
+      $('alertTitle').textContent = show.info.title;
+    }
+    bar.classList.toggle('tappable', Boolean(show.sign));
+    if (show.sign) bar.tabIndex = 0;
+    else bar.removeAttribute('tabindex');
   }
-  $('alertDist').textContent = formatDistance(d);
-  $('alertMeter').style.width = `${Math.round(100 * (1 - Math.min(1, d / reach)))}%`;
+  state.alertSign = show.sign ? { item: show.sign, distance: show.distance } : null;
+  $('alertDist').textContent = formatDistance(show.distance);
+  const done = show.reach > 0 ? 1 - Math.min(1, show.distance / show.reach) : 0;
+  $('alertMeter').style.width = `${Math.round(100 * Math.max(0, done))}%`;
   if (bar.hidden) {
     bar.hidden = false;
     syncLayout();
   }
+}
+
+/** Dải nhỏ phía trên đồng hồ tốc độ: tối đa 2 biển kế tiếp, khác với biển đang hiện trên thanh cảnh báo. */
+function renderStrip(signResult) {
+  const strip = $('signStrip');
+  const shown = state.alertSign?.item || null;
+  const items =
+    isDriving() && signResult ? signResult.upcoming.filter((it) => !shown || !sameSign(it, shown)).slice(0, 2) : [];
+  const key = items.map((it) => it.key).join('|');
+  if (key !== state.stripKey) {
+    state.stripKey = key;
+    strip.replaceChildren(
+      ...items.map((it) =>
+        el(
+          'div',
+          { class: 'strip-item' },
+          el('span', { class: 'strip-art', html: signSvg(it.art, { size: 40, value: it.value, title: it.title }) }),
+          el('b', { class: 'strip-dist' })
+        )
+      )
+    );
+  }
+  items.forEach((it, i) => {
+    strip.children[i].lastChild.textContent = formatDistance(it.distance);
+  });
+  strip.hidden = items.length === 0;
+}
+
+/** Bấm vào thanh cảnh báo khi đang hiện biển báo: xem chi tiết biển. */
+function showSignDetail() {
+  const cur = state.alertSign;
+  if (!cur) return;
+  const { item, distance: d } = cur;
+  let codeLine = null;
+  if (item.code) {
+    codeLine = item.derived ? `Tương ứng biển ${item.code} theo QCVN 41:2024` : `Biển ${item.code} theo QCVN 41:2024`;
+  }
+  openModal(
+    item.title,
+    el(
+      'div',
+      { class: 'view' },
+      el(
+        'div',
+        { class: 'sign-detail' },
+        el('span', { class: 'sign-detail-art', html: signSvg(item.art, { size: 88, value: item.value, title: item.title }) }),
+        el(
+          'div',
+          { class: 'min0' },
+          codeLine ? el('p', { class: 'sub' }, codeLine) : null,
+          el('p', { class: 'sign-detail-dist' }, `Còn khoảng ${formatDistance(d)}`)
+        )
+      ),
+      item.note ? el('p', { class: 'note' }, item.note) : null,
+      el('p', { class: 'note' }, 'Nguồn: dữ liệu OpenStreetMap. Luôn tuân theo biển báo thực tế trên đường.')
+    )
+  );
 }
 
 // ---------- Dẫn đường ----------
@@ -455,6 +617,9 @@ function endDrive() {
 
 function startTrip() {
   state.trip = { t0: null, last: null, distance: 0, moving: 0, max: 0, simulated: state.simulate };
+  signs.reset();
+  car.watch.reset();
+  state.limitSaid.clear();
 }
 
 function updateTrip(fix) {
@@ -518,7 +683,8 @@ function showSummary(s, title) {
 
 function onFix(fix) {
   state.fix = fix;
-  const driving = state.mode === 'nav' || state.mode === 'drive';
+  state.lastFixAt = Date.now();
+  const driving = isDriving();
   let shown = fix;
   let nav = null;
 
@@ -550,30 +716,32 @@ function onFix(fix) {
 
   const s = store.settings;
   const match = roads.matchWay(fix, state.progress?.step?.name || '');
-  const sp = speedMon.update(fix, match, {
+  state.lastMatch = match;
+  // Có tốc độ do xe báo (bộ OBD) thì đồng hồ và cảnh báo quá tốc độ dùng số đó, chính xác hơn GPS.
+  const kmh = fix.simulated ? null : carSpeed(); // chạy thử thì giữ tốc độ mô phỏng
+  const speedFix = kmh == null ? fix : { ...fix, speed: kmh / 3.6 };
+  const sp = speedMon.update(speedFix, match, {
     vehicle: s.vehicle,
     tolerance: s.overTolerance,
     customMax: s.customMax,
     hasData: roads.hasData(fix.coord),
   });
-  renderSpeed(fix, sp);
+  renderSpeed(speedFix, sp);
 
   if (driving) {
-    if (sp.sound === 'voice') {
-      voice.chime('over');
-      voice.speak(`Bạn đang chạy quá tốc độ. Giới hạn ${sp.limit} ki lô mét trên giờ`, PRIORITY.alert);
-    } else if (sp.sound === 'beep') voice.chime('over');
-    else if (sp.announce && s.speakLimit) {
-      voice.speak(`Giới hạn tốc độ ${sp.announce} ki lô mét trên giờ`, PRIORITY.info);
-    }
-
-    const near = [...roads.pointsNear(fix.coord, 1300), ...reportPoints()];
+    // Đường ngang đường sắt nay do bộ máy biển báo đọc, nên không đưa vào bộ cảnh báo điểm nữa.
+    const near = [...roads.pointsNear(fix.coord, 1300).filter((p) => p.kind !== 'rail'), ...reportPoints()];
     const result = alerts.update(fix, near, s, nav);
-    renderAlert(result);
-    if (result.fired) {
-      voice.chime('alert');
-      voice.speak(result.say, PRIORITY.alert);
+    const sr = signs.update(fix, roads, s, { vehicle: s.vehicle, nav, now: new Date() });
+    for (const it of sr.fired) {
+      if (it.code === 'P.127' && it.value != null) state.limitSaid.set(it.value, Date.now());
     }
+    speakSpeed(sp);
+    renderAlert(result, sr);
+    renderStrip(sr);
+    if (result.fired || sr.say) voice.chime('alert');
+    if (result.fired) voice.speak(result.say, PRIORITY.alert);
+    if (sr.say) voice.speak(sr.say, PRIORITY.alert);
     updateTrip(fix);
   } else if (state.mode === 'browse') {
     // Đang chạy xe mà chưa bật chế độ lái thì tự bật để vẫn có cảnh báo.
@@ -803,7 +971,294 @@ function openSearch() {
   input.focus();
 }
 
+// ---------- Kết nối với ô tô (bộ OBD-II) ----------
+
+const UNSUPPORTED = {
+  insecure: 'Cần mở ứng dụng bằng địa chỉ https:// thì mới dùng được Bluetooth.',
+  ios: 'iPhone và iPad chưa hỗ trợ Bluetooth trên web, kể cả Chrome trên iPhone. Kết nối ô tô chỉ dùng được trên Android hoặc máy tính.',
+  webview: 'Trang đang mở bên trong ứng dụng khác (Zalo, Facebook…), nơi không có Bluetooth. Hãy mở trang bằng Chrome.',
+  firefox: 'Firefox không hỗ trợ Bluetooth trên web. Hãy dùng Chrome, Edge hoặc Samsung Internet.',
+  other: 'Trình duyệt này không hỗ trợ Bluetooth trên web. Hãy dùng Chrome, Edge hoặc Samsung Internet trên Android.',
+};
+
+const carReady = () => car.client != null && car.state === 'ready';
+/** Đang có phiên kết nối (kể cả đang kết nối lại); trạng thái lỗi coi như đã dừng. */
+const carBusy = () => car.client != null && car.state !== 'idle' && car.state !== 'error';
+
+/** Tốc độ do xe báo (km/h) nếu còn mới (dưới 1,5 giây) và người dùng cho phép dùng; không thì null. */
+function carSpeed() {
+  const snap = car.snap;
+  if (!store.settings.obdUseSpeed || !carReady() || !snap || snap.speed == null) return null;
+  return Date.now() - snap.speedTime < 1500 ? snap.speed : null;
+}
+
+/** Xe đang đứng yên: theo tốc độ của xe nếu có, không thì theo GPS. */
+function carStationary() {
+  const snap = car.snap;
+  if (snap?.speed != null && Date.now() - snap.speedTime < 5000) return snap.speed < 1;
+  return !state.fix || state.fix.speed < 1;
+}
+
+/** Dòng ngắn ở bảng dưới khi đang lái: "1.850 vòng/phút · 88 °C · 13,9 V". */
+function carLine(snap) {
+  if (!snap) return '';
+  const parts = [];
+  if (snap.rpm != null) parts.push(`${formatNumberVi(Math.round(snap.rpm), 0)} vòng/phút`);
+  if (snap.coolant != null) parts.push(`${Math.round(snap.coolant)} °C`);
+  if (snap.voltage != null) parts.push(`${formatNumberVi(snap.voltage, 1)} V`);
+  return parts.join(' · ');
+}
+
+/** Số liệu đầy đủ trong phần cài đặt. */
+function carReadout(snap) {
+  if (!snap) return '';
+  const parts = [];
+  if (snap.speed != null) parts.push(`${Math.round(snap.speed)} km/h`);
+  if (snap.rpm != null) parts.push(`${formatNumberVi(Math.round(snap.rpm), 0)} vòng/phút`);
+  if (snap.coolant != null) parts.push(`nước làm mát ${Math.round(snap.coolant)} °C`);
+  if (snap.fuel != null) parts.push(`nhiên liệu ${Math.round(snap.fuel)} %`);
+  if (snap.voltage != null) parts.push(`ắc quy ${formatNumberVi(snap.voltage, 1)} V`);
+  return parts.join(' · ');
+}
+
+function carStatusText() {
+  const { state: st, info } = car;
+  const name = car.client?.name || 'bộ OBD';
+  switch (st) {
+    case 'connecting':
+      return info?.attempt ? `Đang kết nối lại (lần ${info.attempt})…` : `Đang kết nối với ${name}…`;
+    case 'init':
+      return 'Đang khởi động bộ OBD…';
+    case 'searching':
+      return 'Đang dò giao thức của xe, có thể mất tới 20 giây…';
+    case 'ready':
+      return `Đã kết nối với xe qua ${info?.adapter || car.snap?.adapter || name}.`;
+    case 'nocar':
+      return 'Đã kết nối bộ OBD nhưng xe chưa trả lời. Hãy bật khoá điện hoặc nổ máy.';
+    case 'lost':
+      return `Mất kết nối với bộ OBD, thử lại sau ${Math.round((info?.delay || 0) / 1000)} giây…`;
+    case 'error':
+      return info?.message || 'Không kết nối được với bộ OBD.';
+    default:
+      return 'Chưa kết nối.';
+  }
+}
+
+/** Phần "Kết nối với ô tô" trong cài đặt. Tên và chuỗi phiên bản của thiết bị chỉ đi qua textContent. */
+function renderObdPanel() {
+  const sup = car.support;
+  const busy = carBusy();
+  let status = carStatusText();
+  if (!car.client && !sup.ble) {
+    status = UNSUPPORTED[sup.reason || 'other'];
+    if (sup.serial) status += ' Vẫn dùng được bộ OBD Bluetooth thường đã ghép đôi.';
+  }
+  $('obdStatus').textContent = status;
+  $('obdStatus').classList.toggle('ok', carReady());
+  const live = carReady() ? carReadout(car.snap) : '';
+  $('obdLive').textContent = live;
+  $('obdLive').hidden = !live;
+  $('btnObdBle').hidden = busy || !sup.ble;
+  $('btnObdAll').hidden = busy || !sup.ble;
+  $('btnObdSerial').hidden = busy || !sup.serial;
+  $('btnObdStop').hidden = !busy;
+  const canRead = carReady() && carStationary() && !car.dtc?.loading;
+  $('btnObdDtc').disabled = !canRead;
+  $('obdDtcHint').textContent =
+    carReady() && !carStationary()
+      ? 'Hãy dừng xe hẳn rồi mới đọc mã lỗi.'
+      : 'Chỉ đọc được khi đã kết nối và xe đang đứng yên.';
+}
+
+/** Kết quả đọc mã lỗi: chỉ vẽ lại khi kết quả đổi. */
+function renderDtc() {
+  const box = $('obdDtc');
+  const r = car.dtc;
+  if (!r) {
+    box.hidden = true;
+    box.replaceChildren();
+    return;
+  }
+  box.hidden = false;
+  const never = el(
+    'p',
+    { class: 'note' },
+    'Ứng dụng chỉ đọc, không bao giờ xoá mã lỗi. Mã lỗi cho biết hệ thống nào cần kiểm tra; hãy nhờ thợ hoặc gara xem khi đèn báo lỗi động cơ sáng.'
+  );
+  if (r.loading) box.replaceChildren(el('p', { class: 'note' }, 'Đang đọc mã lỗi…'));
+  else if (r.error) box.replaceChildren(el('p', { class: 'note warn' }, r.error));
+  else if (!r.codes.length) box.replaceChildren(el('p', { class: 'note' }, 'Xe không lưu mã lỗi nào.'), never);
+  else box.replaceChildren(el('ul', { class: 'dtc-list' }, ...r.codes.map((c) => el('li', {}, c))), never);
+}
+
+/** Cập nhật mọi chỗ hiện trạng thái xe. Phần cài đặt chỉ vẽ lại khi đang mở. */
+function renderCar() {
+  const line = carReady() ? carLine(car.snap) : '';
+  for (const id of ['navCar', 'driveCar']) {
+    const node = $(id);
+    if (node.textContent !== line) node.textContent = line;
+    node.hidden = !line;
+  }
+  if (!$('settingsPanel').hidden) renderObdPanel();
+}
+
+/** Bắt đầu phiên OBD với một transport đã chọn. quiet: tự kết nối lúc mở ứng dụng, không báo lỗi. */
+async function startObd(transport, { serial = false, quiet = false } = {}) {
+  const old = car.client;
+  car.client = null;
+  if (old) await old.stop().catch(() => {});
+  const client = new ObdClient(transport);
+  Object.assign(car, { client, state: 'idle', info: null, snap: null, dtc: null });
+  client.onState((st, info) => {
+    if (car.client !== client) return;
+    const was = car.state;
+    car.state = st;
+    car.info = info;
+    if (st === 'ready' && was !== 'ready') {
+      if (serial && !store.settings.obdAutoSerial) store.set('obdAutoSerial', true);
+      toast('Đã kết nối với xe.');
+    } else if (st === 'error' && !quiet) toast(info?.message || 'Không kết nối được với bộ OBD.', 5000);
+    renderCar();
+    renderObdPanel();
+  });
+  client.onData((snap) => onCarData(client, snap));
+  client.setPaused(document.hidden);
+  client.start();
+  renderObdPanel();
+}
+
+/** Không làm gì khi người dùng tự đóng hộp chọn thiết bị; lỗi khác thì báo bằng câu dễ hiểu. */
+function onPickError(err) {
+  const cancelled =
+    err?.name === 'AbortError' || (err?.name === 'NotFoundError' && /cancel|no port selected/i.test(String(err?.message)));
+  if (!cancelled) toast(describeConnectError(err), 5000);
+}
+
+/** Bộ OBD Bluetooth Low Energy. requestDevice() được gọi đồng bộ ngay trong lần bấm. */
+function connectBle(all) {
+  let pick;
+  try {
+    pick = requestBleDevice(all);
+  } catch (err) {
+    pick = Promise.reject(err);
+  }
+  voice.unlock();
+  pick.then((device) => startObd(createBleTransport(device)), onPickError);
+}
+
+/** Bộ OBD Bluetooth thường (SPP) đã ghép đôi, qua Web Serial. requestPort() cũng gọi ngay trong lần bấm. */
+function connectSerial() {
+  let pick;
+  try {
+    pick = requestSerialPort();
+  } catch (err) {
+    pick = Promise.reject(err);
+  }
+  voice.unlock();
+  pick.then((port) => startObd(createSerialTransport(port), { serial: true }), onPickError);
+}
+
+async function stopObd() {
+  const client = car.client;
+  Object.assign(car, { client: null, state: 'idle', info: null, snap: null, dtc: null });
+  if (store.settings.obdAutoSerial) store.set('obdAutoSerial', false);
+  renderCar();
+  renderObdPanel();
+  renderDtc();
+  if (client) await client.stop().catch(() => {});
+}
+
+/** Mở lại bộ OBD Bluetooth thường đã dùng lần trước (trình duyệt cho phép mà không cần chạm). */
+async function reopenCar() {
+  if (!store.settings.obdAutoSerial || !car.support.serial || car.client) return;
+  const transport = await reopenSerial().catch(() => null);
+  if (transport && !car.client) startObd(transport, { serial: true, quiet: true });
+}
+
+async function readCarDtcs() {
+  const client = car.client;
+  if (!carReady() || !carStationary()) return;
+  car.dtc = { loading: true };
+  renderDtc();
+  renderObdPanel();
+  let result;
+  try {
+    result = { codes: await client.readDtcs() };
+  } catch (err) {
+    result = { error: err instanceof ObdError ? err.message : 'Không đọc được mã lỗi từ xe.' };
+  }
+  if (car.client !== client) return;
+  car.dtc = result;
+  renderDtc();
+  renderObdPanel();
+}
+
+function onCarData(client, snap) {
+  if (car.client !== client) return;
+  car.snap = snap;
+  renderCar();
+  const now = Date.now();
+  const warn = car.watch.update(snap, now).say;
+  if (warn) {
+    voice.chime('alert');
+    voice.speak(warn, PRIORITY.alert);
+    toast(warn, 6000);
+  }
+  // Mất GPS (trong hầm…) mà xe vẫn báo tốc độ: cập nhật đồng hồ và cảnh báo quá tốc độ theo đoạn đường khớp gần nhất.
+  if (!isDriving() || !state.fix || state.fix.simulated || now - state.lastFixAt <= 3000 || now - car.onlyAt < 1000) return;
+  const kmh = carSpeed();
+  if (kmh == null) return;
+  car.onlyAt = now;
+  const s = store.settings;
+  const f = { ...state.fix, speed: kmh / 3.6, time: now };
+  const sp = speedMon.update(f, state.lastMatch, {
+    vehicle: s.vehicle,
+    tolerance: s.overTolerance,
+    customMax: s.customMax,
+    hasData: true,
+  });
+  renderSpeed(f, sp);
+  speakSpeed(sp);
+}
+
 // ---------- Cài đặt ----------
+
+// Hình biển minh hoạ cho từng nhóm biển trong cài đặt: [mã biển, trị số].
+const CATEGORY_ART = {
+  speed: ['P.127', 50],
+  prohibit: ['P.123a'],
+  priority: ['R.122'],
+  danger: ['W.201a'],
+  signals: ['W.209'],
+  calming: ['W.221b'],
+  rail: ['W.210'],
+  crossing: ['W.224'],
+  info: ['I.407a'],
+};
+
+// Giữ id cũ "optRail" cho công tắc đường sắt (khoá cài đặt alertRail có từ trước).
+const signOptId = (c) => (c.setting === 'alertRail' ? 'optRail' : `opt-${c.setting}`);
+
+/** Sinh các công tắc "Biển báo phía trước" từ SIGN_CATEGORIES. */
+function buildSignOptions() {
+  const box = $('signOpts');
+  for (const c of SIGN_CATEGORIES) {
+    const [main, detail] = c.label.split(': ');
+    const [code, value] = CATEGORY_ART[c.key] || [];
+    const entry = code ? lookupSign(code) : null;
+    const input = el('input', { id: signOptId(c), type: 'checkbox', class: 'switch' });
+    input.addEventListener('change', (e) => store.set(c.setting, e.target.checked));
+    box.append(
+      el(
+        'label',
+        { class: 'opt sign-opt' },
+        entry ? el('i', { class: 'opt-art', html: signSvg(entry.art, { size: 34, value }) }) : null,
+        el('span', {}, main, detail ? el('small', {}, detail[0].toLocaleUpperCase('vi') + detail.slice(1)) : null),
+        input
+      )
+    );
+  }
+}
 
 function renderSettings() {
   const s = store.settings;
@@ -815,11 +1270,15 @@ function renderSettings() {
   $('optCustomMax').value = String(s.customMax);
   $('optCamera').checked = s.alertCamera;
   $('optToll').checked = s.alertToll;
-  $('optRail').checked = s.alertRail;
   $('optReport').checked = s.alertReport;
+  for (const c of SIGN_CATEGORIES) $(signOptId(c)).checked = categoryEnabled(c.key, s);
+  $('optObdSpeed').checked = s.obdUseSpeed;
+  $('optCarUi').value = s.carUi;
   $('optTheme').value = s.theme;
   $('optAwake').checked = s.keepAwake;
   setVehicleButtons();
+  renderObdPanel();
+  renderDtc();
 
   const n = store.reports.length;
   $('reportCount').textContent = n
@@ -857,8 +1316,8 @@ function bindSettings() {
     optSpeakLimit: 'speakLimit',
     optCamera: 'alertCamera',
     optToll: 'alertToll',
-    optRail: 'alertRail',
     optReport: 'alertReport',
+    optObdSpeed: 'obdUseSpeed',
     optAwake: 'keepAwake',
   };
   for (const [id, key] of Object.entries(toggles)) {
@@ -874,6 +1333,18 @@ function bindSettings() {
     store.set('theme', e.target.value);
     applyTheme();
   });
+  $('optCarUi').addEventListener('change', (e) => {
+    store.set('carUi', e.target.value);
+    applyCarUi();
+  });
+
+  buildSignOptions();
+  // Hộp chọn thiết bị phải được mở ngay trong lần bấm, nên các hàm này không chờ gì trước khi gọi.
+  $('btnObdBle').addEventListener('click', () => connectBle(false));
+  $('btnObdAll').addEventListener('click', () => connectBle(true));
+  $('btnObdSerial').addEventListener('click', connectSerial);
+  $('btnObdStop').addEventListener('click', stopObd);
+  $('btnObdDtc').addEventListener('click', readCarDtcs);
 
   const setVehicle = (v, replan) => {
     store.set('vehicle', v);
@@ -937,7 +1408,15 @@ function bind() {
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeOverlays();
   });
-  document.addEventListener('visibilitychange', updateWakeLock);
+  document.addEventListener('visibilitychange', () => {
+    updateWakeLock();
+    car.client?.setPaused(document.hidden); // trang bị ẩn thì thôi hỏi xe để đỡ tốn pin
+  });
+
+  $('alertBar').addEventListener('click', showSignDetail);
+  $('alertBar').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') showSignDetail();
+  });
 
   $('btnSearch').addEventListener('click', openSearch);
   $('btnSearchBack').addEventListener('click', () => closeOverlays());
@@ -1020,6 +1499,7 @@ function bind() {
 async function boot() {
   bind();
   applyAudio();
+  applyCarUi();
   state.dark = wantDark();
   document.documentElement.dataset.theme = state.dark ? 'dark' : 'light';
 
@@ -1060,6 +1540,7 @@ async function boot() {
     status.textContent = err.message;
   });
   locator.start();
+  reopenCar();
 
   setInterval(() => {
     applyTheme();

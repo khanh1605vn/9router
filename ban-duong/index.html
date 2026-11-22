@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
   <meta name="theme-color" content="#0a57a4">
-  <meta name="description" content="Dẫn đường bằng giọng nói tiếng Việt, cảnh báo giới hạn tốc độ, camera phạt nguội và trạm thu phí.">
+  <meta name="description" content="Dẫn đường bằng giọng nói tiếng Việt, báo trước biển báo phía trước, cảnh báo giới hạn tốc độ, camera phạt nguội và trạm thu phí, kết nối bộ OBD của ô tô.">
   <title>Bạn Đường</title>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
@@ -58,6 +58,9 @@
     <div id="speedBox" class="speed"><span id="speedValue">0</span><small>km/h</small></div>
   </div>
 
+  <!-- Các biển kế tiếp (ngoài biển đang hiện trên thanh cảnh báo) -->
+  <div id="signStrip" class="sign-strip" hidden aria-label="Biển báo kế tiếp"></div>
+
   <section id="sheet" aria-live="polite">
     <div class="view" data-view="browse">
       <div id="gpsStatus" class="status-line">Đang tìm vị trí của bạn…</div>
@@ -76,7 +79,7 @@
         </div>
         <button id="btnPlaceClose" class="icon-btn quiet" type="button" aria-label="Đóng"><span data-icon="close"></span></button>
       </div>
-      <div class="row">
+      <div class="row actions">
         <button id="btnRoute" class="btn primary grow" type="button"><span data-icon="route" data-size="18"></span><span>Chỉ đường</span></button>
         <button id="btnSaveHome" class="btn" type="button"><span data-icon="home" data-size="18"></span><span>Nhà</span></button>
         <button id="btnSaveWork" class="btn" type="button"><span data-icon="work" data-size="18"></span><span>Cơ quan</span></button>
@@ -107,6 +110,7 @@
         <div class="grow min0">
           <div class="eta"><span id="navEta">—</span><small>đến nơi</small></div>
           <p id="navRemain" class="sub nowrap"></p>
+          <p id="navCar" class="car-line nowrap" hidden></p>
         </div>
         <button id="btnSteps" class="btn compact" type="button" aria-label="Xem các bước đi"><span data-icon="list" data-size="22"></span></button>
         <button id="btnEndNav" class="btn danger" type="button"><span data-icon="stop" data-size="18"></span><span>Kết thúc</span></button>
@@ -118,6 +122,7 @@
         <div class="grow min0">
           <div class="eta"><span id="driveDist">0 m</span><small>đã đi</small></div>
           <p id="driveInfo" class="sub">Đang theo dõi tốc độ và điểm cảnh báo</p>
+          <p id="driveCar" class="car-line nowrap" hidden></p>
         </div>
         <button id="btnEndDrive" class="btn danger" type="button"><span data-icon="stop" data-size="18"></span><span>Kết thúc</span></button>
       </div>
@@ -166,11 +171,37 @@
         </select>
       </label>
 
-      <h3>Loại cảnh báo</h3>
+      <h3>Điểm cảnh báo</h3>
       <label class="opt"><span>Camera giao thông</span><input id="optCamera" type="checkbox" class="switch"></label>
       <label class="opt"><span>Trạm thu phí</span><input id="optToll" type="checkbox" class="switch"></label>
-      <label class="opt"><span>Đường ngang đường sắt</span><input id="optRail" type="checkbox" class="switch"></label>
       <label class="opt"><span>Điểm tôi tự đánh dấu</span><input id="optReport" type="checkbox" class="switch"></label>
+
+      <h3>Biển báo phía trước</h3>
+      <p class="note">Ứng dụng báo trước khoảng 100–200 m, xa hơn khi chạy nhanh. Biển lấy từ dữ liệu OpenStreetMap; ở Việt Nam biển được nhập vào bản đồ còn rất ít, nên ứng dụng dùng thêm thông tin tương đương: đèn tín hiệu, vạch qua đường, cấm rẽ, đường một chiều, giới hạn tốc độ và chỗ ngoặt tính từ hình dạng đường. Luôn tuân theo biển thực tế trên đường.</p>
+      <div id="signOpts"></div>
+
+      <h3>Kết nối với ô tô</h3>
+      <div class="obd-card">
+        <p id="obdStatus" class="obd-status">Chưa kết nối.</p>
+        <p id="obdLive" class="obd-live" hidden></p>
+      </div>
+      <div class="row wrap obd-actions">
+        <button id="btnObdBle" class="btn primary" type="button"><span data-icon="bluetooth" data-size="18"></span><span>Kết nối bộ OBD Bluetooth</span></button>
+        <button id="btnObdAll" class="btn" type="button">Hiện mọi thiết bị</button>
+        <button id="btnObdSerial" class="btn" type="button" hidden>Bộ OBD Bluetooth thường (đã ghép đôi)</button>
+        <button id="btnObdStop" class="btn danger" type="button" hidden>Ngắt kết nối</button>
+      </div>
+      <label class="opt"><span>Dùng tốc độ từ xe<small>Đồng hồ tốc độ và cảnh báo quá tốc độ dùng tốc độ do xe báo; khi mất GPS (trong hầm) vẫn cập nhật được.</small></span><input id="optObdSpeed" type="checkbox" class="switch"></label>
+      <div class="opt"><span>Mã lỗi động cơ<small id="obdDtcHint">Chỉ đọc được khi đã kết nối và xe đang đứng yên.</small></span><button id="btnObdDtc" class="btn" type="button" disabled>Đọc mã lỗi</button></div>
+      <div id="obdDtc" class="obd-dtc" hidden></div>
+      <p class="note">Cần một bộ đọc OBD-II dùng chip ELM327 (hoặc tương thích) cắm vào cổng OBD của xe. Chỉ kết nối khi xe đang đỗ.</p>
+      <p class="note">Bộ Bluetooth Low Energy (BLE): bấm “Kết nối bộ OBD Bluetooth” rồi chọn thiết bị, không cần ghép đôi trước. Không thấy bộ đọc trong danh sách thì bấm “Hiện mọi thiết bị”.</p>
+      <p class="note">Bộ Bluetooth thường (loại rẻ, phổ biến): ghép đôi trong phần cài đặt Bluetooth của điện thoại trước (mã PIN thường là 1234 hoặc 0000), rồi bấm “Bộ OBD Bluetooth thường”. Cần Chrome 138 trở lên trên Android.</p>
+      <p class="note">Dùng được trên Chrome, Edge, Samsung Internet (Android) và Chrome trên máy tính. Không dùng được trên iPhone, iPad, Firefox, hoặc khi mở trang ngay trong Zalo, Facebook.</p>
+      <p class="note">Ứng dụng chỉ đọc tốc độ, vòng tua, nhiệt độ nước làm mát, mức nhiên liệu và điện áp; dữ liệu của xe không được gửi đi đâu. Ứng dụng không đọc số khung (VIN) và không bao giờ xoá mã lỗi.</p>
+      <label class="opt"><span>Giao diện màn hình ô tô<small>Tự động: bật khi màn hình cảm ứng nằm ngang và rộng (màn hình Android trên xe).</small></span>
+        <select id="optCarUi"><option value="auto">Tự động</option><option value="on">Bật</option><option value="off">Tắt</option></select>
+      </label>
 
       <h3>Hiển thị</h3>
       <label class="opt"><span>Giao diện<small>Tự động: chuyển sang nền tối từ 18 giờ đến 6 giờ.</small></span>
@@ -190,7 +221,7 @@
       <div id="tripList" class="trip-list"></div>
 
       <h3>Dữ liệu và lưu ý</h3>
-      <p class="note">Bản đồ, tìm đường, giới hạn tốc độ và vị trí camera lấy từ dữ liệu mở OpenStreetMap do cộng đồng đóng góp, nên có thể thiếu hoặc chưa cập nhật. Biển báo và hiệu lệnh thực tế trên đường luôn là căn cứ để tuân theo.</p>
+      <p class="note">Bản đồ, tìm đường, giới hạn tốc độ, biển báo và vị trí camera lấy từ dữ liệu mở OpenStreetMap do cộng đồng đóng góp, nên có thể thiếu hoặc chưa cập nhật. Biển báo và hiệu lệnh thực tế trên đường luôn là căn cứ để tuân theo.</p>
       <p class="note">Vị trí của bạn chỉ được gửi tới các dịch vụ bản đồ để tìm đường và tải dữ liệu quanh bạn; cài đặt, địa điểm và điểm đánh dấu được lưu ngay trên thiết bị này.</p>
       <p class="note">© Những người đóng góp cho OpenStreetMap · Bản đồ nền OpenFreeMap · Tìm đường Valhalla và OSRM · Tìm địa điểm Photon và Nominatim · Dữ liệu đường Overpass API.</p>
       <div class="row wrap"><button id="btnClearCache" class="btn" type="button"><span data-icon="trash" data-size="18"></span><span>Xoá dữ liệu đường đã lưu</span></button></div>

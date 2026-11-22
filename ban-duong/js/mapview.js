@@ -68,7 +68,7 @@ export class MapView {
     this.handlers = handlers;
     this.map = null;
     this.follow = 'north'; // 'free' | 'north' | 'drive'
-    this.pad = { top: 0, bottom: 0 };
+    this.pad = { top: 0, bottom: 0, left: 0 };
     this.shown = null; // vị trí mũi tên đang vẽ { lon, lat, heading }
     this.anim = null;
     this.lastFixAt = 0;
@@ -319,9 +319,12 @@ export class MapView {
     this.map.setStyle(style, { diff: false });
   }
 
-  /** Khoảng trống cần chừa cho thanh trên và bảng dưới (px). */
-  setPadding(top, bottom) {
-    this.pad = { top, bottom };
+  /**
+   * Khoảng trống cần chừa cho thanh trên, bảng dưới và cột bên trái (px).
+   * left > 0 khi dùng giao diện màn hình ô tô: cột điều khiển nằm bên trái, bản đồ dùng phần còn lại.
+   */
+  setPadding(top, bottom, left = 0) {
+    this.pad = { top, bottom, left };
   }
 
   setFollow(mode) {
@@ -399,10 +402,11 @@ export class MapView {
     const pitch = pitch0 + (wantPitch - pitch0) * 0.1;
     const zoom = zoom0 + (wantZoom - zoom0) * 0.08;
     const h = this.container.clientHeight;
+    const left = this.pad.left || 0;
     const padding = drive
-      ? { top: Math.round(h * 0.36), bottom: this.pad.bottom, left: 0, right: 0 }
-      : { top: this.pad.top, bottom: this.pad.bottom, left: 0, right: 0 };
-    const key = `${this.shown.lon.toFixed(7)},${this.shown.lat.toFixed(7)},${bearing.toFixed(2)},${pitch.toFixed(2)},${zoom.toFixed(3)},${padding.top},${padding.bottom}`;
+      ? { top: Math.round(h * 0.36), bottom: this.pad.bottom, left, right: 0 }
+      : { top: this.pad.top, bottom: this.pad.bottom, left, right: 0 };
+    const key = `${this.shown.lon.toFixed(7)},${this.shown.lat.toFixed(7)},${bearing.toFixed(2)},${pitch.toFixed(2)},${zoom.toFixed(3)},${padding.top},${padding.bottom},${left}`;
     if (key === this.lastCam) return; // không có gì thay đổi: khỏi vẽ lại
     this.lastCam = key;
     map.jumpTo({ center: [this.shown.lon, this.shown.lat], bearing, pitch, zoom, padding });
@@ -459,7 +463,7 @@ export class MapView {
     this.setFollow('free');
     this.map.setPadding({ top: 0, bottom: 0, left: 0, right: 0 });
     this.map.fitBounds(bounds, {
-      padding: { top: this.pad.top + 64, bottom: this.pad.bottom + 36, left: 44, right: 44 },
+      padding: { top: this.pad.top + 64, bottom: this.pad.bottom + 36, left: (this.pad.left || 0) + 44, right: 44 },
       bearing: 0,
       pitch: 0,
       duration: 700,
@@ -476,7 +480,7 @@ export class MapView {
       bearing: 0,
       pitch: 0,
       duration: 700,
-      padding: { top: this.pad.top, bottom: this.pad.bottom, left: 0, right: 0 },
+      padding: { top: this.pad.top, bottom: this.pad.bottom, left: this.pad.left || 0, right: 0 },
     });
   }
 
