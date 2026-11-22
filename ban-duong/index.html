@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#0a57a4">
+  <meta name="description" content="Dẫn đường bằng giọng nói tiếng Việt, cảnh báo giới hạn tốc độ, camera phạt nguội và trạm thu phí.">
+  <title>Bạn Đường</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" crossorigin="anonymous" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap">
+  <link rel="stylesheet" href="vendor/maplibre-gl/maplibre-gl.css">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="map" aria-label="Bản đồ"></div>
+
+  <header id="top">
+    <div id="searchBar" class="searchbar">
+      <button id="btnSearch" class="search-trigger" type="button">
+        <span data-icon="search"></span>
+        <span class="search-hint">Tìm địa điểm, địa chỉ…</span>
+      </button>
+      <button id="btnSettings" class="icon-btn" type="button" aria-label="Cài đặt"><span data-icon="settings"></span></button>
+    </div>
+
+    <div id="navSign" class="sign" hidden>
+      <div id="navIcon" class="sign-icon"></div>
+      <div class="sign-body">
+        <div id="navDist" class="sign-dist">—</div>
+        <div id="navInstr" class="sign-instr"></div>
+      </div>
+    </div>
+    <div id="navThen" class="sign-then" hidden></div>
+
+    <div id="alertBar" class="alert" hidden role="status">
+      <div id="alertIcon" class="alert-icon"></div>
+      <div class="alert-body">
+        <div id="alertTitle" class="alert-title"></div>
+        <div class="alert-meter"><i id="alertMeter"></i></div>
+      </div>
+      <div id="alertDist" class="alert-dist"></div>
+    </div>
+  </header>
+
+  <div id="side">
+    <button id="btnSimSpeed" class="fab text" type="button" aria-label="Tốc độ chạy thử" hidden>×1</button>
+    <button id="btnMute" class="fab" type="button" aria-label="Bật hoặc tắt âm thanh"><span data-icon="volume"></span></button>
+    <button id="btnReport" class="fab" type="button" aria-label="Đánh dấu điểm cảnh báo"><span data-icon="report"></span></button>
+    <button id="btnLocate" class="fab" type="button" aria-label="Về vị trí của tôi"><span data-icon="locate"></span></button>
+  </div>
+
+  <div id="speedo" hidden>
+    <div id="limitSign" class="limit" hidden><span id="limitValue"></span></div>
+    <div id="speedBox" class="speed"><span id="speedValue">0</span><small>km/h</small></div>
+  </div>
+
+  <section id="sheet" aria-live="polite">
+    <div class="view" data-view="browse">
+      <div id="gpsStatus" class="status-line">Đang tìm vị trí của bạn…</div>
+      <div class="chips">
+        <button id="chipHome" class="chip" type="button"><span data-icon="home" data-size="18"></span><span>Nhà</span></button>
+        <button id="chipWork" class="chip" type="button"><span data-icon="work" data-size="18"></span><span>Cơ quan</span></button>
+        <button id="btnDrive" class="btn primary grow" type="button"><span data-icon="navigate" data-size="18"></span><span>Bắt đầu lái</span></button>
+      </div>
+    </div>
+
+    <div class="view" data-view="place" hidden>
+      <div class="row top">
+        <div class="grow min0">
+          <h2 id="placeName" class="title"></h2>
+          <p id="placeAddress" class="sub"></p>
+        </div>
+        <button id="btnPlaceClose" class="icon-btn quiet" type="button" aria-label="Đóng"><span data-icon="close"></span></button>
+      </div>
+      <div class="row">
+        <button id="btnRoute" class="btn primary grow" type="button"><span data-icon="route" data-size="18"></span><span>Chỉ đường</span></button>
+        <button id="btnSaveHome" class="btn" type="button"><span data-icon="home" data-size="18"></span><span>Nhà</span></button>
+        <button id="btnSaveWork" class="btn" type="button"><span data-icon="work" data-size="18"></span><span>Cơ quan</span></button>
+      </div>
+    </div>
+
+    <div class="view" data-view="routes" hidden>
+      <div class="row top">
+        <div class="grow min0">
+          <h2 id="routesTitle" class="title"></h2>
+          <p id="routesNote" class="sub"></p>
+        </div>
+        <button id="btnRoutesClose" class="icon-btn quiet" type="button" aria-label="Đóng"><span data-icon="close"></span></button>
+      </div>
+      <div class="segmented" role="group" aria-label="Phương tiện">
+        <button id="vehCar" type="button"><span data-icon="car" data-size="18"></span><span>Ô tô</span></button>
+        <button id="vehMoto" type="button"><span data-icon="moto" data-size="18"></span><span>Xe máy</span></button>
+      </div>
+      <div id="routeList" class="route-list"></div>
+      <div class="row">
+        <button id="btnStart" class="btn primary grow" type="button"><span data-icon="navigate" data-size="18"></span><span>Bắt đầu</span></button>
+        <button id="btnSimulate" class="btn" type="button"><span data-icon="play" data-size="18"></span><span>Chạy thử</span></button>
+      </div>
+    </div>
+
+    <div class="view" data-view="nav" hidden>
+      <div class="row">
+        <div class="grow min0">
+          <div class="eta"><span id="navEta">—</span><small>đến nơi</small></div>
+          <p id="navRemain" class="sub nowrap"></p>
+        </div>
+        <button id="btnSteps" class="btn compact" type="button" aria-label="Xem các bước đi"><span data-icon="list" data-size="22"></span></button>
+        <button id="btnEndNav" class="btn danger" type="button"><span data-icon="stop" data-size="18"></span><span>Kết thúc</span></button>
+      </div>
+    </div>
+
+    <div class="view" data-view="drive" hidden>
+      <div class="row">
+        <div class="grow min0">
+          <div class="eta"><span id="driveDist">0 m</span><small>đã đi</small></div>
+          <p id="driveInfo" class="sub">Đang theo dõi tốc độ và điểm cảnh báo</p>
+        </div>
+        <button id="btnEndDrive" class="btn danger" type="button"><span data-icon="stop" data-size="18"></span><span>Kết thúc</span></button>
+      </div>
+    </div>
+  </section>
+
+  <div id="searchPanel" class="panel" hidden>
+    <div class="panel-head">
+      <button id="btnSearchBack" class="icon-btn quiet" type="button" aria-label="Quay lại"><span data-icon="back"></span></button>
+      <form id="searchForm" class="grow" autocomplete="off">
+        <input id="searchInput" type="search" enterkeyhint="search" placeholder="Tìm địa điểm, địa chỉ…" aria-label="Từ khoá tìm kiếm">
+      </form>
+    </div>
+    <div id="searchBody" class="panel-body"></div>
+  </div>
+
+  <div id="settingsPanel" class="panel" hidden>
+    <div class="panel-head">
+      <button id="btnSettingsBack" class="icon-btn quiet" type="button" aria-label="Quay lại"><span data-icon="back"></span></button>
+      <h2 class="panel-title">Cài đặt</h2>
+    </div>
+    <div class="panel-body settings">
+      <h3>Phương tiện</h3>
+      <div class="segmented" role="group" aria-label="Phương tiện">
+        <button id="setCar" type="button"><span data-icon="car" data-size="18"></span><span>Ô tô</span></button>
+        <button id="setMoto" type="button"><span data-icon="moto" data-size="18"></span><span>Xe máy</span></button>
+      </div>
+      <label class="opt"><span>Tránh đường có thu phí<small>Áp dụng cho ô tô. Xe máy luôn tránh đường cao tốc.</small></span><input id="optAvoidTolls" type="checkbox" class="switch"></label>
+
+      <h3>Âm thanh</h3>
+      <label class="opt"><span>Giọng đọc tiếng Việt</span><input id="optVoice" type="checkbox" class="switch"></label>
+      <label class="opt"><span>Âm báo</span><input id="optBeeps" type="checkbox" class="switch"></label>
+      <label class="opt"><span>Đọc giới hạn tốc độ khi thay đổi</span><input id="optSpeakLimit" type="checkbox" class="switch"></label>
+      <div class="opt"><span id="voiceState">Giọng đọc<small>Bấm để nghe thử.</small></span><button id="btnVoiceTest" class="btn" type="button">Đọc thử</button></div>
+
+      <h3>Cảnh báo tốc độ</h3>
+      <label class="opt"><span>Báo động khi vượt quá<small>Mức chênh so với giới hạn trước khi phát cảnh báo.</small></span>
+        <select id="optTolerance">
+          <option value="0">0 km/h</option><option value="3">3 km/h</option><option value="5">5 km/h</option><option value="10">10 km/h</option>
+        </select>
+      </label>
+      <label class="opt"><span>Tốc độ tối đa tự đặt<small>Dùng khi đoạn đường chưa có dữ liệu giới hạn.</small></span>
+        <select id="optCustomMax">
+          <option value="0">Tắt</option><option value="40">40 km/h</option><option value="50">50 km/h</option><option value="60">60 km/h</option>
+          <option value="70">70 km/h</option><option value="80">80 km/h</option><option value="90">90 km/h</option><option value="100">100 km/h</option><option value="120">120 km/h</option>
+        </select>
+      </label>
+
+      <h3>Loại cảnh báo</h3>
+      <label class="opt"><span>Camera giao thông</span><input id="optCamera" type="checkbox" class="switch"></label>
+      <label class="opt"><span>Trạm thu phí</span><input id="optToll" type="checkbox" class="switch"></label>
+      <label class="opt"><span>Đường ngang đường sắt</span><input id="optRail" type="checkbox" class="switch"></label>
+      <label class="opt"><span>Điểm tôi tự đánh dấu</span><input id="optReport" type="checkbox" class="switch"></label>
+
+      <h3>Hiển thị</h3>
+      <label class="opt"><span>Giao diện<small>Tự động: chuyển sang nền tối từ 18 giờ đến 6 giờ.</small></span>
+        <select id="optTheme"><option value="auto">Tự động</option><option value="light">Sáng</option><option value="dark">Tối</option></select>
+      </label>
+      <label class="opt"><span>Giữ màn hình sáng khi lái</span><input id="optAwake" type="checkbox" class="switch"></label>
+
+      <h3>Điểm tôi tự đánh dấu</h3>
+      <p id="reportCount" class="note"></p>
+      <div class="row wrap">
+        <button id="btnExport" class="btn" type="button"><span data-icon="share" data-size="18"></span><span>Xuất tệp</span></button>
+        <button id="btnImport" class="btn" type="button"><span data-icon="download" data-size="18"></span><span>Nhập tệp</span></button>
+        <input id="importFile" type="file" accept="application/json,.json" hidden>
+      </div>
+
+      <h3>Chuyến đi gần đây</h3>
+      <div id="tripList" class="trip-list"></div>
+
+      <h3>Dữ liệu và lưu ý</h3>
+      <p class="note">Bản đồ, tìm đường, giới hạn tốc độ và vị trí camera lấy từ dữ liệu mở OpenStreetMap do cộng đồng đóng góp, nên có thể thiếu hoặc chưa cập nhật. Biển báo và hiệu lệnh thực tế trên đường luôn là căn cứ để tuân theo.</p>
+      <p class="note">Vị trí của bạn chỉ được gửi tới các dịch vụ bản đồ để tìm đường và tải dữ liệu quanh bạn; cài đặt, địa điểm và điểm đánh dấu được lưu ngay trên thiết bị này.</p>
+      <p class="note">© Những người đóng góp cho OpenStreetMap · Bản đồ nền OpenFreeMap · Tìm đường OSRM · Tìm địa điểm Photon · Dữ liệu đường Overpass API.</p>
+      <div class="row wrap"><button id="btnClearCache" class="btn" type="button"><span data-icon="trash" data-size="18"></span><span>Xoá dữ liệu đường đã lưu</span></button></div>
+    </div>
+  </div>
+
+  <div id="stepsPanel" class="panel" hidden>
+    <div class="panel-head">
+      <button id="btnStepsBack" class="icon-btn quiet" type="button" aria-label="Quay lại"><span data-icon="back"></span></button>
+      <h2 class="panel-title">Các bước đi</h2>
+    </div>
+    <ol id="stepList" class="panel-body step-list"></ol>
+  </div>
+
+  <div id="modal" class="modal" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <div class="row top">
+        <h2 id="modalTitle" class="title grow"></h2>
+        <button id="btnModalClose" class="icon-btn quiet" type="button" aria-label="Đóng"><span data-icon="close"></span></button>
+      </div>
+      <div id="modalBody"></div>
+    </div>
+  </div>
+
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <script src="vendor/maplibre-gl/maplibre-gl.js"></script>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

@@ -1,0 +1,19 @@
+{
+  "name": "Bạn Đường – dẫn đường và cảnh báo giao thông",
+  "short_name": "Bạn Đường",
+  "description": "Dẫn đường bằng giọng nói tiếng Việt, cảnh báo giới hạn tốc độ, camera phạt nguội và trạm thu phí.",
+  "lang": "vi",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0a57a4",
+  "theme_color": "#0a57a4",
+  "categories": ["navigation", "travel"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}
