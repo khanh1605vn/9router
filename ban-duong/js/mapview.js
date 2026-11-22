@@ -24,6 +24,25 @@ const RASTER_FALLBACK = {
   layers: [{ id: 'osm', type: 'raster', source: 'osm' }],
 };
 
+/**
+ * Kiểu bản đồ gốc ưu tiên tên tiếng Anh (name_en) nên đường phố Việt Nam hiện thành
+ * "Nguyen Dinh Chieu Street". Đổi sang tên gốc tại địa phương (name) để nhãn hiện đúng tiếng Việt.
+ */
+export function localizeLabels(style) {
+  const swap = (expr) => {
+    if (Array.isArray(expr)) {
+      if (expr.length === 2 && expr[0] === 'get' && (expr[1] === 'name_en' || expr[1] === 'name:en')) return ['get', 'name'];
+      return expr.map(swap);
+    }
+    return typeof expr === 'string' ? expr.replace(/\{name[_:]en\}/g, '{name}') : expr;
+  };
+  for (const layer of style.layers || []) {
+    const field = layer.layout?.['text-field'];
+    if (field != null) layer.layout['text-field'] = swap(field);
+  }
+  return style;
+}
+
 const EMPTY = { type: 'FeatureCollection', features: [] };
 const line = (coords, props = {}) => ({
   type: 'Feature',
@@ -69,7 +88,7 @@ export class MapView {
     for (const url of urls) {
       try {
         const res = await fetch(url);
-        if (res.ok) return { style: await res.json(), inverted: dark && url !== STYLE_URLS.dark };
+        if (res.ok) return { style: localizeLabels(await res.json()), inverted: dark && url !== STYLE_URLS.dark };
       } catch {
         /* thử nguồn kế tiếp */
       }
@@ -91,6 +110,7 @@ export class MapView {
     });
     this.map = map;
     map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
+    this.#keepAttributionCollapsed();
 
     const puckEl = document.createElement('div');
     puckEl.className = 'puck no-heading';
@@ -134,6 +154,27 @@ export class MapView {
 
     await styleReady;
     this.raf = requestAnimationFrame(this.#frame);
+  }
+
+  /**
+   * MapLibre tự mở rộng dòng ghi nguồn bản đồ khi tải xong và chỉ thu lại khi người dùng kéo bản đồ.
+   * Lúc dẫn đường không ai kéo bản đồ nên dòng chữ sẽ che đồng hồ tốc độ: giữ nó ở dạng nút (i),
+   * người dùng bấm vào mới mở ra.
+   */
+  #keepAttributionCollapsed() {
+    const box = this.container.querySelector('.maplibregl-ctrl-attrib');
+    if (!box) return;
+    let userClickAt = 0;
+    box.addEventListener('click', () => (userClickAt = performance.now()), true);
+    const collapse = () => {
+      if (performance.now() - userClickAt < 500) return;
+      if (box.classList.contains('maplibregl-compact-show')) {
+        box.classList.remove('maplibregl-compact-show');
+        box.removeAttribute('open');
+      }
+    };
+    new MutationObserver(collapse).observe(box, { attributes: true, attributeFilter: ['class', 'open'] });
+    collapse();
   }
 
   #bindGestures() {

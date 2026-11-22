@@ -14,6 +14,7 @@ export const CELL = 0.03; // kích thước ô (độ)
 const GRID = 0.001; // ô lưới tra cứu đoạn đường (~110 m)
 const TTL = 7 * 24 * 3600e3;
 const RETRY_AFTER = 60e3;
+const REQUEST_TIMEOUT = 25e3;
 const MAX_CELLS = 16;
 
 const DRIVABLE =
@@ -246,11 +247,15 @@ export class RoadData {
     const body = `data=${encodeURIComponent(buildQuery(cx, cy))}`;
     for (let attempt = 0; attempt < OVERPASS_ENDPOINTS.length; attempt++) {
       const url = OVERPASS_ENDPOINTS[(this.endpoint + attempt) % OVERPASS_ENDPOINTS.length];
+      // Máy chủ treo thì bỏ sau 25 giây để còn thử máy chủ kế tiếp.
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
       try {
         const res = await this.fetch(url, {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
           body,
+          signal: ctrl.signal,
         });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = parseOverpass(await res.json());
@@ -263,6 +268,8 @@ export class RoadData {
         return;
       } catch {
         /* thử máy chủ kế tiếp */
+      } finally {
+        clearTimeout(timer);
       }
     }
     this.failedAt.set(key, Date.now());

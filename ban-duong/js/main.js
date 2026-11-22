@@ -387,6 +387,7 @@ function startNav(simulate) {
 function endNav(arrived = false) {
   const wasSim = state.simulate;
   closeOverlays();
+  $('btnSimSpeed').hidden = true;
   locator.stopSimulation();
   state.simulate = false;
   state.route = null;

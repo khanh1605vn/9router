@@ -24,7 +24,7 @@ Cần Node.js 22 trở lên.
 ```bash
 cd ban-duong
 npm start          # mở http://localhost:5173
-npm test           # 34 bài kiểm thử logic (không cần mạng)
+npm test           # 38 bài kiểm thử logic (không cần mạng)
 ```
 
 Trên máy tính không có GPS, ứng dụng lấy tâm bản đồ làm điểm xuất phát; dùng nút **Chạy thử** để xem dẫn đường hoạt động.
@@ -58,7 +58,7 @@ Lần đầu mở, hãy cho phép trang dùng vị trí và chạm vào màn hì
 | `js/main.js` | Điều phối: trạng thái màn hình, vòng xử lý mỗi lần định vị, thao tác người dùng |
 | `js/mapview.js` | Bản đồ MapLibre, lớp tuyến đường và điểm cảnh báo, camera bám theo xe |
 | `js/location.js` | GPS và chế độ chạy thử |
-| `js/routing.js` | Gọi máy chủ tìm đường, tạo câu chỉ dẫn tiếng Việt |
+| `js/routing.js` | Gọi máy chủ tìm đường (Valhalla, dự phòng OSRM), tạo câu chỉ dẫn tiếng Việt |
 | `js/tracker.js` | Bám tuyến, chọn thời điểm đọc chỉ dẫn, phát hiện lệch tuyến và đến nơi |
 | `js/roaddata.js` | Tải giới hạn tốc độ và điểm cảnh báo từ OpenStreetMap, lưu đệm trên máy |
 | `js/alerts.js` | Cảnh báo điểm phía trước và cảnh báo quá tốc độ |
@@ -79,18 +79,18 @@ Mọi dữ liệu đều từ các dịch vụ mở, không cần khoá API:
 | Dữ liệu | Dịch vụ | Chỗ đổi địa chỉ |
 | --- | --- | --- |
 | Bản đồ nền | OpenFreeMap | `STYLE_URLS` trong `js/mapview.js` |
-| Tìm đường | OSRM (máy chủ thử nghiệm công cộng) | `OSRM_URL` trong `js/routing.js` |
+| Tìm đường | Valhalla (máy chủ công cộng của FOSSGIS); dự phòng: OSRM | `VALHALLA_URL`, `OSRM_URL` trong `js/routing.js` |
 | Giới hạn tốc độ, camera, trạm thu phí | Overpass API | `OVERPASS_ENDPOINTS` trong `js/roaddata.js` |
 | Tìm địa điểm | Photon, Nominatim | đầu tệp `js/search.js` |
 
 Toàn bộ là dữ liệu © những người đóng góp cho OpenStreetMap (giấy phép ODbL).
 
-Các máy chủ công cộng trên phù hợp để dùng cá nhân và thử nghiệm. Nếu phát hành cho nhiều người dùng, cần tự dựng máy chủ OSRM, Photon, Overpass hoặc thuê dịch vụ tương đương rồi đổi các địa chỉ trên, vì máy chủ công cộng giới hạn lưu lượng và không cam kết luôn hoạt động.
+Các máy chủ công cộng trên phù hợp để dùng cá nhân và thử nghiệm. Nếu phát hành cho nhiều người dùng, cần tự dựng máy chủ Valhalla, Photon, Overpass hoặc thuê dịch vụ tương đương rồi đổi các địa chỉ trên, vì máy chủ công cộng giới hạn lưu lượng và không cam kết luôn hoạt động.
 
 ## Giới hạn cần biết
 
 - **Độ phủ dữ liệu**: giới hạn tốc độ và vị trí camera do cộng đồng OpenStreetMap nhập, ở Việt Nam còn thiếu nhiều nơi. Đoạn đường chưa có dữ liệu thì ứng dụng không hiện biển giới hạn (không tự suy đoán); hãy dùng mục **Tốc độ tối đa tự đặt** và tự đánh dấu camera trên tuyến hay đi.
-- **Xe máy**: máy chủ tìm đường công cộng chỉ có hồ sơ ô tô. Chế độ xe máy dùng hồ sơ đó và loại đường cao tốc; thời gian dự kiến tính theo ô tô.
+- **Xe máy**: tuyến xe máy tính bằng hồ sơ xe hai bánh của Valhalla nên không đi vào đường cao tốc. Nếu Valhalla không phản hồi, ứng dụng chuyển sang OSRM (chỉ có hồ sơ ô tô) và ghi rõ trên màn hình rằng tuyến có thể đi qua cao tốc.
 - **Không có tình trạng giao thông trực tiếp** (kẹt xe theo thời gian thực) vì không có nguồn dữ liệu mở.
 - **Điểm tự đánh dấu chỉ nằm trên thiết bị**. Muốn nhiều người cùng thấy báo cáo của nhau cần thêm một máy chủ lưu trữ chung.
 - **Ứng dụng web không chạy nền**: phải để ứng dụng mở trên màn hình thì mới có định vị và cảnh báo. Ứng dụng đã tự giữ màn hình sáng khi lái.
