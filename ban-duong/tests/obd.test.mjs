@@ -596,7 +596,7 @@ test('phiên đầy đủ: khởi tạo → dò giao thức → sẵn sàng → 
   assert.equal(s.elm.writes.length, n, 'đã ngắt thì không gửi gì nữa');
 });
 
-test('PID báo NO DATA 3 lần liên tiếp thì bỏ, các PID khác vẫn chạy', async () => {
+test('PID báo NO DATA 3 lần liên tiếp thì thôi đọc theo lịch (chỉ thử lại mỗi 15 giây), các PID khác vẫn chạy', async () => {
   const s = setup({ noData: [0x0c] });
   s.client.start();
   await s.clock.advance(20000);
@@ -604,6 +604,62 @@ test('PID báo NO DATA 3 lần liên tiếp thì bỏ, các PID khác vẫn ch�
   assert.equal(s.snap.rpm, null);
   assert.equal(s.snap.speed, 60);
   assert.equal(s.client.state, 'ready');
+  // Thử lại thưa: không quá một lần mỗi 15 giây.
+  const n = s.count('010C');
+  await s.clock.advance(60000);
+  const retries = s.count('010C') - n;
+  assert.ok(retries >= 3 && retries <= 4, `010C được thử lại ${retries} lần trong 60 giây`);
+  assert.equal(s.snap.rpm, null);
+  assert.equal(s.client.state, 'ready');
+  // PID đó có số liệu trở lại thì được đọc tiếp theo lịch.
+  s.elm.noData.delete(0x0c);
+  s.elm.rpm = 900;
+  await s.clock.advance(16000);
+  assert.equal(s.snap.rpm, 900);
+  const m = s.count('010C');
+  await s.clock.advance(3000);
+  assert.ok(s.count('010C') - m >= 2, 'vòng tua được đọc lại mỗi giây');
+  assert.ok(maxBusPerSecond(s.elm.commands) <= 6);
+});
+
+test('xe im ngay khi vừa sẵn sàng, trước khi PID nào kịp trả lời (đề máy, tắt máy): xe trả lời lại thì đọc lại tốc độ và vòng tua', async () => {
+  // offFor: xe im bao lâu (đề máy ngay sau khi kết nối thì khoảng 1–2 giây; tắt máy thì vài phút).
+  for (const offFor of [1500, 4000, 5 * 60 * 1000]) {
+    const s = setup();
+    let armed = false;
+    s.client.onState((st) => {
+      if (st === 'ready' && !armed) {
+        armed = true;
+        s.elm.carOff = true;
+        s.clock.setTimeout(() => {
+          s.elm.carOff = false;
+          Object.assign(s.elm, { speed: 30, rpm: 900 });
+        }, offFor);
+      }
+    });
+    s.client.start();
+    await s.clock.advance(6000 + offFor);
+    assert.ok(armed);
+    assert.equal(s.elm.carOff, false);
+    await s.clock.advance(17000); // PID chưa từng trả lời được thử lại sau 15 giây
+    assert.equal(s.snap.speed, 30, `xe im ${offFor} ms: không đọc lại tốc độ`);
+    assert.equal(s.snap.rpm, 900, `xe im ${offFor} ms: không đọc lại vòng tua`);
+    assert.ok(s.clock.t - s.snap.speedTime < 1000, `xe im ${offFor} ms: tốc độ không được đọc theo lịch`);
+    assert.equal(s.client.state, 'ready');
+    assert.ok(maxBusPerSecond(s.elm.commands) <= 6);
+    assertSafeWrites(s.elm.writes);
+  }
+});
+
+test('xe báo hỗ trợ 0D, 0C, 05, 2F mà cả bốn luôn NO DATA (0100 vẫn trả lời): ở ready với điện áp, không đổi qua lại ready ↔ nocar', async () => {
+  const s = setup({ noData: [0x0d, 0x0c, 0x05, 0x2f] });
+  s.client.start();
+  await s.clock.advance(300000);
+  assert.deepEqual(s.states, ['connecting', 'init', 'searching', 'ready']);
+  assert.equal(s.snap.voltage, 13.9);
+  // Chỉ thử lại thưa: mỗi PID tối đa một lần mỗi 15 giây trong phút cuối.
+  const lastMinute = s.elm.commands.filter((c) => /^01/.test(c.cmd) && c.t > s.clock.t - 60000).length;
+  assert.ok(lastMinute <= 4 * 4 + 1, `${lastMinute} câu hỏi Mode 01 trong một phút`);
 });
 
 test("'UNABLE TO CONNECT' (chưa bật khoá điện) → trạng thái nocar, thử lại 0100 mỗi 8 giây", async () => {
@@ -701,6 +757,61 @@ test('mất Bluetooth: thử lại sau 2, 5, 10, 20, 30 giây rồi bỏ cuộc'
   assert.equal(s.client.state, 'error');
   assert.match(s.infos.at(-1).message, /Mất kết nối với bộ OBD/);
   assert.equal(s.elm.connects, 6);
+});
+
+test('bộ đọc trả lời ATZ nhưng mất kết nối mỗi lần hỏi xe: vẫn chờ 2, 5, 10, 20, 30 giây rồi bỏ cuộc', async () => {
+  const s = setup();
+  s.client.start();
+  await s.clock.advance(8000);
+  assert.equal(s.client.state, 'ready');
+  s.elm.override = (cmd) => {
+    if (cmd !== '0100') return null;
+    queueMicrotask(() => s.elm.drop()); // Bluetooth rớt đúng lúc hỏi xe
+    return { drop: true };
+  };
+  s.elm.drop();
+  await s.clock.advance(150000);
+  const delays = s.infos.filter((_, i) => s.states[i] === 'lost').map((x) => x.delay);
+  assert.deepEqual(delays, RECONNECT_DELAYS);
+  assert.equal(s.client.state, 'error');
+  assert.equal(s.infos.at(-1).message, 'Mất kết nối với bộ OBD. Hãy bấm kết nối lại.');
+  assert.equal(s.elm.connects, 1 + RECONNECT_DELAYS.length);
+  const n = s.elm.connects;
+  await s.clock.advance(120000);
+  assert.equal(s.elm.connects, n, 'đã bỏ cuộc thì không kết nối lại nữa');
+});
+
+test('mất kết nối thỉnh thoảng mà kết nối lại được (đang lái, hoặc đỗ xe tắt máy): không bỏ cuộc, lần nào cũng chờ 2 giây', async () => {
+  // Đang lái: mất kết nối mỗi 20 giây, mỗi lần nối lại đều đọc được xe.
+  const drive = setup();
+  drive.client.start();
+  await drive.clock.advance(8000);
+  for (let k = 0; k < 8; k++) {
+    drive.elm.drop();
+    await drive.clock.advance(20000);
+    assert.equal(drive.client.state, 'ready', `lần mất kết nối thứ ${k + 1}`);
+  }
+  const driveDelays = drive.infos.filter((_, i) => drive.states[i] === 'lost').map((x) => x.delay);
+  assert.deepEqual(driveDelays, Array(8).fill(RECONNECT_DELAYS[0]));
+  assert.equal(drive.snap.speed, 60);
+
+  // Đỗ xe tắt khoá điện ('nocar'): mất kết nối mỗi 3 phút; xe không trả lời nhưng kết nối đứng được lâu.
+  const parked = setup();
+  parked.elm.carOff = true;
+  parked.client.start();
+  await parked.clock.advance(12000);
+  for (let k = 0; k < 8; k++) {
+    await parked.clock.advance(180000);
+    parked.elm.drop();
+  }
+  await parked.clock.advance(15000);
+  assert.equal(parked.client.state, 'nocar');
+  const parkedDelays = parked.infos.filter((_, i) => parked.states[i] === 'lost').map((x) => x.delay);
+  assert.deepEqual(parkedDelays, Array(8).fill(RECONNECT_DELAYS[0]));
+  parked.elm.carOff = false;
+  await parked.clock.advance(30000);
+  assert.equal(parked.client.state, 'ready', 'bật khoá điện thì đọc được xe');
+  assert.equal(parked.snap.speed, 60);
 });
 
 test('không kết nối được ngay lần đầu thì báo lỗi luôn', async () => {
@@ -1059,35 +1170,72 @@ function maxBusPerSecond(commands) {
 }
 
 test('một loạt ngắn 3 lỗi CAN ERROR khi đang chạy: vẫn ở ready, gửi lại ATSP0 rồi 0100 ngay, có số mới sau vài giây', async () => {
+  // Lỗi đường truyền đếm chung với NO DATA: thứ tự nào của ba câu trả lời không có dữ liệu (có ít nhất một lỗi đường
+  // truyền) cũng phải được xử lý như nhau, kể cả khi câu thứ ba là NO DATA.
+  for (const burst of [
+    ['CAN ERROR', 'CAN ERROR', 'CAN ERROR'],
+    ['NO DATA', 'CAN ERROR', 'CAN ERROR'],
+    ['CAN ERROR', 'NO DATA', 'CAN ERROR'],
+    ['CAN ERROR', 'CAN ERROR', 'NO DATA'],
+    ['CAN ERROR', 'NO DATA', 'NO DATA'],
+  ]) {
+    const label = burst.join(', ');
+    const s = setup();
+    const seen = [];
+    s.client.onData((snap) => seen.push({ at: s.clock.t, ...snap }));
+    s.client.start();
+    await s.clock.advance(8000);
+    assert.equal(s.client.state, 'ready');
+    const nStates = s.states.length;
+    const from = s.elm.commands.length;
+    const t0 = s.clock.t;
+    let errors = 0;
+    s.elm.override = (cmd) => (/^01/.test(cmd) && errors < 3 ? { lines: [burst[errors++]] } : null);
+    s.elm.speed = 37;
+    await s.clock.advance(8000);
+    assert.equal(errors, 3, label);
+    // main.js báo "Đã kết nối với xe." mỗi lần vào 'ready', và "xe chưa trả lời" khi ở 'nocar'.
+    assert.deepEqual(s.states.slice(nStates), [], `${label}: không được đổi trạng thái vì một lúc nhiễu ngắn`);
+    const after = s.elm.commands.slice(from);
+    const thirdError = after.filter((c) => /^01/.test(c.cmd))[2];
+    const k = after.findIndex((c) => c.cmd === 'ATSP0');
+    assert.ok(k > 0, `${label}: phải gửi lại ATSP0`);
+    assert.equal(after[k + 1].cmd, '0100', label);
+    assert.ok(after[k].t > thirdError.t && after[k].t - thirdError.t < 1000, `${label}: gửi lại ngay, không chờ 8 giây`);
+    assert.equal(s.snap.speed, 37, label);
+    assert.ok(s.clock.t - s.snap.speedTime < 1000, `${label}: tốc độ đã được đọc lại`);
+    for (const x of seen.filter((x) => x.at >= t0)) {
+      assert.ok(x.rpm == null || x.at - x.rpmTime <= 5000, `${label}: vòng tua cũ trong lúc dò lại giao thức`);
+      assert.ok(x.speed == null || x.at - x.speedTime <= 5000, `${label}: tốc độ cũ trong lúc dò lại giao thức`);
+    }
+    assert.ok(maxBusPerSecond(s.elm.commands) <= 6);
+    assertSafeWrites(s.elm.writes);
+  }
+});
+
+test('hai lỗi CAN ERROR rồi tắt máy (NO DATA): gửi lại ATSP0 rồi 0100 ngay, xe không trả lời thì sang nocar và nhắc bật khoá điện', async () => {
   const s = setup();
-  const seen = [];
-  s.client.onData((snap) => seen.push({ at: s.clock.t, ...snap }));
   s.client.start();
   await s.clock.advance(8000);
   assert.equal(s.client.state, 'ready');
-  const nStates = s.states.length;
   const from = s.elm.commands.length;
-  const t0 = s.clock.t;
   let errors = 0;
-  s.elm.override = (cmd) => (/^01/.test(cmd) && errors < 3 ? (errors++, { lines: ['CAN ERROR'] }) : null);
-  s.elm.speed = 37;
-  await s.clock.advance(8000);
-  assert.equal(errors, 3);
-  // main.js báo "Đã kết nối với xe." mỗi lần vào 'ready', và "xe chưa trả lời" khi ở 'nocar'.
-  assert.deepEqual(s.states.slice(nStates), [], 'không được đổi trạng thái vì một lúc nhiễu ngắn');
-  const after = s.elm.commands.slice(from);
-  const thirdError = after.filter((c) => /^01/.test(c.cmd))[2];
-  const k = after.findIndex((c) => c.cmd === 'ATSP0');
-  assert.ok(k > 0, 'phải gửi lại ATSP0');
-  assert.equal(after[k + 1].cmd, '0100');
-  assert.ok(after[k].t > thirdError.t && after[k].t - thirdError.t < 1000, 'gửi lại ngay, không chờ 8 giây');
-  assert.equal(s.snap.speed, 37);
-  assert.ok(s.clock.t - s.snap.speedTime < 1000, 'tốc độ đã được đọc lại');
-  for (const x of seen.filter((x) => x.at >= t0)) {
-    assert.ok(x.rpm == null || x.at - x.rpmTime <= 5000, 'vòng tua cũ trong lúc dò lại giao thức');
-    assert.ok(x.speed == null || x.at - x.speedTime <= 5000, 'tốc độ cũ trong lúc dò lại giao thức');
-  }
-  assert.ok(maxBusPerSecond(s.elm.commands) <= 6);
+  s.elm.override = (cmd) => {
+    if (!/^01/.test(cmd) || errors >= 2) return null;
+    if (++errors === 2) s.elm.carOff = true; // sau lỗi thứ hai thì xe tắt máy: mọi câu hỏi sau là NO DATA
+    return { lines: ['CAN ERROR'] };
+  };
+  await s.clock.advance(10000);
+  const after = s.cmds().slice(from);
+  assert.deepEqual(after.slice(0, 3).map((c) => /^01/.test(c)), [true, true, true]);
+  assert.equal(after[3], 'ATSP0', 'câu thứ ba (NO DATA) đi sau hai lỗi đường truyền: phải gửi lại ATSP0 ngay');
+  assert.equal(after[4], '0100');
+  assert.equal(s.client.state, 'nocar');
+  assert.equal(s.infos.at(-1).reason, 'unable');
+  assert.equal(
+    describeCarState(s.client.state, s.infos.at(-1), { name: s.client.name }),
+    'Đã kết nối bộ OBD nhưng xe chưa trả lời. Hãy bật khoá điện hoặc nổ máy.'
+  );
   assertSafeWrites(s.elm.writes);
 });
 
@@ -1140,6 +1288,43 @@ test('câu trạng thái: xe báo lỗi đường truyền khi máy đang chạy
   assert.notEqual(off.infos.at(-1).reason, 'error');
   assert.equal(describeCarState(off.client.state, off.infos.at(-1), { name: off.client.name }), noAnswer);
   assertSafeWrites(s.elm.writes);
+});
+
+test('đang nocar vì xe chưa trả lời (UNABLE TO CONNECT, NO DATA), sau đó 0100 báo CAN ERROR: câu trạng thái chuyển sang lỗi đường truyền', async () => {
+  const noAnswer = 'Đã kết nối bộ OBD nhưng xe chưa trả lời. Hãy bật khoá điện hoặc nổ máy.';
+  const text = (s) => describeCarState(s.client.state, s.infos.at(-1), { name: s.client.name });
+  // A. Kết nối lúc chưa bật khoá điện ('unable'), rồi bật khoá điện mà bus báo lỗi.
+  // B. Đang đọc thì tắt máy ('nodata'), rồi bus báo lỗi.
+  for (const start of ['unable', 'nodata']) {
+    const s = setup();
+    if (start === 'unable') s.elm.carOff = true;
+    s.client.start();
+    await s.clock.advance(8000);
+    if (start === 'nodata') {
+      assert.equal(s.client.state, 'ready');
+      s.elm.carOff = true;
+      await s.clock.advance(3000);
+    }
+    assert.equal(s.client.state, 'nocar', start);
+    assert.equal(s.infos.at(-1).reason, start);
+    assert.equal(text(s), noAnswer, start);
+    const n = s.states.length;
+    s.elm.carOff = false;
+    s.elm.override = (cmd) => (/^01/.test(cmd) ? { lines: ['CAN ERROR'] } : null);
+    await s.clock.advance(30000);
+    assert.equal(s.client.state, 'nocar', start);
+    assert.equal(s.infos.at(-1).reason, 'error', `${start}: lý do không được cập nhật`);
+    assert.match(text(s), /lỗi đường truyền/, start);
+    assert.deepEqual(s.states.slice(n), ['nocar'], `${start}: chỉ báo lại 'nocar' một lần khi lý do đổi`);
+    assert.ok(s.cmds().slice(-4).includes('ATSP0'), `${start}: vẫn gửi lại ATSP0 trước 0100`);
+
+    s.elm.override = null;
+    s.elm.speed = 51;
+    await s.clock.advance(20000);
+    assert.equal(s.client.state, 'ready', start);
+    assert.equal(s.snap.speed, 51, start);
+    assertSafeWrites(s.elm.writes);
+  }
 });
 
 test('câu trạng thái các bước kết nối giữ nguyên như trước', () => {

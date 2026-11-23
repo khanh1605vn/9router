@@ -21,8 +21,14 @@ const MAX_CELLS = 16;
 // Bản ghi cũ hơn vẫn dùng tạm được nhưng sẽ được tải lại. 3: đường có thêm chiều một chiều riêng của xe máy (om).
 const CACHE_VERSION = 3;
 // matchWay: đường thuộc hành lang vừa dựng được cộng chừng này (m) vào điểm, để một lần định vị lệch không làm
-// nhảy sang đường song song. Phải nhỏ hơn khoảng cách thường gặp giữa hai đường song song (đường trên cao và
-// đường bên dưới, đường song hành), nếu không xe đã thật sự sang đường kia mà vẫn bị giữ ở đường cũ.
+// nhảy sang đường song song. 8 m xấp xỉ bằng, có chỗ còn lớn hơn, khoảng cách thật giữa hai đường song song cùng
+// chiều (đường hầm và đường bên trên, đường trên cao và đường bên dưới, đường chính và đường song hành: khoảng
+// 6,5–10 m trong dữ liệu Hà Nội và TP.HCM đã lưu). Đây là lựa chọn có chủ ý: sau một đợt định vị lệch, hành lang đôi
+// khi bị giữ ở nhầm đường song song, kể cả khi các lần định vị sau đã nằm đúng trên đường kia, nên có thể bỏ sót
+// biển của đường kia. Đổi lại, số câu đọc biển của đường xe không đi giảm khoảng một nửa. Các cách khác (cộng ít điểm
+// hơn, giới hạn mức cộng theo khoảng cách giữa hai đường, thôi ưu tiên khi đường gần nhất khác đường cũ vài lần liên
+// tiếp) đã được thử bằng vết GPS mô phỏng trên dữ liệu đường đã lưu, và đều kém hơn khi tính gộp biển bỏ sót với câu
+// đọc nhầm đường.
 const PREFER_BONUS = 8;
 
 const DRIVABLE =
@@ -431,7 +437,13 @@ const IDB_CACHE = { get: dbGet, put: dbPut };
 /** Bản ghi (hoặc ô trong bộ nhớ) đúng phiên bản và chưa quá 7 ngày. */
 const isFresh = (rec) => rec.v === CACHE_VERSION && Date.now() - rec.t < TTL;
 
+/** Thứ tự ô khi tra cứu: ô đúng phiên bản bộ đệm trước, rồi tới ô tải gần đây hơn (cùng mức thì giữ thứ tự cũ). */
+const fresher = (a, b) => (a.v === CACHE_VERSION ? 0 : 1) - (b.v === CACHE_VERSION ? 0 : 1) || b.t - a.t;
+
 export class RoadData {
+  // Các ô quanh từng ô (khoá ô → các ô đã xếp theo fresher); tính lại mỗi khi dữ liệu các ô thay đổi.
+  #near = new Map();
+
   /**
    * @param fetchImpl  thay cho fetch (kiểm thử)
    * @param cache      { get(key) → Promise<bản ghi|null>, put(bản ghi) } thay cho IndexedDB (kiểm thử)
@@ -483,6 +495,7 @@ export class RoadData {
       this.cells.delete(oldest[0]);
       this.cacheChecked.delete(oldest[0]); // quay lại ô này thì đọc bộ đệm trước
     }
+    this.#near.clear();
   }
 
   async #readCache(key) {
@@ -616,15 +629,26 @@ export class RoadData {
     }
   }
 
+  /**
+   * Ô chứa vị trí và 8 ô quanh nó, ô mới hơn đứng trước (fresher). Một đường cắt qua mép ô có mặt trong mọi ô nó
+   * chạm tới, mỗi bản đủ cả hình học (Overpass in toàn bộ đường dù có khung [bbox]), nhưng các ô được tải vào
+   * những lúc khác nhau: bản ở ô tải sau có thể có thêm thẻ (om của bản ghi phiên bản 3) hay thêm đỉnh (dữ liệu OSM
+   * đã sửa). Ô mới hơn đứng trước để các phép tra cứu lấy bản đầu tiên gặp được là bản mới nhất.
+   */
   #neighbours(coord) {
     const [cx, cy] = cellOf(coord);
-    const out = [];
+    const key = cellKey(cx, cy);
+    let out = this.#near.get(key);
+    if (out) return out;
+    out = [];
     for (let dx = -1; dx <= 1; dx++) {
       for (let dy = -1; dy <= 1; dy++) {
         const cell = this.cells.get(cellKey(cx + dx, cy + dy));
         if (cell) out.push(cell);
       }
     }
+    out.sort(fresher);
+    this.#near.set(key, out);
     return out;
   }
 
@@ -657,11 +681,15 @@ export class RoadData {
 
   /**
    * Các đường có một đỉnh trùng đúng toạ độ này: [{ way, i }] với i là chỉ số điểm (chỉ số trong g chia 2).
-   * Một đường có mặt ở nhiều ô chỉ được trả về một lần; riêng đường khép kín (vòng xuyến vẽ thành một vòng)
-   * có điểm đầu trùng điểm cuối thì trả về cả hai chỉ số để bên gọi biết có thể đi theo cả hai phía.
+   * Một đường có mặt ở nhiều ô chỉ lấy một bản: bản của ô mới nhất có đỉnh này, kèm mọi chỉ số đỉnh này có trong
+   * chính bản đó. Không trộn hai bản: hai bản tải vào hai lúc có thể lệch chỉ số đỉnh (OSM đã thêm một nút vào
+   * đường), trộn lại thì một đỉnh giữa phố bị đếm thành nút giao bốn nhánh. Đường khép kín (vòng xuyến vẽ thành
+   * một vòng) có điểm đầu trùng điểm cuối, hay đường hình chữ P có điểm cuối trùng một đỉnh giữa, thì trả về cả
+   * hai chỉ số để bên gọi biết có thể đi theo cả hai phía.
    */
   waysAtVertex(coord) {
     const key = vertexKey(coord);
+    const owner = new Map(); // id đường → ô có bản được dùng
     const seen = new Set();
     const out = [];
     for (const cell of this.#neighbours(coord)) {
@@ -669,6 +697,9 @@ export class RoadData {
       if (!list) continue;
       for (let k = 0; k < list.length; k += 2) {
         const way = cell.ways[list[k]];
+        const from = owner.get(way.id);
+        if (from && from !== cell) continue; // bản cũ hơn ở ô khác
+        owner.set(way.id, cell);
         const i = list[k + 1];
         const id = `${way.id}:${i}`;
         if (seen.has(id)) continue;
@@ -740,11 +771,12 @@ export class RoadData {
    * @param hintName  tên đường đang đi theo chỉ dẫn (được ưu tiên)
    * @param opts      { vehicle: 'car'|'moto' (chiều một chiều theo loại xe, mặc định ô tô),
    *                    prefer: tập id đường được ưu tiên (có .has), only: chỉ xét các id đường này (có .has),
+   *                    skip: bỏ qua các id đường này (có .has),
    *                    heading, within, among: khi xe đi quá chậm để tự lọc theo hướng, bỏ các đoạn của các đường
    *                    among (có .has; mặc định mọi đường) lệch quá within độ so với hướng heading (theo chiều
    *                    được đi). Chỉ để loại đường, không suy ra dir. }
    */
-  matchWay(fix, hintName = '', { vehicle = 'car', prefer = null, only = null, heading = null, within = 180, among = null } = {}) {
+  matchWay(fix, hintName = '', { vehicle = 'car', prefer = null, only = null, heading = null, within = 180, among = null, skip = null } = {}) {
     const { coord } = fix;
     const moving = fix.heading != null && (fix.speed || 0) > 2.5;
     const loose = !moving && Number.isFinite(heading);
@@ -752,6 +784,10 @@ export class RoadData {
     const gx = Math.floor(coord[0] / GRID);
     const gy = Math.floor(coord[1] / GRID);
     let best = null;
+    // Một đường có mặt ở nhiều ô: chỉ xét bản của ô mới nhất có đoạn khớp được ở đây (các ô xếp mới trước), để
+    // bản cũ (thiếu om, thiếu đỉnh mới) không thắng nhờ bằng điểm hay hơn kém vài phân. Bản mới không có đoạn nào
+    // khớp được ở đây thì bản cũ vẫn dùng được, nên không đường nào bị mất.
+    const owner = new Map();
 
     for (const cell of this.#neighbours(coord)) {
       for (let x = gx - 1; x <= gx + 1; x++) {
@@ -761,6 +797,7 @@ export class RoadData {
           for (let b = 0; b < bucket.length; b += 2) {
             const way = cell.ways[bucket[b]];
             if (only && !only.has(way.id)) continue;
+            if (skip && skip.has(way.id)) continue;
             const i = bucket[b + 1];
             const a = [way.g[i], way.g[i + 1]];
             const c = [way.g[i + 2], way.g[i + 3]];
@@ -783,6 +820,9 @@ export class RoadData {
               const diff = o === -1 ? 180 - raw : o === 0 ? Math.min(raw, 180 - raw) : raw;
               if (diff > within) continue;
             }
+            const from = owner.get(way.id);
+            if (from && from !== cell) continue;
+            owner.set(way.id, cell);
             if (hintName && way.n === hintName) score -= 15;
             if (prefer && prefer.has(way.id)) score -= PREFER_BONUS;
             if (!best || score < best.score) {

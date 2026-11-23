@@ -656,3 +656,76 @@ test('matchWay đi chậm: heading/within bỏ các đường lệch hướng (t
   const moving = roads.matchWay({ ...fix, speed: 10, heading: 0 }, '', { heading: 90, within: 60 });
   assert.deepEqual([moving.way.id, moving.dir], [1, 1]);
 });
+
+// ---- Một đường cắt qua mép ô: mỗi ô giữ một bản đủ hình học, các ô được tải vào những lúc khác nhau ----
+
+const [EX, EY] = cellOf(START);
+const EDGE = [EX * CELL, (EY + 0.5) * CELL]; // trên mép Tây của ô chứa START
+/** Điểm cách mép ô x m về phía Đông (x < 0: phía Tây, sang ô bên cạnh). */
+const fromEdge = (x) => destination(EDGE, x >= 0 ? 90 : 270, Math.abs(x));
+const HOME_KEY = cellKey(EX, EY);
+const HOUR = 3600e3;
+
+test('đường có bản cũ ở ô phía Tây hoặc phía Nam (bản ghi phiên bản 2, thiếu om): waysAtVertex và matchWay dùng bản của ô phiên bản hiện tại', () => {
+  // Phố 2 vẽ từ ô phía Tây sang Đông tới J: một chiều với ô tô, xe máy đi hai chiều. Phố 1 từ J lên phía Bắc.
+  const J = fromEdge(300);
+  const pts2 = [-200, -100, 0, 100, 200, 300].map(fromEdge);
+  const fresh2 = way(2, pts2, { o: 1, om: 0 });
+  const { om, ...stale2 } = fresh2; // bản ghi phiên bản 2 của cùng phản hồi: chưa có om
+  assert.equal(om, 0);
+  const roads1 = [way(1, [J, destination(J, 0, 400)])];
+  for (const [dx, dy] of [[-1, 0], [0, -1]]) {
+    const roads = new RoadData();
+    roads.setCell(HOME_KEY, { ways: [...roads1, fresh2], points: [], v: VERSION, t: Date.now() - 2 * HOUR });
+    // Ô bên cạnh tải lại sau nhưng vẫn là bản ghi kiểu cũ: phiên bản đứng trước thời điểm tải.
+    roads.setCell(cellKey(EX + dx, EY + dy), { ways: [stale2], points: [], v: 2, t: Date.now() - HOUR });
+    const msg = `ô cũ ở (${dx}, ${dy})`;
+    const atJ = roads.waysAtVertex(J).map((e) => [e.way.id, e.way.om ?? null]).sort((a, b) => a[0] - b[0]);
+    assert.deepEqual(atJ, [[1, null], [2, 0]], msg);
+    const on2 = fromEdge(150);
+    const still = roads.matchWay({ coord: on2, speed: 0, heading: null, accuracy: 5 }, '', { vehicle: 'moto' });
+    assert.equal(still.way, fresh2, `${msg}: đứng yên, hai bản bằng điểm`);
+    assert.equal(onewayFor(still.way, 'moto'), 0);
+    const west = roads.matchWay({ coord: on2, speed: 6, heading: 270, accuracy: 5 }, '', { vehicle: 'moto' });
+    assert.equal(west.way, fresh2, `${msg}: xe máy đi ngược chiều vẽ`);
+    assert.equal(west.dir, -1);
+  }
+});
+
+test('hai bản của một đường lệch chỉ số đỉnh (OSM thêm một nút vào đường giữa hai lần tải ô): mỗi đỉnh chỉ trả về một bản, chỉ số theo bản mới', () => {
+  const xs = [];
+  for (let x = -300; x <= 500; x += 20) xs.push(x);
+  const newer = way(7, [...xs.filter((x) => x < 230), 230, ...xs.filter((x) => x > 230)].map(fromEdge));
+  const older = way(7, xs.map(fromEdge));
+  const roads = new RoadData();
+  roads.setCell(HOME_KEY, { ways: [newer], points: [], v: VERSION, t: Date.now() });
+  roads.setCell(cellKey(EX - 1, EY), { ways: [older], points: [], v: VERSION, t: Date.now() - 5 * 24 * HOUR });
+  const at = (x) => roads.waysAtVertex(fromEdge(x)).map((e) => [e.way === newer ? 'mới' : 'cũ', e.i]);
+  assert.deepEqual(at(260), [['mới', 29]], 'đỉnh giữa phố sau nút mới thêm');
+  assert.deepEqual(at(-100), [['mới', 10]], 'đỉnh nằm trong ô phía Tây');
+  assert.deepEqual(at(230), [['mới', 27]], 'nút mới thêm');
+  // Đi trên đường vẫn khớp bản mới, kể cả ở ô phía Tây.
+  assert.equal(roads.matchWay({ coord: fromEdge(-150), speed: 10, heading: 90, accuracy: 5 }).way, newer);
+});
+
+test('đường hình chữ P (điểm cuối trùng một đỉnh giữa) có mặt ở hai ô: chỗ nối vẫn trả về hai chỉ số của cùng một bản', () => {
+  const neck = fromEdge(100);
+  const stem = [-200, -100, 0].map(fromEdge);
+  const loop = [neck, destination(neck, 0, 80), destination(destination(neck, 0, 80), 90, 80), destination(neck, 90, 80), neck];
+  const p = way(1, [...stem, ...loop]);
+  const roads = new RoadData();
+  roads.setCell(HOME_KEY, { ways: [p], points: [], v: VERSION, t: Date.now() });
+  roads.setCell(cellKey(EX - 1, EY), { ways: [{ ...p }], points: [], v: VERSION, t: Date.now() - HOUR });
+  assert.deepEqual(roads.waysAtVertex(neck).map((e) => [e.way === p, e.i]), [[true, 3], [true, 7]]);
+});
+
+test('đường dài qua bốn ô tải vào bốn lúc khác nhau: vẫn khớp được ở cả hai đầu', () => {
+  const pts = [];
+  for (let x = 100; x <= 3.4 * CELL * 111000 * Math.cos((EDGE[1] * Math.PI) / 180); x += 50) pts.push(fromEdge(x));
+  const roads = new RoadData();
+  for (let k = 0; k < 4; k++) roads.setCell(cellKey(EX + k, EY), { ways: [way(9, pts)], points: [], v: VERSION, t: Date.now() - (4 - k) * HOUR });
+  for (const p of [pts[2], pts[pts.length - 3]]) {
+    const m = roads.matchWay({ coord: p, speed: 10, heading: 90, accuracy: 5 });
+    assert.equal(m?.way.id, 9);
+  }
+});

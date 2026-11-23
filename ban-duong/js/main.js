@@ -344,6 +344,26 @@ function renderSpeed(fix, sp) {
   sign.classList.toggle('custom', sp.source === 'custom');
 }
 
+// Đang lái mà chừng này (ms) không có lần định vị mới, cũng không có tốc độ mới từ xe, thì đồng hồ thôi hiện số cũ.
+// Bằng thời hạn bộ OBD giữ số tốc độ; dài hơn khoảng cách thường gặp giữa hai lần định vị dưới cầu vượt, giữa nhà cao.
+const SPEED_STALE_MS = 5000;
+
+/**
+ * Mất GPS (trong hầm…) mà xe cũng không còn báo tốc độ (lỗi đường truyền, tắt "Dùng tốc độ từ xe", mất kết nối):
+ * đồng hồ hiện "–" và bỏ màu "gần/quá tốc độ", không giữ mãi con số và màu đỏ đã cũ. Đồng hồ và biển giới hạn vẫn ở
+ * chỗ cũ để bố cục không xê dịch. Lần định vị mới (onFix) hoặc tốc độ mới của xe (onCarData) hiện lại số.
+ */
+function markSpeedStale() {
+  if (!isDriving() || $('speedo').hidden || !state.fix || state.fix.simulated) return;
+  const now = Date.now();
+  if (now - state.lastFixAt <= SPEED_STALE_MS) return;
+  const snap = car.snap;
+  const carFresh = store.settings.obdUseSpeed && carReady() && snap?.speed != null && now - snap.speedTime < SPEED_STALE_MS;
+  if (carFresh) return;
+  $('speedValue').textContent = '–';
+  $('speedBox').classList.remove('near', 'over');
+}
+
 /** Âm báo và lời nhắc về tốc độ (dùng cho cả định vị GPS lẫn tốc độ từ xe khi mất GPS). */
 function speakSpeed(sp) {
   if (sp.sound === 'voice') {
@@ -1622,6 +1642,7 @@ async function boot() {
   });
   locator.start();
   reopenCar();
+  setInterval(markSpeedStale, 1000);
 
   setInterval(() => {
     applyTheme();

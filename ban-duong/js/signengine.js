@@ -32,6 +32,9 @@ const MIN_SPEAK_SPEED = 1.5; // dưới tốc độ này (m/s) không đọc câ
 const SAME_KIND_GAP = 80; // biển cùng loại sát biển vừa đọc (đèn ở hai phía giao lộ…) thì không đọc lại (m)
 const CURVE_ALIAS = 60; // chỗ ngoặt lệch vị trí trong khoảng này vẫn coi là một (m)
 const HOLD_MS = 5000; // mất khớp đường một lúc thì vẫn giữ thanh cảnh báo chừng này
+// Đứng chờ trước mục đang hiện (đèn đỏ): vị trí trôi trong chừng này (m, hoặc trong sai số định vị nếu lớn hơn)
+// quanh chỗ mục hiện lần cuối thì vẫn giữ mục đó, dù sai số đẩy vị trí qua khỏi mục.
+const WAIT_RADIUS = 10;
 const JUNCTION_SCAN = 150; // tìm nút giao gần biển dừng/nhường đường trong khoảng này (m)
 const MEMO_REFRESH = 60e3; // tính lại kết quả tra cứu phụ thuộc ô bên cạnh mỗi phút (ms)
 const JUNCTION_NEAR = 40; // mục cách nút giao không quá chừng này (m) được coi là thuộc nút giao đó
@@ -53,6 +56,12 @@ const DIR_CHECK_SPEED = 1;
 const DIR_CHECK_MOVE = 10; // xe dịch ít nhất chừng này (m, và 1,5 lần sai số) thì so hướng dịch chuyển với chiều đi đã nhớ
 const DIR_AGREE = 60; // lệch không quá chừng này (độ): xe vẫn đi theo chiều đã nhớ, đường vẫn hợp hướng đi
 const DIR_FAR = LENGTH; // xe đã ra ngoài hành lang dựng lúc xác nhận chiều đi lần cuối (vị trí nhảy xa): không dùng nữa
+// Đi chậm (DIR_CHECK_SPEED…MOVING_SPEED) trên đường chưa nhớ chiều đi (Track.slowDir): hướng GPS lệch đoạn khớp không
+// quá SLOW_AGREE độ ở SLOW_NEED lần định vị liên tiếp thì lấy làm chiều đi, trừ khi có đường khác cùng hướng trong
+// TWIN_NEAR m quanh chỗ khớp (đường song song, nhánh rẽ chưa tách xa: hướng GPS không phân biệt được).
+const SLOW_AGREE = 30;
+const SLOW_NEED = 2;
+const TWIN_NEAR = 20;
 
 // Cong: lấy mẫu mỗi 10 m, tổng góc đổi hướng ≥ 55°, bán kính ≤ 120 m. Cửa sổ phải đủ dài để cung bán kính
 // 120 m quay đủ 55° (14 mẫu, cung đo được tối đa 130 m); cửa sổ ngắn hơn bỏ sót các cua rộng khi chạy nhanh.
@@ -253,6 +262,7 @@ class Track {
     this.seenCoord = null; // vị trí lúc đó
     // { ids, coord, count }: một con đường không nối với hành lang cũ (các đoạn ids) đang thắng mấy lần liên tiếp
     this.pending = null;
+    this.slow = null; // { id, dir, time, count }: đi chậm, hướng GPS hợp với chiều dir trên đường id mấy lần liên tiếp
   }
 
   /** Các đường được ưu tiên khi khớp vị trí (Map có .has), hoặc null. */
@@ -325,6 +335,36 @@ class Track {
     }
     return dir;
   }
+
+  /**
+   * Chiều đi trên đường vừa khớp m khi xe đi chậm (DIR_CHECK_SPEED…MOVING_SPEED) mà chưa biết chiều đi trên đường đó
+   * (hành lang trước dừng ở nút giao chưa rõ hướng, hoặc đã rẽ chậm sang đường khác), hoặc 0. Lấy theo hướng GPS khi
+   * hướng đó lệch đoạn khớp không quá SLOW_AGREE độ, theo chiều được đi với loại xe này (không bao giờ ngược đường
+   * một chiều), ở SLOW_NEED lần định vị liên tiếp trên cùng đường. Có đường khác cùng hướng trong TWIN_NEAR m quanh
+   * chỗ khớp thì không lấy: ở tốc độ này vị trí và hướng GPS không phân biệt được hai đường song song.
+   */
+  slowDir(m, fix, roads, vehicle, time) {
+    const speed = fix.speed || 0;
+    if (!(speed >= DIR_CHECK_SPEED && speed <= MOVING_SPEED) || !Number.isFinite(fix.heading)) {
+      this.slow = null;
+      return 0;
+    }
+    const raw = Math.abs(angleDiff(segmentBearing(m, 1), fix.heading));
+    let dir = raw <= SLOW_AGREE ? 1 : raw >= 180 - SLOW_AGREE ? -1 : 0;
+    const o = onewayFor(m.way, vehicle);
+    if (o !== 0 && dir !== o) dir = 0;
+    const prev = this.slow;
+    const count = dir && prev && prev.id === m.way.id && prev.dir === dir && time - prev.time <= 3000 ? prev.count + 1 : 1;
+    this.slow = dir ? { id: m.way.id, dir, time, count } : null;
+    if (!dir || count < SLOW_NEED) return 0;
+    const twin = roads.matchWay({ coord: m.point, speed: 0, heading: null, accuracy: TWIN_NEAR }, '', {
+      vehicle,
+      heading: fix.heading,
+      within: SLOW_AGREE,
+      skip: new Set([m.way.id]),
+    });
+    return twin && twin.dist <= TWIN_NEAR ? 0 : dir;
+  }
 }
 
 /**
@@ -392,10 +432,11 @@ function linked(roads, m, ids, radius, hops = 1, avoid = null) {
  * đường không nối với chúng khi cùng một con đường (các đoạn nối liền nhau) thắng SWITCH_FIXES lần liên tiếp,
  * hoặc khi không còn đường cũ nào đủ gần và đúng hướng. Đang chạy mà sang đường nối với đường cũ thì chuyển ngay.
  * Đứng yên thì không chuyển: vị trí trôi sang đường bên cạnh không có nghĩa là xe đã sang đó.
- * Đi chậm (DIR_CHECK_SPEED…MOVING_SPEED) mà có hướng GPS thì khác: hướng chưa đủ tin để biết chiều đi trên đường
- * mới, nhưng đủ để bỏ các đường cũ lệch hướng quá DIR_AGREE (xe đã rẽ, quay đầu). Lấy đường gần nhất, không cộng
- * điểm cho đường cũ: sang nhầm đường mới ở tốc độ này chỉ làm hành lang trống (chưa biết chiều đi, thanh cảnh báo
- * còn giữ vài giây), còn giữ nhầm đường cũ thì báo biển của đường xe không đi.
+ * Đi chậm (DIR_CHECK_SPEED…MOVING_SPEED) mà có hướng GPS thì khác: một lần định vị chưa đủ tin để biết chiều đi trên
+ * đường mới (Track.slowDir cần vài lần liên tiếp và không có đường song song gần), nhưng đủ để bỏ các đường cũ lệch
+ * hướng quá DIR_AGREE (xe đã rẽ, quay đầu). Lấy đường gần nhất, không cộng điểm cho đường cũ: sang nhầm đường mới ở
+ * tốc độ này thường chỉ làm hành lang trống một lúc (thanh cảnh báo còn giữ vài giây), còn giữ nhầm đường cũ thì báo
+ * biển của đường xe không đi.
  * Đã chuyển sang đường mới thì thôi ưu tiên các đường cũ (Track.leave).
  */
 function startMatch(fix, roads, track, vehicle, time) {
@@ -440,6 +481,9 @@ function freeCorridor(fix, roads, track, vehicle, time) {
   let dir = m.dir;
   // Đi chậm hoặc dừng (đèn đỏ): giữ chiều đi đã biết trên đường đó (một trong các đường của hành lang trước).
   if (!dir && track) dir = track.dirFor(m, fix, time, roads, vehicle);
+  // Đi chậm trên đường chưa biết chiều đi: theo hướng GPS nếu đủ chắc.
+  if (!dir && track) dir = track.slowDir(m, fix, roads, vehicle, time);
+  else if (track) track.slow = null;
   if (!dir) return emptyCorridor();
 
   const corr = { coords: [m.point], cum: [0], pieces: [], start: { wayId: m.way.id, dir } };
@@ -764,7 +808,9 @@ function guardsJunctionAhead(feat, piece, roads, ctx) {
   return ctx.memo.guard(`${feat.id}|${way.id}|${piece.dir}`, () => {
     let f = null;
     if (feat.onWay) {
-      const hit = roads.waysAtVertex(feat.coord).find((e) => e.way.id === way.id);
+      // Đúng bản đường đang đi (cùng đối tượng): bản của ô khác có thể lệch chỉ số đỉnh, lấy f từ bản đó rồi đi
+      // trên bản này là sai chỗ. Không thấy thì chiếu nút lên chính bản này.
+      const hit = roads.waysAtVertex(feat.coord).find((e) => e.way === way);
       if (hit) f = hit.i;
     }
     if (f == null) {
@@ -1268,6 +1314,8 @@ export class SignEngine {
     this.lastFix = null; // thời điểm lần định vị trước (ms)
     this.track = new Track(); // các đường và chiều đi của hành lang vừa dựng
     this.last = null; // kết quả gần nhất, giữ tạm khi mất khớp đường
+    this.stay = null; // mục vừa hiện trên thanh cảnh báo, giữ lại khi đứng chờ ngay trước nó (#waiting)
+    this.approached = new Set(); // khoá các mục xe đã tiến lại gần mà chưa đi qua (#waiting)
     this.memo = new Memo();
     this.memoTime = -Infinity;
   }
@@ -1279,6 +1327,8 @@ export class SignEngine {
     this.lastFix = null;
     this.track.clear();
     this.last = null;
+    this.stay = null;
+    this.approached.clear();
   }
 
   /**
@@ -1382,6 +1432,7 @@ export class SignEngine {
         break;
       }
     }
+    active = this.#waiting(active, items, corr, fix, speed, time);
 
     const upcoming = [];
     const dups = new Set();
@@ -1448,8 +1499,55 @@ export class SignEngine {
     for (const [key, e] of this.seen) if (distance(coord, e.coord) > FORGET) this.seen.delete(key);
   }
 
+  /**
+   * Đứng chờ ngay trước mục đang hiện (đèn đỏ, biển dừng): lúc đứng yên, sai số định vị có thể đẩy vị trí qua khỏi
+   * mục vài mét, mục rơi ra sau lưng và thanh cảnh báo chớp tắt. Mục vừa hiện mà nay không còn phía trước thì vẫn
+   * giữ, khoảng cách không âm và chỉ giảm theo tốc độ đo được, khi:
+   * - xe đã thấy mục ở phía trước xa hơn bán kính sai số (đã tiến lại gần nó) và từ đó chưa lần nào chạy từ
+   *   MIN_SPEAK_SPEED trở lên mà mục không còn phía trước (chưa thật sự đi qua nó);
+   * - lần định vị này dưới MIN_SPEAK_SPEED, còn trong WAIT_RADIUS (hoặc sai số định vị nếu lớn hơn) quanh chỗ mục
+   *   hiện lần cuối;
+   * - mục vẫn nằm sát đầu hành lang, theo cùng chiều đi (không phải mục của đường vừa rẽ khỏi).
+   * Giá phải trả: xe dừng ngay sau mục (đã qua đèn vài mét) đôi khi vẫn thấy mục đó lâu hơn một chút.
+   * Trả về mục cần hiện.
+   */
+  #waiting(active, items, corr, fix, speed, time) {
+    const radius = Math.max(WAIT_RADIUS, fix.accuracy || 0);
+    const ahead = new Set(items.map((it) => it.key));
+    for (const it of items) if (it.distance > radius) this.approached.add(it.key);
+    const st = this.stay;
+    // Chạy từ MIN_SPEAK_SPEED trở lên mà mục không còn phía trước: đã đi qua hoặc đã rẽ đi. Kẹt xe lâu (không lần
+    // nào chạy nhanh) thì chỉ giữ các mục còn phía trước và mục đang hiện, để danh sách không dài mãi.
+    if (speed >= MIN_SPEAK_SPEED || this.approached.size > 64) {
+      for (const key of this.approached) {
+        if (!ahead.has(key) && (speed >= MIN_SPEAK_SPEED || key !== st?.item.key)) this.approached.delete(key);
+      }
+    }
+    if (st && speed < MIN_SPEAK_SPEED && !ahead.has(st.item.key) && this.approached.has(st.item.key)) {
+      const loc = distance(fix.coord, st.coord) <= radius ? locate(corr, st.item.coord) : null;
+      if (
+        loc &&
+        loc.s >= -radius &&
+        loc.s <= st.distance + radius &&
+        loc.d <= OFF_WAY_LATERAL &&
+        Math.abs(angleDiff(headingAt(corr, 0), st.brg)) <= DIR_AGREE
+      ) {
+        st.distance = Math.max(0, st.distance - speed * clamp((time - st.time) / 1000, 0, 2));
+        st.time = time;
+        return { item: { ...st.item, distance: st.distance }, distance: st.distance, reach: st.reach };
+      }
+    }
+    const it = active && items.find((x) => x.key === active.item.key);
+    this.stay = it ? { item: active.item, coord: fix.coord, distance: active.distance, reach: active.reach, brg: it.brg, time } : null;
+    return active;
+  }
+
   /** Không dựng được hành lang (mất khớp đường, đi chậm…): giữ kết quả cũ thêm vài giây. */
   #hold(time, speed) {
+    if (speed >= MIN_SPEAK_SPEED) {
+      this.stay = null;
+      this.approached.clear();
+    }
     const last = this.last;
     if (!last || time - last.time > HOLD_MS || time < last.time) {
       this.last = null;

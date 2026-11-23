@@ -10,7 +10,7 @@ Thư mục này là một ứng dụng tĩnh độc lập: không cần build, k
 - **Tìm địa điểm**: gợi ý trong lúc gõ, nhập toạ độ trực tiếp, nhấn giữ trên bản đồ để chọn điểm, lưu Nhà và Cơ quan, lịch sử tìm kiếm.
 - **Tìm đường**: nhiều tuyến để chọn, cho ô tô hoặc xe máy (xe máy tránh đường cao tốc), tuỳ chọn tránh đường thu phí, ghi rõ tuyến có cao tốc, thu phí hay phà.
 - **Dẫn đường từng chặng bằng giọng nói tiếng Việt**: nhắc trước khi rẽ ở ba mốc khoảng cách, biển chỉ dẫn lớn trên màn hình, giờ đến dự kiến, tự tìm lại đường khi đi lệch.
-- **Tốc độ**: đồng hồ tốc độ, biển giới hạn tốc độ của đoạn đường đang đi, cảnh báo bằng màu, tiếng bíp và lời nói khi chạy quá; tự đặt tốc độ tối đa cho đoạn đường chưa có dữ liệu.
+- **Tốc độ**: đồng hồ tốc độ, biển giới hạn tốc độ của đoạn đường đang đi, cảnh báo bằng màu, tiếng bíp và lời nói khi chạy quá; tự đặt tốc độ tối đa cho đoạn đường chưa có dữ liệu. Đang lái mà hơn 5 giây không có vị trí GPS mới (và cũng không có tốc độ từ xe) thì đồng hồ hiện dấu “–” thay vì giữ số cũ.
 - **Báo trước biển báo phía trước** (khoảng 100–200 m): đèn tín hiệu, biển dừng, nhường đường, vòng xuyến, cấm rẽ, cấm đi ngược chiều, đổi giới hạn tốc độ, gờ giảm tốc, đường ngang đường sắt, chỗ ngoặt nguy hiểm… Hiện trên thanh vàng giống cảnh báo camera, kèm hình biển; bấm vào để xem chi tiết. Xem [cách hoạt động và giới hạn](#báo-trước-biển-báo).
 - **Cảnh báo điểm phía trước**: camera bắn tốc độ, camera đèn đỏ, camera giám sát, trạm thu phí.
 - **Kết nối với ô tô** qua bộ đọc OBD-II Bluetooth (ELM327): lấy tốc độ của xe (vẫn chạy khi mất GPS trong hầm), vòng tua, nhiệt độ nước làm mát, điện áp; nhắc khi máy quá nóng hoặc điện áp thấp; đọc mã lỗi động cơ. Xem [hướng dẫn](#kết-nối-bộ-obd).
@@ -27,7 +27,7 @@ Cần Node.js 22 trở lên.
 ```bash
 cd ban-duong
 npm start          # mở http://localhost:5173
-npm test           # 228 bài kiểm thử logic (không cần mạng)
+npm test           # 245 bài kiểm thử logic (không cần mạng)
 ```
 
 Trên máy tính không có GPS, ứng dụng lấy tâm bản đồ làm điểm xuất phát; dùng nút **Chạy thử** để xem dẫn đường hoạt động.
@@ -67,6 +67,7 @@ Giới hạn cần biết:
 
 - Ở Việt Nam, biển báo được nhập vào OpenStreetMap còn **rất ít** (một lần đếm năm 2026 chỉ thấy 119 đối tượng có thẻ biển báo trên cả nước). Phần lớn cảnh báo vì thế đến từ thông tin tương đương ở trên, không phải từ biển thật. Không có cảnh báo **không** có nghĩa là không có biển.
 - Chỗ ngoặt được tính từ hình dạng đường trên bản đồ, nên đôi khi báo cả khúc cua trong ngõ hẻm hoặc chỗ đường rẽ góc vuông. Khi lái tự do, nếu bạn rẽ ở nút giao thì những gì vừa được báo là của đường đi thẳng, và thanh vàng có thể còn hiện biển đó thêm vài giây sau khi rẽ.
+- Khi lái tự do trên hai đường song song sát nhau (đường hầm và đường bên trên, đường trên cao và đường bên dưới, đường chính và đường song hành, thường chỉ cách nhau vài mét), ứng dụng có thể bám nhầm sang đường kia một lúc, nên có thể bỏ sót biển của đường đang đi hoặc báo biển của đường kia.
 - Khi đang dẫn đường, ứng dụng không báo “cấm đi ngược chiều” cho chính tuyến đang đi; cảnh báo này chỉ có khi lái tự do.
 - Tên biển theo QCVN 41:2024/BGTVT lấy từ nguồn thứ cấp; hình biển trong ứng dụng là hình vẽ giản lược, không phải bản sao hình gốc.
 - **Luôn tuân theo biển báo và hiệu lệnh thực tế trên đường.**
@@ -91,7 +92,7 @@ Mỗi lần mở lại trang thường phải bấm kết nối lại, vì trìn
 2. Dùng Chrome 138 trở lên: **Cài đặt → Kết nối với ô tô → Bộ OBD Bluetooth thường (đã ghép đôi)** → chọn bộ đọc.
 3. Lần sau mở ứng dụng, bộ đọc này được tự kết nối lại cho tới khi bạn bấm **Ngắt kết nối**.
 
-Khi đã kết nối: đồng hồ tốc độ và cảnh báo quá tốc độ dùng tốc độ của xe (tắt được bằng **Dùng tốc độ từ xe**) và vẫn cập nhật khi mất GPS trong hầm; bảng dưới hiện vòng tua, nhiệt độ nước làm mát, điện áp; ứng dụng nhắc khi nước làm mát từ 110 °C ở hai lần đọc liên tiếp cách nhau ít nhất 10 giây (nhiệt độ được đọc mỗi 15 giây, nên thường là khoảng 15 giây sau lần đọc nóng đầu tiên), hoặc khi điện áp dưới 12 V lúc máy đang chạy (vòng tua từ 500 vòng/phút) ở các lần đọc liên tiếp kéo dài ít nhất 30 giây (điện áp được đọc mỗi 20 giây, nên thường là ở lần đọc thứ ba, khoảng 40 giây); lần đọc điện áp lúc bộ đọc lỡ mất số vòng tua không được tính. Nếu xe báo lỗi đường truyền (CAN ERROR…), ứng dụng ẩn số liệu cũ và tự dò lại giao thức của xe. Nút **Đọc mã lỗi** chỉ bấm được khi xe đứng yên; ứng dụng chỉ đọc, không bao giờ xoá mã lỗi.
+Khi đã kết nối: đồng hồ tốc độ và cảnh báo quá tốc độ dùng tốc độ của xe (tắt được bằng **Dùng tốc độ từ xe**) và vẫn cập nhật khi mất GPS trong hầm; bảng dưới hiện vòng tua, nhiệt độ nước làm mát, điện áp; ứng dụng nhắc khi nước làm mát từ 110 °C ở hai lần đọc liên tiếp cách nhau ít nhất 10 giây (nhiệt độ được đọc mỗi 15 giây, nên thường là khoảng 15 giây sau lần đọc nóng đầu tiên), hoặc khi điện áp dưới 12 V lúc máy đang chạy (vòng tua từ 500 vòng/phút) ở các lần đọc liên tiếp kéo dài ít nhất 30 giây (điện áp được đọc mỗi 20 giây, nên thường là ở lần đọc thứ ba, khoảng 40 giây); lần đọc điện áp lúc bộ đọc lỡ mất số vòng tua không được tính. Nếu xe báo lỗi đường truyền (CAN ERROR…), ứng dụng ẩn số liệu cũ và tự dò lại giao thức của xe; khi đang mất GPS (trong hầm) thì đồng hồ tốc độ hiện dấu “–” cho tới khi có lại tốc độ của xe hoặc vị trí GPS. Nút **Đọc mã lỗi** chỉ bấm được khi xe đứng yên; ứng dụng chỉ đọc, không bao giờ xoá mã lỗi.
 
 Không dùng được trên iPhone, iPad (Safari, Chrome và các trình duyệt thông thường trên iOS đều không cho trang web dùng Bluetooth), trên Firefox, hoặc khi mở trang ngay trong Zalo, Facebook (hãy mở bằng Chrome). Phần kết nối mới được kiểm thử với bộ ELM327 giả lập, chưa thử với bộ đọc và xe thật.
 

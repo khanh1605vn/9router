@@ -1,7 +1,7 @@
 // Service worker: giúp ứng dụng mở được khi mất mạng và giữ lại các ô bản đồ đã xem.
 // Đổi VERSION mỗi lần phát hành để máy người dùng nhận bản mới.
 
-const VERSION = 'v4';
+const VERSION = 'v5';
 const SHELL = `banduong-shell-${VERSION}`;
 const TILES = 'banduong-tiles-v1';
 const TILE_LIMIT = 800;

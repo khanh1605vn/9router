@@ -449,6 +449,8 @@ export const TIMING = {
   nocarRetry: 8000,
   cooldown: 2000,
   minGap: Math.ceil(1000 / 6), // tối đa 6 yêu cầu mỗi giây
+  pidRetry: 15000, // PID chưa từng trả lời mà báo NO DATA 3 lần liên tiếp: chỉ thử lại sau chừng này
+  linkStable: 60000, // kết nối đứng được chừng này thì đếm lại số lần kết nối lại từ đầu
 };
 
 /** Chờ trước mỗi lần kết nối lại; hết danh sách thì bỏ cuộc. */
@@ -529,6 +531,7 @@ export class ObdClient {
   #validated = false;
   #lastSend = -Infinity;
   #silent = 0;
+  #busRun = false; // trong dãy câu trả lời không có dữ liệu đang đếm (#silent) đã có lỗi đường truyền
   #busRetried = false;
   #snap = emptySnapshot();
 
@@ -634,6 +637,7 @@ export class ObdClient {
     let tries = 0;
     while (this.#alive(gen)) {
       let opened = false;
+      let openedAt = 0;
       try {
         this.#fault = null;
         this.#asm.reset();
@@ -647,16 +651,24 @@ export class ObdClient {
           },
         });
         opened = true;
+        openedAt = this.#now();
         if (!this.#alive(gen)) {
           // stop() đến lúc đang mở kết nối: việc mở vừa xong thì đóng lại ngay, không để cổng nối tiếp bị khoá
           // hay Bluetooth còn nối. Nếu đã có phiên mới (start() lại) thì transport là của phiên đó, không đóng.
           if (!this.#running) await this.#safeDisconnect();
           return;
         }
-        await this.#runLink(() => {
-          this.#validated = true;
-          tries = 0;
-        });
+        // Bộ đọc trả lời ATZ thôi chưa đủ để đếm lại số lần kết nối lại: kết nối mất ngay sau đó (ví dụ mỗi lần hỏi
+        // xe) thì vẫn phải chờ lâu dần rồi bỏ cuộc. Chỉ đếm lại khi đọc được số liệu của xe, hoặc khi kết nối đã đứng
+        // được ít nhất TIMING.linkStable (xem dưới), ví dụ lúc đỗ xe tắt máy mà thỉnh thoảng mất Bluetooth.
+        await this.#runLink(
+          () => {
+            this.#validated = true;
+          },
+          () => {
+            tries = 0;
+          }
+        );
       } catch (err) {
         if (!this.#alive(gen)) {
           // Bị dừng trong lúc đang mở và việc mở hỏng/bị huỷ: dọn phần có thể đã nối được. (Lỗi sau khi đã mở
@@ -668,6 +680,7 @@ export class ObdClient {
         if (!this.#validated) {
           return this.#giveUp(gen, err instanceof ObdError ? err.message : err instanceof LinkLost ? MSG.noAnswer : MSG.firstConnect);
         }
+        if (opened && this.#now() - openedAt >= TIMING.linkStable) tries = 0;
         await this.#safeDisconnect();
         if (!this.#alive(gen)) return;
         if (tries >= RECONNECT_DELAYS.length) return this.#giveUp(gen, MSG.gaveUp);
@@ -699,7 +712,11 @@ export class ObdClient {
     }
   }
 
-  async #runLink(onValidated) {
+  /**
+   * @param onValidated gọi khi bộ đọc đã trả lời như một ELM327 (sau ATZ)
+   * @param onCar gọi mỗi lần đọc được số liệu của xe (PID Mode 01) khi đang đọc định kỳ
+   */
+  async #runLink(onValidated, onCar) {
     let step = 'init';
     let forget = false;
     let resets = 0;
@@ -719,8 +736,9 @@ export class ObdClient {
           await this.#findCar(reason);
           step = 'poll';
         }
-        await this.#poll(() => {
+        await this.#poll((item) => {
           resets = 0;
+          if (item.pid != null) onCar();
         });
       } catch (err) {
         if (err instanceof Reinit) {
@@ -782,6 +800,9 @@ export class ObdClient {
     // 'UNABLE TO CONNECT' cũng có thể do chip đã tự khởi động lại mà ứng dụng không nhận được "LV RESET":
     // khi đó việc dò CAN có thể bị chặn tới khi có AT FE. Gửi ATFE (vô hại) trước mỗi lần thử lại để không kẹt mãi.
     let forgetEvents = reason === 'unable';
+    // Lý do đã báo kèm 'nocar' (info.reason). Được tính lại sau mỗi lần thử: đang 'unable' / 'nodata' mà 0100 bắt
+    // đầu báo lỗi đường truyền thì báo lại 'nocar' với lý do 'error', để câu trạng thái không bảo bật khoá điện mãi.
+    let shown = reason;
     if (reason) this.#setState('nocar', { reason });
     for (;;) {
       if (!first || reason) {
@@ -811,7 +832,10 @@ export class ObdClient {
         if (r.kind === 'error') resendProtocol = busFault = true;
         if (r.kind === 'unable') forgetEvents = true;
       }
-      if (this.#state !== 'nocar') this.#setState('nocar', { reason: masks.length ? 'error' : r.kind });
+      // Còn ở đây khi có dữ liệu (masks) thì busFault đã bật: 0100 trả lời mà PID số liệu vẫn báo lỗi đường truyền.
+      const why = busFault ? 'error' : r.kind;
+      if (this.#state !== 'nocar' || why !== shown) this.#setState('nocar', { reason: why });
+      shown = why;
     }
     for (const base of [0x20, 0x40]) {
       if (!this.#supported.has(base)) break;
@@ -845,14 +869,16 @@ export class ObdClient {
   }
 
   /**
-   * Lỗi đường truyền 3 lần liên tiếp khi đang đọc. Theo khuyến nghị cho các lỗi này: gửi lại ATSP0 rồi 0100 ngay,
-   * vẫn ở 'ready', để một lúc nhiễu ngắn không làm mất số liệu và không báo "xe chưa trả lời". Nếu 0100 không trả
-   * lời, hoặc lỗi lại trước khi có số liệu mới từ xe, thì quay lại dò xe ('nocar').
+   * 3 câu trả lời liên tiếp không có dữ liệu khi đang đọc, trong đó có lỗi đường truyền (thứ tự nào cũng vậy, ví dụ
+   * CAN ERROR, CAN ERROR rồi NO DATA). Theo khuyến nghị cho các lỗi này: gửi lại ATSP0 rồi 0100 ngay, vẫn ở 'ready',
+   * để một lúc nhiễu ngắn không làm mất số liệu và không báo "xe chưa trả lời". Nếu 0100 không trả lời, hoặc lỗi lại
+   * trước khi có số liệu mới từ xe, thì quay lại dò xe ('nocar').
    */
   async #busRecover() {
     if (this.#busRetried) throw new CarGone('error');
     this.#busRetried = true;
     this.#silent = 0;
+    this.#busRun = false;
     // Việc dò lại giao thức có thể mất tới 20 giây, trong lúc đó không có lần đọc nào: xoá ngay tốc độ và vòng tua
     // (hai số đổi nhanh, bình thường chỉ giữ 5 giây) để màn hình không hiện số cũ trong lúc chờ.
     this.#clearValues(['speed', 'rpm']);
@@ -905,6 +931,7 @@ export class ObdClient {
   async #pollLoop(onGood) {
     const plan = this.#buildPlan();
     this.#silent = 0;
+    this.#busRun = false;
     this.#busRetried = false;
     this.#setState('ready', { adapter: this.#snap.adapter, supported: [...this.#supported].sort((a, b) => a - b) });
     this.#emitData();
@@ -929,8 +956,8 @@ export class ObdClient {
       const r = await this.#command(item.cmd || pidCommand(item.pid), item.cmd ? TIMING.at : TIMING.pid);
       this.#checkReset(r);
       if (r.kind === 'unable') throw new CarGone('unable');
-      if (this.#handleItem(item, r)) onGood();
-      else if (r.kind === 'error' && this.#silent >= MAX_NODATA) await this.#busRecover();
+      if (this.#handleItem(item, r)) onGood(item);
+      else if (this.#busRun && this.#silent >= MAX_NODATA) await this.#busRecover();
     }
   }
 
@@ -951,17 +978,22 @@ export class ObdClient {
     }
     if (r.kind === 'nodata') {
       item.miss++;
-      // PID chưa từng trả lời mà báo NO DATA 3 lần liên tiếp thì bỏ hẳn. Còn PID đã từng chạy mà
-      // cùng im lặng 3 lần liên tiếp (thường là vừa tắt máy) thì quay lại dò xe, không bỏ PID nào.
-      if (!item.ok && item.miss >= MAX_NODATA) item.dropped = true;
-      if (item.ok && ++this.#silent >= MAX_NODATA) throw new CarGone('nodata');
+      // PID chưa từng trả lời trong lần 'ready' này mà báo NO DATA 3 lần liên tiếp: thôi đọc theo lịch, chỉ thử lại
+      // mỗi TIMING.pidRetry (15 giây). Không bỏ hẳn: xe báo hỗ trợ PID mà không có số liệu thì chỉ tốn một câu hỏi
+      // mỗi lần thử; còn khi xe im đúng lúc vừa sẵn sàng (đề máy, tắt máy) thì xe trả lời lại là PID được đọc tiếp.
+      if (!item.ok && item.miss >= MAX_NODATA) item.next = Math.max(item.next, this.#now() + TIMING.pidRetry);
+      // PID đã từng chạy mà cùng im lặng 3 lần liên tiếp (thường là vừa tắt máy) thì quay lại dò xe. Nếu trong dãy
+      // đó có lỗi đường truyền thì không: #pollLoop gọi #busRecover như khi cả 3 câu đều là lỗi đường truyền.
+      if (item.ok && ++this.#silent >= MAX_NODATA && !this.#busRun) throw new CarGone('nodata');
       return false;
     }
     if (r.kind === 'error') {
       // CAN ERROR, BUS ERROR, <RX ERROR, FB ERROR, BUS INIT: …ERROR là lỗi bus hoặc sai tốc độ, không riêng PID
-      // nào. Đếm chung với NO DATA: 3 câu trả lời liên tiếp không có dữ liệu thì #pollLoop gọi #busRecover (gửi
-      // lại ATSP0 rồi 0100). Không bỏ PID vì lỗi này. (ERR94 đã được xử lý ở #checkReset: ATFE rồi khởi tạo lại.)
+      // nào. Đếm chung với NO DATA: 3 câu trả lời liên tiếp không có dữ liệu, trong đó có lỗi này, thì #pollLoop
+      // gọi #busRecover (gửi lại ATSP0 rồi 0100). Không bỏ PID vì lỗi này. (ERR94 đã được xử lý ở #checkReset:
+      // ATFE rồi khởi tạo lại.)
       this.#silent++;
+      this.#busRun = true;
       return false;
     }
     if (r.kind === 'timeout' || r.kind === 'stopped') {
@@ -974,6 +1006,7 @@ export class ObdClient {
     item.miss = 0;
     item.ok = true;
     this.#silent = 0;
+    this.#busRun = false;
     this.#busRetried = false;
     this.#store(item.key, v);
     return true;
