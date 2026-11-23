@@ -57,11 +57,16 @@ const DIR_CHECK_MOVE = 10; // xe dịch ít nhất chừng này (m, và 1,5 lầ
 const DIR_AGREE = 60; // lệch không quá chừng này (độ): xe vẫn đi theo chiều đã nhớ, đường vẫn hợp hướng đi
 const DIR_FAR = LENGTH; // xe đã ra ngoài hành lang dựng lúc xác nhận chiều đi lần cuối (vị trí nhảy xa): không dùng nữa
 // Đi chậm (DIR_CHECK_SPEED…MOVING_SPEED) trên đường chưa nhớ chiều đi (Track.slowDir): hướng GPS lệch đoạn khớp không
-// quá SLOW_AGREE độ ở SLOW_NEED lần định vị liên tiếp thì lấy làm chiều đi, trừ khi có đường khác cùng hướng trong
-// TWIN_NEAR m quanh chỗ khớp (đường song song, nhánh rẽ chưa tách xa: hướng GPS không phân biệt được).
+// quá SLOW_AGREE độ ở SLOW_NEED lần định vị liên tiếp, mỗi lần một hướng mới do máy đo (không phải hướng lặp lại hay
+// hướng suy từ vị trí, Track.observe), thì lấy làm chiều đi; trừ khi có đường khác lệch hướng không quá TWIN_AGREE độ
+// trong TWIN_NEAR m quanh chỗ khớp (đường song song, đường gom, hai bên đường đôi, nhánh rẽ chưa tách xa: lúc đi chậm vị
+// trí và hướng GPS không phân biệt được). TWIN_NEAR phải lớn hơn khoảng cách thật giữa đường chính và đường gom cùng tên
+// (20–23 m ở Nguyễn Khoái, Hà Nội, trong dữ liệu đã lưu); TWIN_AGREE rộng hơn SLOW_AGREE để một bên đường đôi tách ra
+// chếch 15–20° vẫn được tính.
 const SLOW_AGREE = 30;
 const SLOW_NEED = 2;
-const TWIN_NEAR = 20;
+const TWIN_NEAR = 25;
+const TWIN_AGREE = 45;
 
 // Cong: lấy mẫu mỗi 10 m, tổng góc đổi hướng ≥ 55°, bán kính ≤ 120 m. Cửa sổ phải đủ dài để cung bán kính
 // 120 m quay đủ 55° (14 mẫu, cung đo được tối đa 130 m); cửa sổ ngắn hơn bỏ sót các cua rộng khi chạy nhanh.
@@ -98,11 +103,18 @@ const vertexCount = (way) => way.g.length >> 1;
 const vertexAt = (way, i) => [way.g[2 * i], way.g[2 * i + 1]];
 const lengthOf = (corr) => (corr.cum.length ? corr.cum[corr.cum.length - 1] : 0);
 const emptyCorridor = () => ({ coords: [], cum: [], pieces: [] });
+const NO_DIR = Object.freeze({ dir: 0, loose: false }); // Track.dirFor: không có chiều đi đã nhớ dùng được
 
 /** Đi trên đường theo chiều dir (+1/−1) là đi ngược chiều đường một chiều với loại xe này. */
 function isAgainst(way, dir, vehicle) {
   const o = onewayFor(way, vehicle);
   return o !== 0 && dir !== o;
+}
+
+/** Đường cấm loại xe này (cấm mọi xe, cấm ô tô với ô tô, cấm xe máy với xe máy). */
+function closedTo(way, vehicle) {
+  const info = classifyWay(way.t);
+  return info.noAll || (vehicle === 'moto' ? info.noMoto : info.noCar);
 }
 
 /** Hướng (độ) của đoạn khớp m (kết quả RoadData.matchWay) khi đi theo chiều dir (+1/−1). */
@@ -263,6 +275,10 @@ class Track {
     // { ids, coord, count }: một con đường không nối với hành lang cũ (các đoạn ids) đang thắng mấy lần liên tiếp
     this.pending = null;
     this.slow = null; // { id, dir, time, count }: đi chậm, hướng GPS hợp với chiều dir trên đường id mấy lần liên tiếp
+    this.prev = null; // { heading, coord } của lần định vị trước (Track.observe)
+    // Chiều đi các đường của hành lang đã xác nhận gần nhất, giữ lại khi hành lang đang nhớ (dirs) chỉ dựa vào
+    // Track.slowDir; null khi dirs đã được xác nhận (hướng GPS lúc chạy, hoặc chiều đi đã xác nhận trước đó).
+    this.kept = null;
   }
 
   /** Các đường được ưu tiên khi khớp vị trí (Map có .has), hoặc null. */
@@ -281,12 +297,22 @@ class Track {
     this.pending = null;
   }
 
-  /** Ghi nhớ hành lang vừa dựng. moving: lần định vị này có hướng đáng tin (chiều đi vừa được xác nhận). */
+  /**
+   * Ghi nhớ hành lang vừa dựng. moving: lần định vị này có hướng đáng tin (chiều đi vừa được xác nhận).
+   * Hành lang chỉ dựa vào Track.slowDir (corr.start.loose) không xoá chiều đi của hành lang đã xác nhận trước đó
+   * (kept): slowDir có thể nhầm sang đường song song, và khi xe lại khớp gần nhất với đường cũ thì dirFor vẫn biết
+   * chiều đi trên đó như trước khi có slowDir.
+   */
   remember(corr, fix, time, moving) {
     const dirs = new Map();
     for (const p of corr.pieces) {
       // Nhánh cấm đi ngược chiều chỉ là chỗ để báo, xe không đi vào đó.
       if (p.way && p.dir && !p.against && !dirs.has(p.way.id)) dirs.set(p.way.id, p.dir);
+    }
+    if (corr.start && corr.start.loose) {
+      if (!this.kept) this.kept = this.dirs;
+    } else {
+      this.kept = null;
     }
     this.dirs = dirs;
     this.builtAt = time;
@@ -297,18 +323,45 @@ class Track {
   }
 
   /**
-   * Chiều đi đã nhớ trên đường vừa khớp m (xe đi chậm nên không đọc được hướng), hoặc 0. Không dùng khi vị trí
-   * đã nhảy xa chỗ xác nhận chiều đi lần cuối, khi xe đang lăn bánh mà hướng GPS hay hướng dịch chuyển lệch quá
-   * DIR_AGREE so với chiều đã nhớ (xe đã rẽ hoặc quay đầu), hay khi đã lâu không xác nhận được mà xe đã dịch đi.
-   * Lúc đứng yên, vị trí trôi theo sai số GPS không làm mất chiều đi.
+   * Hướng GPS của lần định vị này có phải bằng chứng mới do máy đo không (gọi một lần cho mỗi lần định vị).
+   * Máy không báo hướng khi đi chậm thì LocationService (location.js) điền vào hướng của lần trước, hoặc hướng từ một
+   * vị trí trước tới vị trí này khi đã dịch đủ xa: hướng đó lặp lại y nguyên qua nhiều lần định vị (đếm nhiều lần
+   * cũng không thêm gì), hoặc chỉ là hướng dịch chuyển vài mét, lệch theo sai số định vị. Hướng trùng đúng hướng lần
+   * trước, hay trùng hướng từ vị trí lần trước tới vị trí này, thì không phải bằng chứng mới.
+   */
+  observe(fix) {
+    const prev = this.prev;
+    const h = fix.heading;
+    this.prev = { heading: h, coord: fix.coord };
+    if (!Number.isFinite(h)) return false;
+    if (!prev) return true;
+    if (h === prev.heading) return false;
+    return !(prev.coord && Math.abs(angleDiff(bearing(prev.coord, fix.coord), h)) < 1e-6);
+  }
+
+  /** Chiều đi đã nhớ trên m.way: { dir, loose } (loose: chỉ dựa vào slowDir), hoặc null. */
+  #recall(m, roads, vehicle) {
+    const own = this.dirs.get(m.way.id) || carriedDir(this.dirs, m, roads, vehicle);
+    if (own) return { dir: own, loose: this.kept != null };
+    const old = this.kept && (this.kept.get(m.way.id) || carriedDir(this.kept, m, roads, vehicle));
+    return old ? { dir: old, loose: false } : null;
+  }
+
+  /**
+   * Chiều đi đã nhớ trên đường vừa khớp m (xe đi chậm nên không đọc được hướng): { dir, loose } (loose: chiều đi đó
+   * chỉ dựa vào slowDir), hoặc { dir: 0 }. Không dùng khi vị trí đã nhảy xa chỗ xác nhận chiều đi lần cuối, khi xe
+   * đang lăn bánh mà hướng GPS hay hướng dịch chuyển lệch quá DIR_AGREE so với chiều đã nhớ (xe đã rẽ hoặc quay đầu),
+   * hay khi đã lâu không xác nhận được mà xe đã dịch đi. Lúc đứng yên, vị trí trôi theo sai số GPS không làm mất
+   * chiều đi.
    */
   dirFor(m, fix, time, roads, vehicle) {
-    const dir = this.dirs.get(m.way.id) || carriedDir(this.dirs, m, roads, vehicle);
-    if (!dir || !this.seenCoord) return 0;
+    const known = this.#recall(m, roads, vehicle);
+    if (!known || !this.seenCoord) return NO_DIR;
+    const { dir } = known;
     const age = time - this.seenAt;
-    if (!(age >= 0)) return 0;
+    if (!(age >= 0)) return NO_DIR;
     const away = distance(this.seenCoord, fix.coord);
-    if (away > DIR_FAR) return 0;
+    if (away > DIR_FAR) return NO_DIR;
     const brg = segmentBearing(m, dir);
     const off = (h) => Math.abs(angleDiff(brg, h));
     // Chỉ tin hướng dịch chuyển khi quãng dịch vượt hẳn sai số định vị.
@@ -317,11 +370,11 @@ class Track {
     let agreed = false;
     if ((fix.speed || 0) >= DIR_CHECK_SPEED) {
       if (Number.isFinite(fix.heading)) {
-        if (off(fix.heading) > DIR_AGREE) return 0;
+        if (off(fix.heading) > DIR_AGREE) return NO_DIR;
         agreed = true;
       }
       if (moved != null) {
-        if (moved > DIR_AGREE) return 0;
+        if (moved > DIR_AGREE) return NO_DIR;
         agreed = true;
       }
     } else if (moved != null && moved <= DIR_AGREE) {
@@ -331,28 +384,29 @@ class Track {
       this.seenAt = time;
       if (moved != null) this.seenCoord = fix.coord; // điểm mốc đi theo xe, để đường cong không bị coi là quay đầu
     } else if (age > DIR_KEEP && moved != null) {
-      return 0;
+      return NO_DIR;
     }
-    return dir;
+    return known;
   }
 
   /**
    * Chiều đi trên đường vừa khớp m khi xe đi chậm (DIR_CHECK_SPEED…MOVING_SPEED) mà chưa biết chiều đi trên đường đó
    * (hành lang trước dừng ở nút giao chưa rõ hướng, hoặc đã rẽ chậm sang đường khác), hoặc 0. Lấy theo hướng GPS khi
    * hướng đó lệch đoạn khớp không quá SLOW_AGREE độ, theo chiều được đi với loại xe này (không bao giờ ngược đường
-   * một chiều), ở SLOW_NEED lần định vị liên tiếp trên cùng đường. Có đường khác cùng hướng trong TWIN_NEAR m quanh
-   * chỗ khớp thì không lấy: ở tốc độ này vị trí và hướng GPS không phân biệt được hai đường song song.
+   * một chiều, không trên đường cấm loại xe này), ở SLOW_NEED lần định vị liên tiếp trên cùng đường, mỗi lần một hướng
+   * mới do máy đo (fresh, Track.observe): hướng lặp lại hay suy từ vị trí chỉ được dùng để bỏ chiều đi đã nhớ, như
+   * trong dirFor. Có đường khác lệch hướng không quá TWIN_AGREE độ trong TWIN_NEAR m quanh chỗ khớp thì không lấy: ở
+   * tốc độ này vị trí và hướng GPS không phân biệt được hai đường song song.
    */
-  slowDir(m, fix, roads, vehicle, time) {
+  slowDir(m, fix, roads, vehicle, time, fresh) {
     const speed = fix.speed || 0;
-    if (!(speed >= DIR_CHECK_SPEED && speed <= MOVING_SPEED) || !Number.isFinite(fix.heading)) {
+    if (!fresh || !(speed >= DIR_CHECK_SPEED && speed <= MOVING_SPEED) || !Number.isFinite(fix.heading)) {
       this.slow = null;
       return 0;
     }
     const raw = Math.abs(angleDiff(segmentBearing(m, 1), fix.heading));
     let dir = raw <= SLOW_AGREE ? 1 : raw >= 180 - SLOW_AGREE ? -1 : 0;
-    const o = onewayFor(m.way, vehicle);
-    if (o !== 0 && dir !== o) dir = 0;
+    if (dir && (isAgainst(m.way, dir, vehicle) || closedTo(m.way, vehicle))) dir = 0;
     const prev = this.slow;
     const count = dir && prev && prev.id === m.way.id && prev.dir === dir && time - prev.time <= 3000 ? prev.count + 1 : 1;
     this.slow = dir ? { id: m.way.id, dir, time, count } : null;
@@ -360,7 +414,7 @@ class Track {
     const twin = roads.matchWay({ coord: m.point, speed: 0, heading: null, accuracy: TWIN_NEAR }, '', {
       vehicle,
       heading: fix.heading,
-      within: SLOW_AGREE,
+      within: TWIN_AGREE,
       skip: new Set([m.way.id]),
     });
     return twin && twin.dist <= TWIN_NEAR ? 0 : dir;
@@ -476,17 +530,21 @@ function startMatch(fix, roads, track, vehicle, time) {
 
 /** Không dẫn đường: đi theo đường đang khớp tới hết đường, rồi đoán nhánh đi thẳng qua các nút giao. */
 function freeCorridor(fix, roads, track, vehicle, time) {
+  const fresh = track ? track.observe(fix) : false;
   const m = startMatch(fix, roads, track, vehicle, time);
   if (!m) return emptyCorridor();
   let dir = m.dir;
+  let loose = false;
   // Đi chậm hoặc dừng (đèn đỏ): giữ chiều đi đã biết trên đường đó (một trong các đường của hành lang trước).
-  if (!dir && track) dir = track.dirFor(m, fix, time, roads, vehicle);
+  if (!dir && track) ({ dir, loose = false } = track.dirFor(m, fix, time, roads, vehicle));
   // Đi chậm trên đường chưa biết chiều đi: theo hướng GPS nếu đủ chắc.
-  if (!dir && track) dir = track.slowDir(m, fix, roads, vehicle, time);
-  else if (track) track.slow = null;
+  if (!dir && track) {
+    dir = track.slowDir(m, fix, roads, vehicle, time, fresh);
+    loose = dir !== 0;
+  } else if (track) track.slow = null;
   if (!dir) return emptyCorridor();
 
-  const corr = { coords: [m.point], cum: [0], pieces: [], start: { wayId: m.way.id, dir } };
+  const corr = { coords: [m.point], cum: [0], pieces: [], start: { wayId: m.way.id, dir, loose } };
   const visited = new Set();
   let way = m.way;
   let from = dir > 0 ? m.seg + 1 : m.seg;

@@ -27,7 +27,7 @@ Cần Node.js 22 trở lên.
 ```bash
 cd ban-duong
 npm start          # mở http://localhost:5173
-npm test           # 245 bài kiểm thử logic (không cần mạng)
+npm test           # 250 bài kiểm thử logic (không cần mạng)
 ```
 
 Trên máy tính không có GPS, ứng dụng lấy tâm bản đồ làm điểm xuất phát; dùng nút **Chạy thử** để xem dẫn đường hoạt động.
@@ -68,6 +68,7 @@ Giới hạn cần biết:
 - Ở Việt Nam, biển báo được nhập vào OpenStreetMap còn **rất ít** (một lần đếm năm 2026 chỉ thấy 119 đối tượng có thẻ biển báo trên cả nước). Phần lớn cảnh báo vì thế đến từ thông tin tương đương ở trên, không phải từ biển thật. Không có cảnh báo **không** có nghĩa là không có biển.
 - Chỗ ngoặt được tính từ hình dạng đường trên bản đồ, nên đôi khi báo cả khúc cua trong ngõ hẻm hoặc chỗ đường rẽ góc vuông. Khi lái tự do, nếu bạn rẽ ở nút giao thì những gì vừa được báo là của đường đi thẳng, và thanh vàng có thể còn hiện biển đó thêm vài giây sau khi rẽ.
 - Khi lái tự do trên hai đường song song sát nhau (đường hầm và đường bên trên, đường trên cao và đường bên dưới, đường chính và đường song hành, thường chỉ cách nhau vài mét), ứng dụng có thể bám nhầm sang đường kia một lúc, nên có thể bỏ sót biển của đường đang đi hoặc báo biển của đường kia.
+- Khi bò chậm trong kẹt xe (dưới khoảng 9 km/h) trên một con đường chưa biết chiều đi (vừa qua nút giao không rõ hướng, vừa rẽ chậm sang đường khác), ứng dụng chỉ đoán chiều đi từ hướng đi do điện thoại đo được ở hai lần định vị liên tiếp. Nhiều điện thoại không báo hướng đi khi chạy chậm; khi đó, cũng như khi có đường khác gần cùng hướng trong khoảng 25 m (đường gom, hai bên của đường đôi), hoặc khi con đường đó cấm loại xe đang chọn, ứng dụng không báo biển của con đường đó cho tới khi xe chạy nhanh hơn.
 - Khi đang dẫn đường, ứng dụng không báo “cấm đi ngược chiều” cho chính tuyến đang đi; cảnh báo này chỉ có khi lái tự do.
 - Tên biển theo QCVN 41:2024/BGTVT lấy từ nguồn thứ cấp; hình biển trong ứng dụng là hình vẽ giản lược, không phải bản sao hình gốc.
 - **Luôn tuân theo biển báo và hiệu lệnh thực tế trên đường.**

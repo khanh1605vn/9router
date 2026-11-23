@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { buildCorridor, detectCurves, SignEngine, timeRangesActive } from '../js/signengine.js';
 import { CELL, cellKey, cellOf, parseOverpass, RoadData } from '../js/roaddata.js';
 import { cumulativeDistances, destination, distance, pointAtDistance } from '../js/geo.js';
+import { LocationService } from '../js/location.js';
 
 // Dữ liệu dựng bằng hình học (không phải đường thật). Gốc toạ độ nằm giữa một ô dữ liệu 0,03° để mọi
 // tra cứu (đường, nút biển, cấm rẽ) đều nằm trong cùng một ô.
@@ -1413,11 +1414,22 @@ function fork() {
   return { J, right, roads };
 }
 
-/** Chạy 10 m/s lên tới 300 m, rồi bò v m/s tới J và đi tiếp theo nhánh (hướng GPS đúng hướng đường). */
+/** Dao động vài độ của hướng GPS thật quanh hướng đường (máy đo mỗi lần một giá trị mới). */
+const JITTER = [0, 2, -1, 3, -2, 1, -3, 2];
+const jitter = (brg, k) => (brg + JITTER[k % JITTER.length] + 360) % 360;
+
+/**
+ * Chạy 10 m/s lên tới 300 m, rồi bò v m/s tới J và đi tiếp theo nhánh (hướng GPS do máy đo, dao động vài độ quanh
+ * hướng đường).
+ */
 function crawlFork(roads, branch, brg, v, { vehicle = 'car', engine = new SignEngine() } = {}) {
   const log = [];
   let time = 1_000_000;
-  const step = (coord, speed, heading, s) => log.push({ s, ...engine.update({ coord, speed, heading, accuracy: 5, time: (time += 1000) }, roads, {}, { vehicle, now: NOON }) });
+  let k = 0;
+  const step = (coord, speed, heading, s) => {
+    const fix = { coord, speed, heading: jitter(heading, k++), accuracy: 5, time: (time += 1000) };
+    log.push({ s, ...engine.update(fix, roads, {}, { vehicle, now: NOON }) });
+  };
   for (let s = 200; s <= 300; s += 10) step(at(s), 10, N, s);
   for (let s = 300; s < 400; s += v) step(destination(O, N, s), v, N, s);
   const cum = cumulativeDistances(branch);
@@ -1455,11 +1467,141 @@ test('bò chậm không dùng hướng GPS làm chiều đi khi ngược đườ
   const twin = roadsOf([way(1, line(O, N, 1000)), way(2, other)], [feat(1, other[40], { highway: 'traffic_signals' })]);
   const engine = new SignEngine();
   let time = 1_000_000;
+  let k = 0;
   const said = [];
   for (let s = 200; s <= 400; s += 1.7) {
-    const r = engine.update({ coord: destination(destination(O, N, s), E, 7), speed: 1.7, heading: N, accuracy: 8, time: (time += 1000) }, twin, {}, { now: NOON });
+    const r = engine.update({ coord: destination(destination(O, N, s), E, 7), speed: 1.7, heading: jitter(N, k++), accuracy: 8, time: (time += 1000) }, twin, {}, { now: NOON });
     if (r.say) said.push(r.say);
     assert.equal(r.upcoming.length, 0, `${s.toFixed(1)} m`);
   }
   assert.deepEqual(said, []);
+});
+
+// ------------------------------------------------------------------------------------------
+// Đi chậm cạnh đường song song: hướng GPS không phân biệt được hai đường (Track.slowDir)
+// ------------------------------------------------------------------------------------------
+
+/**
+ * Đường chính một chiều lên Bắc (1) và đường gom hai chiều cùng tên (2) song song bên phải cách gap m, đèn trên
+ * đường gom ở 600 m (như Nguyễn Khoái, Hà Nội: đường gom cách đường chính 20–23 m). Xe chạy 10 m/s trên đường chính
+ * tới 300 m rồi bò 1,6 m/s; vị trí GPS lệch sang phải 0,6·gap (sai số 8–10 m lúc kẹt xe), gần đường gom hơn.
+ */
+function crawlBesideService(gap, tags, vehicle) {
+  const side = line(destination(O, E, gap), N, 1000);
+  const roads = roadsOf(
+    [way(1, NORTH, { n: 'Chính', o: 1 }), way(2, side, { n: 'Chính', h: 'residential', ...(tags ? { t: tags } : {}) })],
+    [feat(1, side[60], { highway: 'traffic_signals' })],
+  );
+  const engine = new SignEngine();
+  let time = 1_000_000;
+  let k = 0;
+  const log = [];
+  const step = (s, off, speed) => {
+    const fix = { coord: destination(destination(O, N, s), E, off), speed, heading: jitter(N, k++), accuracy: 9, time: (time += 1000) };
+    log.push({ s, ...engine.update(fix, roads, {}, { vehicle, now: NOON }) });
+  };
+  for (let s = 200; s <= 300; s += 10) step(s, 0, 10);
+  for (let s = 300; s <= 560; s += 1.6) step(s, 0.6 * gap, 1.6);
+  return log;
+}
+
+test('bò chậm trên đường chính, vị trí lệch về đường gom song song cách 22 m: không đọc, không hiện đèn của đường gom', () => {
+  for (const vehicle of ['car', 'moto']) {
+    const log = crawlBesideService(22, null, vehicle);
+    assert.deepEqual(spoken(log).map((r) => r.say), [], vehicle);
+    const shown = log.filter((r) => r.active || r.upcoming.length);
+    assert.deepEqual(shown.map((r) => r.s.toFixed(1)), [], `${vehicle}: thanh cảnh báo, dải biển`);
+  }
+});
+
+test('đường gom cấm ô tô (motor_vehicle=no) cách 28 m: ô tô bò chậm bên cạnh không nhận hành lang trên đường gom', () => {
+  const log = crawlBesideService(28, { motor_vehicle: 'no', motorcycle: 'yes' }, 'car');
+  assert.deepEqual(spoken(log).map((r) => r.say), []);
+  assert.equal(log.filter((r) => r.active || r.upcoming.length).length, 0);
+});
+
+test('bò chậm, hành lang tạm sang đường song song cách 30 m rồi vị trí trở lại: vẫn nhớ chiều đi trên đường chính', () => {
+  // Đường chính hai chiều (1), đường song song hai chiều cách 30 m bên phải (2) và cách 15 m bên trái (3); đèn của
+  // đường chính ở 560 m. Bò 1,6 m/s từ 300 m; ở 380–420 m vị trí lệch sang phải 18 m (gần đường 2 hơn, slowDir dựng
+  // hành lang trên đó vì không có đường cùng hướng trong 25 m quanh nó), rồi trở lại đường chính. Đường 3 cách 15 m
+  // làm slowDir không dựng lại được chiều đi trên đường chính, nên phải dùng chiều đi đã xác nhận lúc chạy.
+  const roads = roadsOf(
+    [way(1, NORTH, { n: 'A' }), way(2, line(destination(O, E, 30), N, 1000), { n: 'B' }), way(3, line(destination(O, W, 15), N, 1000), { n: 'C' })],
+    [feat(1, at(560), { highway: 'traffic_signals' })],
+  );
+  for (const vehicle of ['car', 'moto']) {
+    const engine = new SignEngine();
+    let time = 1_000_000;
+    let k = 0;
+    const log = [];
+    const step = (s, off, speed) => {
+      const fix = { coord: destination(destination(O, N, s), E, off), speed, heading: jitter(N, k++), accuracy: 9, time: (time += 1000) };
+      log.push({ s, ...engine.update(fix, roads, {}, { vehicle, now: NOON }) });
+    };
+    for (let s = 200; s <= 300; s += 10) step(s, 0, 10);
+    for (let s = 300; s <= 540; s += 1.6) step(s, s >= 380 && s <= 420 ? 18 : 1, 1.6);
+    const said = spoken(log);
+    assert.deepEqual(said.map((r) => r.fired.map((f) => f.key)), [['n1:signals']], vehicle);
+    assert.ok(said[0].s > 420 && said[0].fired[0].distance >= 60, `${vehicle}: đọc ở ${said[0].s.toFixed(0)} m`);
+    // Từ chỗ trở lại đường chính, đèn hiện trên thanh cảnh báo hoặc dải biển ở hầu hết các lần định vị.
+    const back = log.filter((r) => r.s > 425);
+    const seen = back.filter((r) => r.active?.item.key === 'n1:signals' || r.upcoming.some((u) => u.key === 'n1:signals'));
+    assert.ok(seen.length >= back.length - 3, `${vehicle}: thấy đèn ở ${seen.length}/${back.length} lần định vị`);
+  }
+});
+
+test('máy không báo hướng khi đi chậm (LocationService lặp lại hoặc suy hướng từ vị trí): không dựng hành lang theo hướng đó', () => {
+  // Đường A hai chiều lên Bắc, nút giao J ở 500 m với đường B hai chiều đi về phía Đông, đèn trên B cách J 100 m.
+  // Xe đi thẳng lên Bắc qua J: chạy 10 m/s tới 300 m rồi bò 1,6 m/s. Máy không báo hướng dưới 3 m/s (nhiều điện thoại
+  // như vậy). Ở 494–504 m vị trí GPS lệch 12 m về phía Đông, 4 m về phía sau (phản xạ tín hiệu): LocationService suy ra
+  // hướng gần như Đông từ điểm mốc tới vị trí lệch rồi lặp lại hướng đó vài lần, trong khi vị trí gần B hơn A.
+  const J = at(500);
+  const east = line(J, E, 300);
+  const roads = roadsOf([way(1, NORTH, { n: 'A' }), way(2, east, { n: 'B' })], [feat(1, east[10], { highway: 'traffic_signals' })]);
+  for (const vehicle of ['car', 'moto']) {
+    const loc = new LocationService();
+    const engine = new SignEngine();
+    let time = 1_000_000;
+    const log = [];
+    const step = (s, speed) => {
+      const glitch = s >= 494 && s <= 504;
+      const coord = glitch ? destination(destination(O, N, s - 4), E, 12) : destination(O, N, s);
+      const fix = loc.ingest({ coord, speed, heading: speed >= 3 ? N : null, accuracy: 8, time: (time += 1000), simulated: false });
+      log.push({ s, heading: fix.heading, ...engine.update(fix, roads, {}, { vehicle, now: NOON }) });
+    };
+    for (let s = 200; s <= 300; s += 10) step(s, 10);
+    for (let s = 300; s <= 600; s += 1.6) step(s, 1.6);
+    // Điều kiện của tình huống: có lần định vị mang hướng suy ra gần như Đông, lặp lại ít nhất hai lần.
+    const eastish = log.filter((r) => r.heading != null && Math.abs(r.heading - E) <= 30);
+    assert.ok(eastish.length >= 2, `${vehicle}: ${eastish.length} lần định vị hướng Đông`);
+    assert.deepEqual(spoken(log).map((r) => r.say), [], vehicle);
+    const shown = log.filter((r) => r.active?.item.key === 'n1:signals' || r.upcoming.some((u) => u.key === 'n1:signals'));
+    assert.deepEqual(shown.map((r) => r.s.toFixed(1)), [], `${vehicle}: đèn của đường B`);
+  }
+});
+
+test('đường đôi tách chếch 27° (hai bên cách 10 m): hướng GPS lệch 40° khi đổi làn không dựng hành lang trên bên kia', () => {
+  // Bên trái (1) một chiều lên Bắc. Bên phải (2) một chiều lên Bắc, tách khỏi bên trái ở 300 m chếch 27° rồi chạy song
+  // song cách 10 m, nhập lại ở 720 m; đèn của bên phải ở 500 m. Xe trên bên trái bò 1,6 m/s, ở 304–316 m hướng GPS
+  // (do máy đo) lệch 38–42° sang phải và vị trí sát đoạn chếch của bên phải. Hướng đó hợp với đoạn chếch (lệch dưới
+  // 30°) nhưng lệch hơn 30° so với bên trái: bên trái vẫn phải được tính là đường song song (TWIN_AGREE).
+  const right = [at(300), ...line(destination(at(320), E, 10), N, 380, 20), at(720)];
+  const roads = roadsOf(
+    [way(1, NORTH, { n: 'Lê Thái Tổ', o: 1 }), way(2, right, { n: 'Lê Thái Tổ', o: 1, h: 'tertiary' })],
+    [feat(1, right[10], { highway: 'traffic_signals' })],
+  );
+  for (const vehicle of ['car', 'moto']) {
+    const engine = new SignEngine();
+    let time = 1_000_000;
+    let k = 0;
+    const log = [];
+    const step = (s, off, speed, heading) => {
+      const fix = { coord: destination(destination(O, N, s), E, off), speed, heading: jitter(heading, k++), accuracy: 6, time: (time += 1000) };
+      log.push({ s, ...engine.update(fix, roads, {}, { vehicle, now: NOON }) });
+    };
+    for (let s = 200; s < 300; s += 10) step(s, 0, 10, N);
+    for (let s = 300; s <= 330; s += 1.6) step(s, s >= 304 && s <= 316 ? 0.45 * (s - 300) : 1, 1.6, s >= 304 && s <= 316 ? 40 : N);
+    const shown = log.filter((r) => r.active?.item.key === 'n1:signals' || r.upcoming.some((u) => u.key === 'n1:signals'));
+    assert.deepEqual(shown.map((r) => r.s.toFixed(1)), [], vehicle);
+  }
 });
