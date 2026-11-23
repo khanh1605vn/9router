@@ -11,6 +11,7 @@ import {
   chipLabel,
   chipWarning,
   chipState,
+  checkClosedView,
   countText,
   dayText,
   downloadMb,
@@ -84,7 +85,7 @@ test('rowTitle: tên biển, biển tốc độ kèm trị số', () => {
 
 test('rowStatus: ba trạng thái hiển thị', () => {
   assert.equal(rowStatus({ status: 'confirmed', src: 'camera', hitDays: 2 }), 'Đã xác nhận');
-  assert.equal(rowStatus({ status: 'candidate', src: 'camera', hitDays: 1 }), 'Camera thấy 1 lần');
+  assert.equal(rowStatus({ status: 'candidate', src: 'camera', hitDays: 1 }), 'Camera mới thấy, chưa xác nhận');
   assert.equal(rowStatus({ status: 'candidate', src: 'import', hitDays: 0 }), 'Đã nhập');
   assert.equal(rowStatus({ status: 'candidate', src: 'camera', hitDays: 2 }), 'Camera chưa chắc chắn');
 });
@@ -201,6 +202,13 @@ test('settingsView: còn ảnh kiểm tra đã lưu thì hiện số ảnh và n
   assert.match(html, /<div class="row wrap cam-actions" hidden><button id="btnCamEvalClear" class="btn" type="button">/);
   const ui = readFileSync(new URL('../js/camui.js', import.meta.url), 'utf8');
   assert.match(ui, /\$\('btnCamEvalClear'\)\.addEventListener\('click', clearEval\)/);
+});
+
+test('checkClosedView: luồng kiểm tra bị đóng khi xe vẫn đỗ (ứng dụng bị ẩn) thì nói đúng lý do và cho "Mở lại"', () => {
+  assert.deepEqual(checkClosedView(st({ parked: true })), { text: UI_TEXT.checkHidden, reopen: true });
+  assert.deepEqual(checkClosedView(st({ parked: false })), { text: UI_TEXT.checkClosed, reopen: false });
+  assert.match(UI_TEXT.checkHidden, /ẩn/);
+  assert.ok(UI_TEXT.checkHidden.includes(`“${UI_TEXT.reopen}”`));
 });
 
 test('aimToPoint / pointToAim: đi hai chiều, khớp foeFor của bộ học', () => {

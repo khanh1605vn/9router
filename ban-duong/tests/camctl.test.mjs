@@ -9,7 +9,7 @@ import { SIGN_CATALOGUE } from '../js/signs.js';
 import { buildLabels } from '../tools/camera/lib.mjs';
 import { DEFAULT_SETTINGS } from '../js/store.js';
 import { CAMERA_ERROR_CODES, CAMERA_ERROR_TEXT, SUPPORT_TEXT } from '../js/camera.js';
-import { VISION_ERROR_CODES } from '../js/vision.js';
+import { VISION_ERROR_CODES, VISION_LIMITS } from '../js/vision.js';
 import { dayNumber, memoryBackend } from '../js/learnedsigns.js';
 import { memoryBackend as evalMemoryBackend } from '../js/evalcrops.js';
 import { PARK_STILL_MS, PARK_RECENT_MS, FAST_P90_MS, IDLE_RELEASE_MS } from '../js/camsched.js';
@@ -33,6 +33,7 @@ import {
   TEXT,
   VISION_FATAL,
   VISION_RETRY_MS,
+  VISION_STABLE_FRAMES,
   VISION_TEXT,
 } from '../js/camctl.js';
 
@@ -251,6 +252,7 @@ function makeEnv({ perm = 'granted', mode = 'drive', settings = {}, models = tru
     }
   };
   env.doc = new FakeDoc();
+  env.win = new EventTarget(); // window: sự kiện 'online'
   const values = { ...DEFAULT_SETTINGS, ...settings };
   const listeners = new Set();
   env.store = {
@@ -277,11 +279,13 @@ function makeEnv({ perm = 'granted', mode = 'drive', settings = {}, models = tru
     carSpeed: () => env.carKmh ?? null,
     isSimulated: () => env.simulate === true,
     document: env.doc,
+    window: env.win,
     navigator: env.nav,
     ImageCapture: env.ImageCapture,
     createImageBitmap: null,
-    fetch: async (url) => {
+    fetch: async (url, opts) => {
       env.fetches.push(url);
+      if (env.fetchImpl) return env.fetchImpl(url, opts);
       return new Response(LABEL_BYTES.slice(), { status: 200 });
     },
     manifest: manifest({ models, labelHash }),
@@ -344,8 +348,8 @@ test('readRange: biển 0,7 m rộng 20 px, góc nhìn 70° theo cạnh dài, l�
 test('learnedCaption: chỉ biển đã học chưa xác nhận mới có chú thích', () => {
   assert.equal(learnedCaption({ key: 'x' }), null); // biển bản đồ
   assert.equal(learnedCaption({ src: 'camera', quiet: false, meta: { hitDays: 3 } }), null);
-  assert.equal(learnedCaption({ src: 'camera', quiet: true, meta: { hitDays: 1 } }), 'Camera thấy 1 lần');
-  assert.equal(learnedCaption({ src: 'camera', quiet: true, meta: { hitDays: 0 } }), 'Camera thấy 1 lần');
+  assert.equal(learnedCaption({ src: 'camera', quiet: true, meta: { hitDays: 1 } }), 'Camera mới thấy, chưa xác nhận');
+  assert.equal(learnedCaption({ src: 'camera', quiet: true, meta: { hitDays: 0 } }), 'Camera mới thấy, chưa xác nhận');
   assert.equal(learnedCaption({ src: 'camera', quiet: true, meta: { hitDays: 2 } }), 'Camera chưa chắc chắn');
   assert.equal(learnedCaption({ src: 'import', quiet: true, meta: { hitDays: 0 } }), 'Biển nhập từ tệp');
 });
@@ -1013,6 +1017,132 @@ test("lỗi tải 'integrity' không tự thử lại; camera không mở khi b�
   env.ctl.dispose();
 });
 
+const visionErr = (code) => Object.assign(new Error(code), { code });
+
+test("bộ nhận diện không tải được ('load', mạng yếu): camera không mở khi lái; thôi sau VISION_RETRY_MS; chuyến mới thì thử lại", async () => {
+  const env = makeEnv({ settings: { camEnabled: true } });
+  env.vision.loadImpl = () => Promise.reject(visionErr('load'));
+  await env.ctl.init();
+  const total = VISION_RETRY_MS.reduce((a, b) => a + b, 0);
+  for (let t = 0; t < total + 30_000; t += 1000) {
+    env.fix(15);
+    await env.advance(1000);
+    assert.equal(env.live(), 0, `giây ${t / 1000}: không mở camera khi bộ nhận diện không chạy`);
+  }
+  assert.equal(env.vision.loads, VISION_RETRY_MS.length + 1);
+  assert.equal(env.md.calls.length, 0);
+  let st = env.ctl.state;
+  assert.equal(st.visionError, 'load');
+  assert.equal(st.visionGaveUp, true);
+  assert.equal(st.text, VISION_TEXT.load);
+  assert.equal(st.capturing, false);
+  assert.ok(env.vision.terminated >= 1); // worker và bộ nhớ được giải phóng
+  // Lái thêm 10 phút: không tải lại, không mở camera.
+  for (let k = 0; k < 10; k++) {
+    env.fix(15);
+    await env.advance(60_000);
+  }
+  assert.equal(env.vision.loads, VISION_RETRY_MS.length + 1);
+  assert.equal(env.live(), 0);
+  // Chuyến mới (mạng đã có): thử lại, chạy được thì camera tự mở.
+  env.vision.loadImpl = null;
+  env.ctl.newTrip();
+  env.fix(15);
+  await env.advance(1500);
+  assert.equal(env.vision.loads, VISION_RETRY_MS.length + 2);
+  st = env.ctl.state;
+  assert.equal(st.visionError, null);
+  assert.equal(st.visionGaveUp, false);
+  assert.equal(env.live(), 1);
+  assert.equal(st.capturing, true);
+  env.ctl.dispose();
+});
+
+test("bộ nhận diện đã thôi vì không tải được: có mạng lại ('online') thì thử lại ngay; lỗi 'worker' thì không", async () => {
+  const env = makeEnv({ settings: { camEnabled: true } });
+  env.vision.loadImpl = () => Promise.reject(visionErr('load'));
+  await env.ctl.init();
+  for (let t = 0; t < 90_000; t += 1000) {
+    env.fix(15);
+    await env.advance(1000);
+  }
+  assert.equal(env.ctl.state.visionGaveUp, true);
+  const n = env.vision.loads;
+  env.vision.loadImpl = null;
+  env.win.dispatchEvent(new Event('online'));
+  env.fix(15);
+  await env.advance(1500);
+  assert.equal(env.vision.loads, n + 1);
+  assert.equal(env.live(), 1);
+  env.ctl.dispose();
+});
+
+test("bộ nhận diện tải được nhưng hỏng ở mỗi khung ('worker'): thử lại VISION_RETRY_MS.length lần rồi thôi, trả camera", async () => {
+  const env = makeEnv({ settings: { camEnabled: true } });
+  env.vision.processImpl = () => {
+    env.vision.ready = false; // như Vision._fatal / _stuck: worker bị kết thúc
+    return Promise.reject(visionErr('worker'));
+  };
+  await env.ctl.init();
+  for (let k = 0; k < 600; k++) {
+    env.fix(15);
+    await env.advance(1000);
+  }
+  assert.ok(env.vision.loads <= VISION_RETRY_MS.length + 1, `tải ${env.vision.loads} lần`);
+  const st = env.ctl.state;
+  assert.equal(env.live(), 0);
+  assert.equal(st.camera, 'off'); // đóng hẳn, không chỉ tạm trả
+  assert.equal(st.visionError, 'worker');
+  assert.equal(st.visionGaveUp, true);
+  assert.equal(st.text, TEXT.visionStopped);
+  assert.ok(env.vision.terminated >= 1);
+  // Chuyến mới được thử lại.
+  const n = env.vision.loads;
+  env.ctl.newTrip();
+  env.fix(15);
+  await env.advance(1000);
+  assert.equal(env.vision.loads, n + 1);
+  env.ctl.dispose();
+});
+
+test('bộ nhận diện hỏng, chạy tốt VISION_STABLE_FRAMES khung, rồi lại hỏng: lại được thử lại sau VISION_RETRY_MS[0]', async () => {
+  const env = makeEnv({ settings: { camEnabled: true } });
+  let mode = 'crash';
+  env.vision.processImpl = (frame) => {
+    if (mode === 'crash') {
+      env.vision.ready = false;
+      mode = 'ok';
+      return Promise.reject(visionErr('worker'));
+    }
+    return Promise.resolve({ t: frame.t, ms: { pre: 1, det: 1, cls: 1, total: 3 }, lum: { mean: 100, std: 30 }, boxes: [] });
+  };
+  await env.ctl.init();
+  env.fix(15);
+  await env.advance(500);
+  assert.equal(env.ctl.state.visionError, 'worker');
+  // Camera được trả trong lúc chờ tải lại (không có khung nào được xử lý).
+  assert.equal(env.live(), 0);
+  await env.advance(VISION_RETRY_MS[0] + 100);
+  env.fix(15);
+  await env.advance(500);
+  assert.equal(env.vision.loads, 2);
+  assert.equal(env.live(), 1);
+  const n = env.vision.calls.length;
+  while (env.vision.calls.length < n + VISION_STABLE_FRAMES + 50) {
+    env.fix(15);
+    await env.advance(1000);
+  }
+  mode = 'crash';
+  await env.advance(1000);
+  assert.equal(env.ctl.state.visionError, 'worker');
+  await env.advance(VISION_RETRY_MS[0] + 100);
+  env.fix(15);
+  await env.advance(500);
+  assert.equal(env.vision.loads, 3, 'số lần thử lại đã được trả lại');
+  assert.equal(env.ctl.state.visionError, null);
+  env.ctl.dispose();
+});
+
 test('chuyến mới: đặt lại bộ học, bộ chọn mức tải và giới hạn tốc độ camera', async () => {
   const env = makeEnv({ mode: 'browse' });
   await env.ctl.init();
@@ -1067,6 +1197,164 @@ test('kiểm tra camera: chỉ khi đỗ; đo p50/p90 với bộ nhận diện, 
   env.fix(5);
   await settle();
   assert.equal(env.ctl.state.check, null);
+  assert.equal(env.live(), 0);
+  env.ctl.dispose();
+});
+
+test('kiểm tra camera: trang bị ẩn thì đóng luồng xem trước; hiện lại không tự mở lại', async () => {
+  const env = makeEnv({ mode: 'drive' });
+  await env.ctl.init();
+  await park(env);
+  const r = await env.ctl.openCheck();
+  assert.equal(r.ok, true);
+  assert.equal(env.live(), 1);
+  env.doc.hide();
+  await settle();
+  assert.equal(env.live(), 0);
+  assert.equal(env.ctl.state.check, null);
+  env.doc.show();
+  await env.advance(60_000);
+  assert.equal(env.md.calls.length, 1); // không gọi getUserMedia khi không có lần bấm
+  assert.equal(env.live(), 0);
+  env.ctl.dispose();
+});
+
+test('"Đo tốc độ xử lý" khi tính năng đang tắt: đóng kiểm tra thì giải phóng bộ nhận diện; mở lại hay bật ngay sau đó thì giữ', async () => {
+  const env = makeEnv({ mode: 'drive' });
+  await env.ctl.init();
+  await park(env);
+  assert.equal((await env.ctl.openCheck()).ok, true);
+  assert.equal((await env.ctl.measureCheck({ frames: 3 })).ok, true);
+  assert.equal(env.ctl.state.vision, 'ready');
+  env.ctl.closeCheck();
+  assert.equal(env.vision.terminated, 1);
+  assert.equal(env.ctl.state.vision, 'idle');
+  // Đổi camera (mở lại luồng kiểm tra) không tải lại bộ nhận diện.
+  assert.equal((await env.ctl.openCheck()).ok, true);
+  assert.equal((await env.ctl.measureCheck({ frames: 3 })).ok, true);
+  assert.equal(env.vision.loads, 2);
+  assert.equal((await env.ctl.openCheck({ deviceId: 'usb-1' })).ok, true);
+  assert.equal(env.vision.terminated, 1);
+  assert.equal(env.ctl.state.vision, 'ready');
+  // Đo rồi bật: giữ bộ nhận diện vừa tải.
+  const res = await env.ctl.enable();
+  assert.equal(res.ok, true);
+  assert.equal(env.vision.terminated, 1);
+  assert.equal(env.vision.loads, 2);
+  assert.equal(env.ctl.state.vision, 'ready');
+  env.ctl.dispose();
+});
+
+test('"Đo tốc độ xử lý": đóng kiểm tra giữa chừng không bị tính là lỗi bộ nhận diện', async () => {
+  const env = makeEnv({ mode: 'drive' });
+  let rejectPending = null;
+  env.vision.processImpl = () =>
+    new Promise((resolve, reject) => {
+      rejectPending = () => reject(visionErr('worker'));
+    });
+  const terminate = env.vision.terminate.bind(env.vision);
+  env.vision.terminate = () => {
+    terminate();
+    rejectPending?.(); // như Vision thật: kết thúc worker thì khung đang xử lý bị từ chối
+  };
+  await env.ctl.init();
+  await park(env);
+  assert.equal((await env.ctl.openCheck()).ok, true);
+  const pm = env.ctl.measureCheck({ frames: 3 });
+  await settle();
+  env.ctl.closeCheck();
+  const r = await pm;
+  assert.equal(r.reason, 'closed');
+  const st = env.ctl.state;
+  assert.equal(st.visionError, null);
+  assert.equal(st.vision, 'idle');
+  assert.equal(env.timers.length, 0); // không có hẹn tải lại
+  env.ctl.dispose();
+});
+
+test('labels.json: lần mở đầu (service worker chưa điều khiển trang) tải lại một lần sau controllerchange; có mạng lại thì tải lại labels lỗi', async () => {
+  const env = makeEnv({ mode: 'browse' });
+  const sw = Object.assign(new EventTarget(), { controller: null });
+  env.nav.serviceWorker = sw;
+  await env.ctl.init();
+  assert.equal(env.fetches.length, 1);
+  assert.equal(env.ctl.state.labels, 'ok');
+  sw.controller = {};
+  sw.dispatchEvent(new Event('controllerchange'));
+  await settle();
+  assert.deepEqual(env.fetches, [env.fetches[0], env.fetches[0]]); // cùng URL ?v=…, qua service worker
+  assert.equal(env.ctl.state.labels, 'ok');
+  sw.dispatchEvent(new Event('controllerchange'));
+  await settle();
+  assert.equal(env.fetches.length, 2); // chỉ một lần
+  env.ctl.dispose();
+  // Trang đã được điều khiển: không tải thêm.
+  const env2 = makeEnv({ mode: 'browse' });
+  const sw2 = Object.assign(new EventTarget(), { controller: {} });
+  env2.nav.serviceWorker = sw2;
+  env2.fetchImpl = () => Promise.reject(new TypeError('Failed to fetch'));
+  await env2.ctl.init();
+  sw2.dispatchEvent(new Event('controllerchange'));
+  await settle();
+  assert.equal(env2.fetches.length, 1);
+  assert.equal(env2.ctl.state.labels, 'error');
+  // Có mạng lại: tải lại labels.json đã lỗi.
+  env2.fetchImpl = null;
+  env2.win.dispatchEvent(new Event('online'));
+  for (let i = 0; i < 50 && env2.ctl.state.labels === 'loading'; i++) await settle();
+  assert.equal(env2.fetches.length, 2);
+  assert.equal(env2.ctl.state.labels, 'ok');
+  env2.ctl.dispose();
+});
+
+test('labels.json treo (mạng chập chờn): init() xong sau LOAD_IDLE với labels lỗi; "Xoá các biển đã học" không phải chờ', async () => {
+  const env = makeEnv({ mode: 'browse' });
+  let signal = null;
+  env.fetchImpl = (url, opts) => {
+    signal = opts?.signal || null;
+    return new Promise(() => {}); // không bao giờ xong, kể cả khi bị huỷ
+  };
+  let ready = false;
+  env.ctl.init().then(() => {
+    ready = true;
+  });
+  await settle();
+  let cleared = null;
+  env.ctl.clear().then((r) => {
+    cleared = r;
+  });
+  await settle();
+  assert.deepEqual(cleared, { ok: true });
+  assert.equal(ready, false);
+  await env.advance(VISION_LIMITS.LOAD_IDLE + 10);
+  assert.equal(ready, true);
+  assert.equal(env.ctl.state.labels, 'error');
+  assert.equal(signal?.aborted, true);
+  env.ctl.dispose();
+});
+
+test('enable(): trang bị ẩn trong lúc hỏi quyền: không bật, không báo lỗi camera mà nhắc bấm bật lại', async () => {
+  const env = makeEnv({ mode: 'browse', perm: 'prompt' });
+  let release = null;
+  const gum = env.md.getUserMedia;
+  env.md.getUserMedia = (c) =>
+    new Promise((resolve) => {
+      release = () => resolve(gum(c));
+    });
+  await env.ctl.init();
+  await park(env);
+  const p = env.ctl.enable();
+  await settle();
+  env.doc.hide();
+  env.perm = 'granted';
+  release();
+  const r = await p;
+  env.doc.show();
+  await settle();
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, 'hidden');
+  assert.equal(r.text, TEXT.enableHidden);
+  assert.notEqual(env.store.settings.camEnabled, true);
   assert.equal(env.live(), 0);
   env.ctl.dispose();
 });

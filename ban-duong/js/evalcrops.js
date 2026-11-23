@@ -27,7 +27,7 @@ export const EVAL_FILE_NAME = 'anh-bien-kiem-tra.json';
 export const EVAL_TEXT = Object.freeze({
   setting: 'Lưu ảnh biển để kiểm tra độ chính xác',
   note: 'Giữ trên máy tối đa 30 ngày các ảnh nhỏ cắt sát biển mà camera ghi nhận, để kiểm tra lại khi xe đứng yên. Ảnh có thể có một phần xe cộ phía sau biển.',
-  exportWarning: 'Tệp gồm các ảnh biển đã lưu. Ảnh có thể có một phần xe cộ phía sau biển. Chỉ gửi cho người bạn tin.',
+  exportWarning: 'Tệp gồm các ảnh biển đã lưu. Ảnh có thể có một phần xe cộ phía sau biển. Chỉ gửi cho người bạn tin tưởng.',
   clear: 'Xoá ảnh biển đã lưu',
   empty: 'Chưa có ảnh biển nào.',
 });

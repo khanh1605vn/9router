@@ -197,10 +197,12 @@ function openOverlay(id) {
 function closeOverlays() {
   const n = overlayStack.length;
   if (!n) return;
+  const hadModal = overlayStack.includes('modal');
   for (const id of overlayStack) $(id).hidden = true;
   overlayStack.length = 0;
   ignorePop = true;
   history.go(-n);
+  if (hadModal) restoreModalFocus();
 }
 
 /** Người dùng bấm nút Quay lại: chỉ đóng bảng trên cùng. */
@@ -211,12 +213,62 @@ function onPopState() {
   }
   const id = overlayStack.pop();
   if (id) $(id).hidden = true;
+  if (id === 'modal') restoreModalFocus();
 }
 
+// Hộp thoại (aria-modal): khi mở, đưa tiêu điểm bàn phím vào thẻ hộp thoại (không vào ô chọn hay công tắc, để không
+// tự bật bàn phím ảo hay đổi gì); Tab chỉ đi vòng trong hộp thoại; khi đóng, trả tiêu điểm về nút đã mở nó.
+let modalOpener = null;
+
 function openModal(title, body) {
+  if ($('modal').hidden) modalOpener = document.activeElement; // đổi hộp thoại này sang hộp khác: giữ nút mở ban đầu
   $('modalTitle').textContent = title;
   $('modalBody').replaceChildren(body);
   openOverlay('modal');
+  $('modal').querySelector('.modal-card').focus({ preventScroll: true });
+}
+
+const usable = (e) => e instanceof HTMLElement && e !== document.body && e.isConnected && !e.disabled && e.getClientRects().length > 0;
+const focusables = (root) =>
+  [...root.querySelectorAll('button, [href], input, select, textarea, summary, [tabindex]:not([tabindex="-1"])')].filter(
+    (x) => usable(x) && x.tabIndex >= 0
+  );
+
+function restoreModalFocus() {
+  const opener = modalOpener;
+  modalOpener = null;
+  const a = document.activeElement;
+  // Người dùng đã tự chuyển tiêu điểm ra ngoài hộp thoại: để nguyên.
+  if (a && a !== document.body && !$('modal').contains(a)) return;
+  // Nút mở có thể đã bị ẩn (bảng Cài đặt đóng cùng) hay bị khoá: dùng nút đầu tiên của bảng còn mở bên dưới, không thì
+  // nút Cài đặt.
+  const under = overlayStack.length ? focusables($(overlayStack[overlayStack.length - 1]))[0] : null;
+  const to = [opener, under, $('btnSettings')].find(usable);
+  to?.focus({ preventScroll: true });
+}
+
+function trapModalTab(e) {
+  if (e.key !== 'Tab' || $('modal').hidden) return;
+  const card = $('modal').querySelector('.modal-card');
+  const list = focusables(card);
+  if (!list.length) {
+    e.preventDefault();
+    card.focus({ preventScroll: true });
+    return;
+  }
+  const first = list[0];
+  const last = list[list.length - 1];
+  const a = document.activeElement;
+  if (!card.contains(a) || a === card) {
+    e.preventDefault();
+    (e.shiftKey ? last : first).focus();
+  } else if (e.shiftKey && a === first) {
+    e.preventDefault();
+    last.focus();
+  } else if (!e.shiftKey && a === last) {
+    e.preventDefault();
+    first.focus();
+  }
 }
 
 function wantDark() {
@@ -1588,6 +1640,7 @@ function bind() {
   window.addEventListener('popstate', onPopState);
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeOverlays();
+    trapModalTab(e);
   });
   document.addEventListener('visibilitychange', () => {
     updateWakeLock();

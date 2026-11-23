@@ -35,10 +35,10 @@ export const UI_TEXT = Object.freeze({
   section: 'Camera nhận diện biển (thử nghiệm)',
   intro:
     'Dùng camera sau của điện thoại kẹp cố định trên xe để ghi nhận biển báo khi xe đi qua. Biển đã ghi nhận được báo ' +
-    'trước 100–200 m ở những lần đi sau, khi đã thấy lại vào một ngày khác. Mọi xử lý diễn ra trên máy: không gửi hình ' +
+    'trước 100–200 m ở những lần đi sau, khi đã thấy lại rõ vào ngày khác (hoặc bạn bấm “Đúng”). Mọi xử lý diễn ra trên máy: không gửi hình ' +
     'ảnh đi, và chỉ lưu ảnh biển khi bạn bật “Lưu ảnh biển để kiểm tra độ chính xác”.',
   permission:
-    'Khi trình duyệt hỏi, hãy cho phép lâu dài (không chọn chỉ lần này); nếu không, lần sau camera sẽ tắt cho tới khi ' +
+    'Khi trình duyệt hỏi, hãy cho phép lâu dài (đừng chọn “Chỉ lần này”); nếu không, lần sau camera sẽ tắt cho tới khi ' +
     'bạn bật lại lúc xe đỗ.',
   enabled: 'Đã bật camera nhận diện biển. Camera sẽ tự chạy khi bạn bắt đầu lái.',
   disabled: 'Đã tắt camera nhận diện biển.',
@@ -51,6 +51,8 @@ export const UI_TEXT = Object.freeze({
   aimSaved: 'Đã lưu đường chân trời.',
   checkOpening: 'Đang mở camera…',
   checkClosed: 'Đã đóng camera vì xe không còn đỗ.',
+  checkHidden: 'Đã tắt camera khi ứng dụng bị ẩn. Bấm “Mở lại” để xem tiếp.',
+  reopen: 'Mở lại',
   measure: 'Đo tốc độ xử lý',
   measuring: 'Đang đo',
   defaultCamera: 'Camera sau của điện thoại',
@@ -69,6 +71,14 @@ export const UI_TEXT = Object.freeze({
   evalCleared: 'Đã xoá ảnh biển đã lưu.',
 });
 
+/**
+ * Luồng "Kiểm tra camera" bị bộ điều phối đóng (người dùng không bấm đóng): câu giải thích và có hiện nút "Mở lại" không.
+ * Xe vẫn đỗ thì luồng đóng vì ứng dụng bị ẩn (camctl đóng nó khi trang ẩn); xe chạy thì vì xe không còn đỗ.
+ */
+export function checkClosedView(st) {
+  return st?.parked ? { text: UI_TEXT.checkHidden, reopen: true } : { text: UI_TEXT.checkClosed, reopen: false };
+}
+
 /** Ngày (số thứ tự ngày của learnedsigns.js) → "12/11/2026", hoặc "12/11" khi withYear = false. */
 export function dayText(day, withYear = true) {
   if (!Number.isInteger(day)) return null;
@@ -85,11 +95,14 @@ export function rowTitle(row) {
   return row?.code === 'P.127' && row.value != null ? `${name} ${row.value} km/h` : name;
 }
 
-/** Trạng thái một biển đã học: "Đã xác nhận", "Đã nhập", "Camera thấy 1 lần" hoặc "Camera chưa chắc chắn". */
+/**
+ * Trạng thái một biển đã học: "Đã xác nhận", "Đã nhập", "Camera mới thấy, chưa xác nhận" (thấy vào một ngày; có thể
+ * nhiều lần trong ngày đó, nên không ghi số lần) hoặc "Camera chưa chắc chắn" (thấy vào ≥ 2 ngày, chưa đủ điểm).
+ */
 export function rowStatus(row) {
   if (row?.status === 'confirmed') return 'Đã xác nhận';
   if (row?.src === 'import') return 'Đã nhập';
-  return (row?.hitDays ?? 0) <= 1 ? 'Camera thấy 1 lần' : 'Camera chưa chắc chắn';
+  return (row?.hitDays ?? 0) <= 1 ? 'Camera mới thấy, chưa xác nhận' : 'Camera chưa chắc chắn';
 }
 
 /** "Thấy lần đầu 12/11/2026 · thấy vào 3 ngày · gần nhất 20/11" (biển nhập: "Nhập ngày …"). */
@@ -247,8 +260,9 @@ export function introParagraphs(manifest = ML_MANIFEST) {
   return [
     [
       'Cách hoạt động',
-      'Camera ghi nhận biển báo khi xe đi qua. Ở những lần đi sau, khi biển đã được thấy vào 2 ngày khác nhau, ứng dụng ' +
-        'báo trước 100–200 m. Biển mới thấy một lần chỉ hiện trên màn hình, không đọc thành tiếng.',
+      'Camera ghi nhận biển báo khi xe đi qua. Ở những lần đi sau, khi biển đã được thấy rõ vào ít nhất 2 ngày khác nhau ' +
+        '(hoặc bạn bấm “Đúng” trong danh sách biển), ứng dụng báo trước 100–200 m. Biển chưa xác nhận chỉ hiện trên màn ' +
+        'hình, không đọc thành tiếng.',
     ],
     [
       'Dùng camera nào',
@@ -291,6 +305,15 @@ export function pointToAim(fx, fy, W, H) {
   const clamp = (v) => Math.min(Math.max(Number.isFinite(v) ? v : 0, 0), 1);
   if (!(W > 0) || !(H > 0)) return { dx: 0, dy: 0 };
   return { dx: Math.round((clamp(fx) - 0.5) * W), dy: Math.round((clamp(fy) - FOE_Y_FRAC) * H) };
+}
+
+/**
+ * Giá trị đọc cho trình đọc màn hình của thanh kéo đường chân trời (dọc): độ cao tính từ mép dưới hình, theo phần
+ * trăm, để phím mũi tên lên (dời đường lên) làm giá trị tăng. y: vị trí theo phần khung, 0 = mép trên.
+ */
+export function aimAria(y) {
+  const v = 100 - Math.round(Math.min(Math.max(Number.isFinite(y) ? y : FOE_Y_FRAC, 0), 1) * 100);
+  return { now: String(v), text: `Đường chân trời ở ${v}% chiều cao hình, tính từ mép dưới` };
 }
 
 /** Dòng trong danh sách → điểm cho lớp biển đã học trên bản đồ. Biển chưa xác nhận vẽ nét đứt, nhạt hơn. */
@@ -481,7 +504,7 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
     const msg = el('div', { class: 'cam-preview-msg' }, UI_TEXT.checkOpening);
     const horizon = el('div', { class: 'cam-horizon' });
     const foe = el('div', { class: 'cam-foe' });
-    const aim = el('div', { class: 'cam-aim', tabindex: '0', role: 'slider', 'aria-label': 'Đường chân trời', 'aria-valuemin': '0', 'aria-valuemax': '100' }, horizon, foe);
+    const aim = el('div', { class: 'cam-aim', tabindex: '0', role: 'slider', 'aria-orientation': 'vertical', 'aria-label': 'Đường chân trời', 'aria-valuemin': '0', 'aria-valuemax': '100' }, horizon, foe);
     aim.hidden = true;
     const box = el('div', { class: 'cam-preview' }, video, aim, msg);
     const picker = el('select', { id: 'camPicker' });
@@ -491,6 +514,8 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
     const statusP = el('p', { class: 'note', role: 'status' });
     const measureBtn = el('button', { class: 'btn primary', type: 'button' }, UI_TEXT.measure);
     const resetBtn = el('button', { class: 'btn', type: 'button' }, 'Đặt lại đường chân trời');
+    const reopenBtn = el('button', { class: 'btn primary', type: 'button' }, UI_TEXT.reopen);
+    reopenBtn.hidden = true;
     const evalSw = el('input', { id: 'optCamEval', type: 'checkbox', class: 'switch' });
     const evalCount = el('p', { class: 'note' });
     const evalExport = iconBtn('btn', 'share', 'Xuất ảnh', null);
@@ -504,7 +529,7 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
       pickerRow,
       stats,
       extra,
-      el('div', { class: 'row wrap' }, measureBtn, resetBtn),
+      el('div', { class: 'row wrap' }, reopenBtn, measureBtn, resetBtn),
       statusP,
       el('h3', { class: 'cam-sub' }, 'Kiểm tra độ chính xác'),
       el('label', { class: 'opt' }, el('span', {}, EVAL_TEXT.setting, el('small', {}, EVAL_TEXT.note)), evalSw),
@@ -513,7 +538,7 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
       el('div', { class: 'row wrap' }, evalExport, evalClear),
       el('p', { class: 'note' }, OBEY_REAL_SIGNS)
     );
-    const ui = { video, msg, aim, horizon, foe, box, picker, stats, extra, statusP, measureBtn, evalSw, evalCount, evalExport, gen: 0, live: false, W: 0, H: 0, info: {}, measure: null, measuring: false };
+    const ui = { video, msg, aim, horizon, foe, box, picker, stats, extra, statusP, measureBtn, reopenBtn, evalSw, evalCount, evalExport, gen: 0, live: false, closed: false, W: 0, H: 0, info: {}, measure: null, measuring: false };
     show('check', 'Kiểm tra camera', body, { ui });
     bindAim(ui);
     picker.addEventListener('change', () => {
@@ -526,6 +551,14 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
       startPreview(ui, id);
     });
     measureBtn.addEventListener('click', () => runMeasure(ui));
+    // Mở lại luồng xem trước đã bị đóng khi ứng dụng bị ẩn: chỉ từ lần bấm này (không bao giờ tự mở lại).
+    reopenBtn.addEventListener('click', () => {
+      if (!ctl.isParked()) {
+        toast(TEXT.parkedOnly);
+        return;
+      }
+      startPreview(ui, undefined);
+    });
     resetBtn.addEventListener('click', () => {
       store.set('camAim', { dx: 0, dy: 0 });
       placeAim(ui);
@@ -553,6 +586,8 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
   function startPreview(ui, deviceId) {
     const gen = ++ui.gen;
     ui.live = false;
+    ui.closed = false;
+    ui.reopenBtn.hidden = true;
     ui.aim.hidden = true;
     ui.msg.hidden = false;
     ui.msg.textContent = UI_TEXT.checkOpening;
@@ -606,7 +641,13 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
     ui.horizon.style.top = `${p.y * 100}%`;
     ui.foe.style.left = `${p.x * 100}%`;
     ui.foe.style.top = `${p.y * 100}%`;
-    ui.aim.setAttribute('aria-valuenow', String(Math.round(p.y * 100)));
+    setAimAria(ui, p.y);
+  }
+
+  function setAimAria(ui, y) {
+    const a = aimAria(y);
+    ui.aim.setAttribute('aria-valuenow', a.now);
+    ui.aim.setAttribute('aria-valuetext', a.text);
   }
 
   function bindAim(ui) {
@@ -621,6 +662,7 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
       ui.horizon.style.top = `${p.y * 100}%`;
       ui.foe.style.left = `${p.x * 100}%`;
       ui.foe.style.top = `${p.y * 100}%`;
+      setAimAria(ui, p.y);
       return a;
     };
     const save = (a) => {
@@ -689,14 +731,17 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
     if (!modalOpen('check')) return;
     const ui = view.ui;
     if (ui.live && st.check !== 'open') {
-      // Xe bắt đầu chạy: bộ điều phối đã đóng luồng kiểm tra.
+      // Xe bắt đầu chạy hoặc ứng dụng bị ẩn: bộ điều phối đã đóng luồng kiểm tra.
+      const closed = checkClosedView(st);
       ui.live = false;
+      ui.closed = true;
       ui.gen++;
       ui.video.srcObject = null;
       ui.aim.hidden = true;
       ui.msg.hidden = false;
-      ui.msg.textContent = UI_TEXT.checkClosed;
+      ui.msg.textContent = closed.text;
     }
+    ui.reopenBtn.hidden = !(ui.closed && !ui.live && st.parked);
     const m = ui.measure;
     const w = m?.width || ui.W || ui.info.width;
     const h = m?.height || ui.H || ui.info.height;
@@ -843,7 +888,7 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
     const body = el(
       'div',
       { class: 'view' },
-      el('p', { class: 'sub' }, `Tệp GeoJSON gồm ${num(n)} biển camera đã ghi nhận trên máy này.`),
+      el('p', { class: 'sub' }, `Tệp GeoJSON gồm ${num(n)} biển đang lưu trên máy này (gồm cả biển đã nhập từ tệp, nếu có).`),
       el('p', { class: 'note warn' }, EXPORT_WARNING[0]),
       el('p', { class: 'note' }, EXPORT_WARNING[1]),
       el('label', { class: 'opt' }, el('span', {}, UI_TEXT.withDates, el('small', {}, UI_TEXT.withDatesHint)), dates),
@@ -888,7 +933,7 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
     const body = el(
       'div',
       { class: 'view' },
-      el('p', { class: 'sub' }, n ? `Xoá hết ${num(n)} biển camera đã ghi nhận trên máy này. Không khôi phục được.` : UI_TEXT.empty),
+      el('p', { class: 'sub' }, n ? `Xoá hết ${num(n)} biển đang lưu trên máy này (gồm cả biển đã nhập từ tệp, nếu có). Không khôi phục được.` : UI_TEXT.empty),
       evalBox ? el('label', { class: 'opt' }, el('span', {}, clearEvalText(st.evalCount)), evalBox) : null,
       el(
         'div',

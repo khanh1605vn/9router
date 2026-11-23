@@ -381,7 +381,7 @@ SC.S2 = {
     res.check('P.127[50] đã xác nhận, thấy vào 2 ngày', p?.status === 'confirmed' && p.hitDays === 2, p && recBrief(p));
     res.check('R.122 đã xác nhận, thấy vào 2 ngày', r?.status === 'confirmed' && r.hitDays === 2, r && recBrief(r));
     const quiet = pass.log.samples.filter((x) => x.bar && /\bquiet\b/.test(x.bar.cls) && /\blearned\b/.test(x.bar.cls));
-    res.check('thanh cảnh báo hiện biển chưa xác nhận: viền nét đứt, "Camera thấy 1 lần"', quiet.some((x) => x.bar.cap === 'Camera thấy 1 lần'), quiet.slice(0, 2).map((x) => ({ s: x.s, ...x.bar })));
+    res.check('thanh cảnh báo hiện biển chưa xác nhận: viền nét đứt, "Camera mới thấy, chưa xác nhận"', quiet.some((x) => x.bar.cap === 'Camera mới thấy, chưa xác nhận'), quiet.slice(0, 2).map((x) => ({ s: x.s, ...x.bar })));
     res.check('không đọc biển nào của camera (biển chưa xác nhận không bao giờ được đọc)', camSpeech(pass).length === 0 && !pass.log.speech.some((x) => /tốc độ tối đa|dừng lại/.test(x.text)), pass.log.speech.map((x) => x.text));
     const hits = pass.log.passed.filter((e) => e.outcome === 'hit');
     res.check('mỗi biển có một lần thấy lại (hit)', ['P.127', 'R.122'].every((c) => hits.filter((e) => e.code === c).length === 1), pass.log.passed);
@@ -610,7 +610,7 @@ SC.S9 = {
     res.check('bộ học nhận ra khung đen (health "blank")', blank.length > 0, { capturing: cap.length, blank: blank.length });
     const warned = pass.log.samples.filter((x) => x.chip && !x.chip.hidden && x.chip.title === TEXT.blank);
     res.check(`nút camera báo "${TEXT.blank}"`, warned.length > 0, warned[0]?.chip ?? pass.log.samples.find((x) => x.cam?.capturing)?.chip);
-    const styled = warned.filter((x) => !/\bcam-on\b/.test(x.chip.cls));
+    const styled = warned.filter((x) => /\bcam-warn\b/.test(x.chip.cls));
     res.check('nút camera có kiểu hiển thị cảnh báo riêng (không chỉ chú thích)', styled.length > 0, warned[0]?.chip, { info: true });
     res.data = { passed: pass.log.passed, health: pass.log.health, chip: warned[0]?.chip ?? null };
   },

@@ -518,6 +518,8 @@ h2, h3, p { margin: 0; }
   flex-direction: column;
   gap: 12px;
 }
+/* Thẻ hộp thoại nhận tiêu điểm khi mở (main.js openModal) chỉ để trình đọc màn hình và phím Tab bắt đầu từ trong hộp. */
+.modal-card:focus { outline: none; }
 .report-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(98px, 1fr)); gap: 10px; }
 .report-btn { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px 6px; border-radius: 14px; background: var(--surface-2); font-size: 13px; font-weight: 600; text-align: center; line-height: 1.25; }
 .report-badge { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 50%; color: #fff; }
@@ -563,7 +565,7 @@ h2, h3, p { margin: 0; }
 /* Nút camera nhỏ cạnh các nút bản đồ: xanh lục khi camera đang mở, xám khi tạm dừng, gạch chéo khi cần bật lại.
    Hổ phách khi camera đang mở mà hình không dùng được (bị che, quá tối, quá sáng). */
 .fab.cam-chip.cam-on { background: var(--sign-green); color: #fff; }
-.fab.cam-chip.cam-on.cam-warn { background: var(--amber); color: #fff; }
+.fab.cam-chip.cam-on.cam-warn { background: var(--amber); color: #10202f; } /* biểu tượng tối cố định (6,2:1), không dùng --ink vì nó sáng ở chế độ tối */
 .fab.cam-chip.cam-paused { color: var(--ink-3); }
 .fab.cam-chip.cam-off { color: var(--ink-2); }
 
@@ -595,7 +597,11 @@ h2, h3, p { margin: 0; }
 .cam-count { color: var(--ink); font-weight: 600; font-size: 14px; }
 .cam-actions { margin: 4px 0; }
 .obd-status.warn { color: var(--sign-red); }
-:root[data-theme="dark"] .obd-status.warn { color: #ff8a8f; }
+/* Chữ đỏ cảnh báo trên nền tối: --sign-red (#d5202a) chỉ đạt 3,1:1 trên --surface tối, nên dùng đỏ sáng (7:1).
+   Không đổi chính --sign-red vì nó còn là nền sau chữ trắng (thanh cảnh báo, đồng hồ quá tốc độ). */
+:root[data-theme="dark"] .obd-status.warn,
+:root[data-theme="dark"] .note.warn,
+:root[data-theme="dark"] .status-line.warn { color: #ff8a8f; }
 .cam-intro .note { margin: 0; color: var(--ink); font-size: 14px; }
 .cam-intro .note b { font-weight: 700; }
 .cam-sub { margin: 8px 0 0; color: var(--ink-2); font-size: 13px; font-weight: 700; }
@@ -606,6 +612,8 @@ h2, h3, p { margin: 0; }
 .cam-preview-msg { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; color: #fff; font-size: 14px; text-align: center; }
 .cam-aim { position: absolute; inset: 0; cursor: grab; touch-action: none; }
 .cam-aim:active { cursor: grabbing; }
+/* Viền tập trung vẽ vào trong (khung xem trước cắt phần tràn), trắng có quầng tối để khác đường chân trời vàng. */
+.cam-aim:focus-visible { outline: 3px solid #fff; outline-offset: -5px; box-shadow: inset 0 0 0 5px rgba(0, 0, 0, 0.55); border-radius: inherit; }
 .cam-horizon { position: absolute; left: 0; right: 0; height: 0; border-top: 2px dashed var(--sign-yellow); box-shadow: 0 1px 0 rgba(0, 0, 0, 0.55); }
 .cam-foe { position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px; border: 3px solid var(--sign-yellow); border-radius: 50%; box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.5); }
 .cam-pick { display: flex; flex-direction: column; gap: 6px; font-weight: 500; }
@@ -627,9 +635,9 @@ html.car-ui .cam-pick select { height: 56px; }
 .lstatus { padding: 1px 8px; border-radius: 8px; font-size: 12px; font-weight: 600; line-height: 1.5; }
 .lstatus.ok { background: var(--sign-green); color: #fff; }
 .lstatus.quiet { border: 1.5px dashed var(--ink-2); color: var(--ink); }
-.lrow-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.lrow-actions { display: flex; flex-wrap: wrap; gap: 8px; }
 @media (min-width: 440px) { .lrow-actions { padding-left: 56px; } }
-.btn.small { min-height: 40px; padding: 0 11px; gap: 5px; border-radius: 20px; font-size: 13.5px; }
+.btn.small { min-height: 46px; min-width: 46px; padding: 0 12px; gap: 5px; border-radius: 23px; font-size: 13.5px; } /* vùng bấm như .btn */
 
 /* Lớp biển camera ghi nhận đang hiện trên bản đồ */
 .layer-pill { align-self: flex-start; display: flex; align-items: center; border-radius: 24px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm); }
@@ -700,6 +708,7 @@ html.car-ui .sign-dist { font-size: 46px; }
 html.car-ui .sign-instr { font-size: 20px; }
 html.car-ui .sign-then { font-size: 16px; }
 html.car-ui .alert-title { font-size: 18px; }
+html.car-ui .alert-cap { font-size: 15px; opacity: 0.9; }
 html.car-ui .alert-dist { font-size: 38px; }
 html.car-ui .search-trigger { height: 56px; border-radius: 28px; }
 html.car-ui .icon-btn,
@@ -712,10 +721,16 @@ html.car-ui .opt { min-height: 60px; }
 html.car-ui .opt select { height: 56px; }
 html.car-ui .chips,
 html.car-ui .row.actions { flex-wrap: wrap; }
-html.car-ui .btn.small { min-height: 56px; border-radius: 28px; padding: 0 16px; }
+html.car-ui .btn.small { min-height: 56px; min-width: 56px; border-radius: 28px; padding: 0 16px; }
 html.car-ui .layer-pill-main { min-height: 56px; }
 html.car-ui .lrow-actions { gap: 8px; }
 html.car-ui .cam-badge { width: 22px; height: 22px; }
+/* Biển giới hạn lớn hơn trên màn hình ô tô để dòng "Camera" (nguồn của giới hạn) đọc được khi liếc: đĩa trắng 62 px
+   chứa vừa chữ 12 px; vẫn nằm trong hàng đồng hồ tốc độ 84 px. Màn hình thấp (≤ 460 px) giữ biển 52 px như cũ. */
+@media (min-height: 461px) {
+  html.car-ui .limit { width: 78px; height: 78px; border-width: 8px; font-size: 32px; }
+  html.car-ui .limit-src { font-size: 12px; }
+}
 
 @media (prefers-reduced-motion: reduce) {
   .speed.over, .alert { animation: none; }

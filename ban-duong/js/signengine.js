@@ -810,7 +810,7 @@ function learnedNote(feat, formatDay = dayDate) {
   }
   if (m.plate) parts.push('Có biển phụ bên dưới, ứng dụng không đọc được nội dung.');
   if (feat.status !== 'confirmed') parts.push('Chưa xác nhận nên không đọc thành tiếng.');
-  parts.push('Có thể nhận nhầm hoặc biển đã được dỡ. Luôn tuân theo biển báo và hiệu lệnh thực tế trên đường.');
+  parts.push('Có thể nhận nhầm hoặc biển đã bị dỡ. Luôn tuân theo biển báo và hiệu lệnh thực tế trên đường.');
   return parts.join(' ');
 }
 

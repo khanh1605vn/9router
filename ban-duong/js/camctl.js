@@ -117,7 +117,7 @@ export function importText(res) {
 export function learnedCaption(item) {
   if (!item?.src || !item.quiet) return null;
   if (item.src === 'import') return 'Biển nhập từ tệp';
-  return (item.meta?.hitDays ?? 0) <= 1 ? 'Camera thấy 1 lần' : 'Camera chưa chắc chắn';
+  return (item.meta?.hitDays ?? 0) <= 1 ? 'Camera mới thấy, chưa xác nhận' : 'Camera chưa chắc chắn';
 }
 
 /**

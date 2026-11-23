@@ -16,7 +16,7 @@ const O = [105.81, 21.015];
 const along = (x) => destination(O, 90, x);
 const DAY1 = new Date(2026, 10, 22, 12, 0).getTime(); // 22/11/2026, 12:00 giờ máy
 const NOON = new Date(2026, 10, 23, 12, 0);
-const END = 'Có thể nhận nhầm hoặc biển đã được dỡ. Luôn tuân theo biển báo và hiệu lệnh thực tế trên đường.';
+const END = 'Có thể nhận nhầm hoặc biển đã bị dỡ. Luôn tuân theo biển báo và hiệu lệnh thực tế trên đường.';
 const PUBLIC_KEYS = ['key', 'kind', 'code', 'title', 'say', 'cat', 'distance', 'art', 'value', 'derived', 'note', 'coord'];
 
 function world(feats = []) {
