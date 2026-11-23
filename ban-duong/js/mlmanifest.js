@@ -2,11 +2,19 @@
 // SHA-256 và kích thước (byte) của từng tệp mô hình và LiteRT; js/vision.js từ chối tệp không khớp.
 
 export const ML_MANIFEST = {
-  "version": 1,
+  "version": 2,
   "files": {
     "models/labels.json": {
-      "sha256": "e24edb82714dbb650b3cbdee8548c8a0d0fdb511683c55b1f05148d5b58a07cc",
-      "size": 20182
+      "sha256": "c18441bc4089459d953ade9fe975164f03bb410b4d8468f3a2bb9dd7a6722a9f",
+      "size": 24423
+    },
+    "models/sign-cls.int8.tflite": {
+      "sha256": "f89a97dfd29dffd05e16c66b7171c0bcf9633803752d64610e65e6ef8e725d47",
+      "size": 370520
+    },
+    "models/sign-det.int8.tflite": {
+      "sha256": "5c07b0c67be8cddd4515f4babf5b88e38ad8c57823007bbd6cff3b89012445e8",
+      "size": 526736
     },
     "vendor/litert/litert.iife.min.js": {
       "sha256": "270781bc0f159b75b639c65c63fe64a943185992ec77971740801c0ab3135d8b",

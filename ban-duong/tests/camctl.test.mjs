@@ -37,6 +37,8 @@ import {
   VISION_TEXT,
 } from '../js/camctl.js';
 
+const LABELS_WAIT_MS = 10000; // hạn chờ tải lại labels.json trong bài kiểm thử (máy bận vẫn kịp)
+
 const settle = async (n = 8) => {
   for (let i = 0; i < n; i++) await new Promise((r) => setImmediate(r));
 };
@@ -1301,7 +1303,11 @@ test('labels.json: lần mở đầu (service worker chưa điều khiển trang
   // Có mạng lại: tải lại labels.json đã lỗi.
   env2.fetchImpl = null;
   env2.win.dispatchEvent(new Event('online'));
-  for (let i = 0; i < 50 && env2.ctl.state.labels === 'loading'; i++) await settle();
+  // Chờ theo hạn thời gian, không theo số lượt: băm SHA-256 bằng WebCrypto chạy ngoài luồng và có thể chậm khi máy bận.
+  const deadline = Date.now() + LABELS_WAIT_MS;
+  while (Date.now() < deadline && (env2.ctl.state.labels !== 'ok' || env2.fetches.length < 2)) {
+    await new Promise((r) => setTimeout(r, 5));
+  }
   assert.equal(env2.fetches.length, 2);
   assert.equal(env2.ctl.state.labels, 'ok');
   env2.ctl.dispose();
