@@ -17,7 +17,6 @@ import {
   FIX_SPEED_MIN,
   fitRange,
   focalPx,
-  FOE_ANGLE,
   FOE_BASE,
   FOE_MIN_MOVE,
   IOU_MIN,
@@ -239,9 +238,8 @@ test('Tracker: lọc theo IoU/khoảng cách tâm, tỉ lệ cỡ mỗi bước 
   assert.deepEqual(run((b) => (b.family = 'triangle')), [n, 1], 'khác họ biển');
 });
 
-test('Tracker: dịch chuyển trên 3 px phải hướng ra xa điểm tụ trong 35°', () => {
+test('Tracker: dịch chuyển dọc trên 3 px không được hướng về phía đường chân trời; chiều ngang không xét (máy lệch, vào cua)', () => {
   assert.equal(FOE_MIN_MOVE, 3);
-  assert.equal(FOE_ANGLE, 35);
   assert.ok(FOE_BASE >= 2);
   // Biển to, nằm phải điểm tụ: dịch vào trong 12 px vẫn trùng nhiều (IoU cao) nhưng ngược hướng giãn ra.
   const pts = synth({ Z0: 30, Zend: 15 }).points;
@@ -258,8 +256,75 @@ test('Tracker: dịch chuyển trên 3 px phải hướng ra xa điểm tụ tro
   // Hướng ra ngoài: tiếp tục chuyển động giãn ra từ điểm tụ.
   const out = { x: last.x - base.x, y: last.y - base.y };
   assert.equal(run(out.x * 0.5, out.y * 0.5), 1);
-  assert.equal(run(-(last.x - base.x) - 12, 0), 2, 'lùi về phía điểm tụ');
-  assert.equal(run(0, -(last.y - base.y) + 40), 2, 'đi ngang/xuống, lệch xa hướng giãn ra');
+  // Lệch ngang về phía điểm tụ giả định: máy gắn lệch hay xe vào cua dời cả khung theo chiều ngang, vẫn là biển đó.
+  // Điểm tụ giả định lệch 400 px sang phải điểm tụ thật (máy gắn lệch, camAim mặc định): biển đi ngang về phía điểm tụ
+  // giả định (chiều dọc vẫn ra xa đường chân trời) vẫn là một lượt bám.
+  const yawed = new Tracker({ width: 1920, height: 1080, foe: { x: FOE.x + 400, y: FOE.y } });
+  const far = synth({ Z0: 60, Zend: 15 }).points;
+  const ended = far.flatMap((pt) => yawed.update(frameOf(pt), pose(pt)));
+  assert.deepEqual([ended.length, yawed.tracks.length, yawed.tracks[0].points.length], [0, 1, far.length]);
+  assert.equal(run(0, -(last.y - base.y) + 40), 2, 'đi xuống, về phía đường chân trời');
+  assert.equal(run(out.x, -(last.y - base.y) + 6), 2, 'dọc về phía đường chân trời quá 3 px');
+});
+
+/**
+ * Camera lỗ kim trên xe chạy trên cung tròn bán kính R (dương: cua phải, âm: cua trái; Infinity: đường thẳng), máy
+ * gắn lệch yaw độ sang phải mà ứng dụng vẫn giả định điểm tụ ở giữa khung (camAim mặc định). Biển 0,7 m lệch lat m
+ * sang phải đường (âm: bên trái), cao hơn camera 1,2 m, ở quãng 100 m. → { tracks, ok }
+ */
+function curveRun({ R = Infinity, yaw = 0, lat = 5, kmh = 50, fps = 5, seed = 1 }) {
+  let st = seed >>> 0;
+  const r = () => {
+    st = (st + 0x6d2b79f5) | 0;
+    let t = Math.imul(st ^ (st >>> 15), 1 | st);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  const g = () => Math.sqrt(-2 * Math.log(r() || 1e-12)) * Math.cos(2 * Math.PI * r());
+  const v = kmh / 3.6;
+  const dt = 1 / fps;
+  const sSign = 100;
+  const pos = (s) => (Number.isFinite(R) ? { x: R - R * Math.cos(s / R), y: R * Math.sin(s / R), h: s / R } : { x: 0, y: s, h: 0 });
+  const ps = pos(sSign);
+  const sx = ps.x + lat * Math.cos(ps.h);
+  const sy = ps.y - lat * Math.sin(ps.h);
+  const tr = new Tracker({ width: 1920, height: 1080, foe: FOE });
+  const ended = [];
+  let t = 0;
+  for (let s = 0; s < sSign + 5; s += v * dt, t += dt) {
+    const c = pos(s);
+    const h = c.h + (yaw * Math.PI) / 180;
+    const dx = sx - c.x;
+    const dy = sy - c.y;
+    const Z = dx * Math.sin(h) + dy * Math.cos(h);
+    const X = dx * Math.cos(h) - dy * Math.sin(h);
+    const boxes = [];
+    if (Z > 0.5) {
+      const wT = (F * 0.7) / Z;
+      const cx = FOE.x + (F * X) / Z + g();
+      const cy = FOE.y - (F * 1.2) / Z + g();
+      const w = wT * (1 + 0.03 * g()) + 0.7 * g();
+      if (wT >= 10 && cx > w && cx < 1920 - w) {
+        const cls = w >= 20 ? [['P.127[50]', 0.93], ['other-sign', 0.04]] : null;
+        boxes.push({ x: cx - w / 2, y: cy - w / 2, w, h: w, family: 'ring', s: 0.8, pass: 'A', cls });
+      }
+    }
+    ended.push(...tr.update({ t: t * 1000, lum: LUM, boxes }, { D: s, speed: v, accuracy: 5, simulated: false, corridor: true }));
+  }
+  ended.push(...tr.flush());
+  return { tracks: ended.length, ok: ended.some((k) => acceptTrack(k, CTX).ok) };
+}
+
+test('Tracker: đường cong (R = ±100, ±200, ±400 m) và máy gắn lệch ±10°, ±15° (camAim mặc định): biển vẫn được nhận', () => {
+  const seeds = [1, 2, 3, 4, 5, 6, 7, 8];
+  const all = (o) => seeds.every((seed) => curveRun({ ...o, seed }).ok);
+  for (const R of [400, 200, 100, -400, -200, -100]) assert.ok(all({ R }), `R = ${R} m, 50 km/h, 5 khung/giây`);
+  for (const yaw of [10, 15, -10, -15]) {
+    for (const lat of [5, -3]) assert.ok(all({ yaw, lat, fps: 3 }), `máy lệch ${yaw}°, biển lệch ${lat} m, 3 khung/giây`);
+  }
+  // Đường thẳng, máy thẳng: một biển là một lượt bám.
+  const n = seeds.reduce((a, seed) => a + curveRun({ seed }).tracks, 0) / seeds.length;
+  assert.ok(n <= 1.25, `${n} lượt bám mỗi biển`);
 });
 
 test('Tracker: biển phụ ngay dưới biển ở ≥ 2 khung → plate "unread"', () => {

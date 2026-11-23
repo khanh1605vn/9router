@@ -6,8 +6,10 @@
 //   một lần và kiểm SHA-256 theo js/mlmanifest.js. Kho vẫn dùng được (cảnh báo, xem lại, nhập, xuất, xoá) khi máy không
 //   chạy được bộ nhận diện hoặc bản cài chưa có mô hình;
 // - giới hạn tốc độ từ biển camera (CameraLimit) cho đồng hồ tốc độ;
-// - camera (CameraService), bộ nhận diện (Vision), bộ chọn mức tải (LevelScheduler), và kho ảnh kiểm tra (EvalCrops)
-//   khi người dùng bật camEval.
+// - camera (CameraService), bộ nhận diện (Vision), bộ chọn mức tải (LevelScheduler);
+// - kho ảnh kiểm tra (EvalCrops, IndexedDB 'banduong-evalcrops'): đọc lúc khởi động dù camEval bật hay tắt, để ảnh quá
+//   EVAL_RETENTION_DAYS ngày luôn bị xoá (lúc khởi động và ít nhất mỗi EVAL_EXPIRE_MS khi ứng dụng mở lâu), số ảnh
+//   hiện đúng, và "Xoá ảnh biển đã lưu" (luôn được) xoá được ảnh đã lưu từ trước. Chỉ thêm ảnh khi camEval bật.
 //
 // An toàn (PLAN §7): mọi lần tự mở camera đều không có userGesture, nên CameraService chỉ gọi getUserMedia khi quyền đã
 // là 'granted' và không bao giờ tự hiện hộp hỏi quyền. enable() và openCheck() (mục "Kiểm tra camera") chỉ chạy khi xe
@@ -19,7 +21,7 @@
 // Ứng dụng thật không bao giờ đặt __BD_TEST__, nên móc này không làm gì.
 
 import { CAMERA_ERROR_TEXT, CameraService, cameraConstraints, cameraSupport, CONSTRAINT_STEPS, errorCode, SUPPORT_TEXT, watchBattery } from './camera.js';
-import { captureBlock, DRIVING_MODES, foeFor, holdCamera, isParked, LevelScheduler, StillTimer } from './camsched.js';
+import { CAPTURE_SPEED, captureBlock, DRIVING_MODES, foeFor, holdCamera, isParked, LevelScheduler, StillTimer } from './camsched.js';
 import { planFiles, quantile, verifyBytes, Vision, VISION_LIMITS } from './vision.js';
 import { ML_MANIFEST } from './mlmanifest.js';
 import { LearnedSigns, MAX_RECORDS } from './learnedsigns.js';
@@ -41,10 +43,16 @@ export const PAUSE_POLL_MS = 5000; // mức tải 0 (tạm dừng cho máy đỡ
 // Bộ nhận diện hỏng giữa chừng ('worker') hoặc tải bị treo ('load'): tự tải lại sau từng khoảng này (ms), rồi thôi cho
 // tới lần bật lại hay tải lại trang.
 export const VISION_RETRY_MS = Object.freeze([3000, 15000, 60000]);
+// … số lần thử lại chỉ được trả lại khi bộ nhận diện đã xử lý chừng này khung liên tiếp không lỗi (tính theo khung, không
+// theo giờ: lúc đỗ, ẩn trang hay chạy thử thì không có khung nào). Bộ nhận diện tải được nhưng hỏng ở mỗi khung (máy
+// yếu quá FRAME_TIMEOUT, hết bộ nhớ) vì thế không tải lại mãi: thử VISION_RETRY_MS.length lần rồi thôi, trả camera.
+export const VISION_STABLE_FRAMES = 100;
 // Lỗi bộ nhận diện không tự thử lại: máy không chạy được, bản cài không có mô hình, tệp hỏng (phải tải lại trang).
 export const VISION_FATAL = Object.freeze(['unsupported', 'no-models', 'integrity']);
 export const RANGE_STEP_M = 5; // tầm đọc biển ước tính làm tròn xuống bội số này (m)
 export const PROGRESS_STEP = 0.01; // tiến độ tải chỉ báo lại khi đổi từ chừng này (phần) trở lên
+// Ứng dụng mở nhiều ngày liền: xoá ảnh kiểm tra quá hạn ít nhất mỗi chừng này (ms, theo đồng hồ của máy).
+export const EVAL_EXPIRE_MS = 60 * 60 * 1000;
 
 // ---- Chữ hiện cho người dùng (chỉ ở màn hình cài đặt lúc xe đỗ; không đọc to) ----
 export const TEXT = Object.freeze({
@@ -64,6 +72,8 @@ export const TEXT = Object.freeze({
   dark: 'Hình từ camera quá tối.',
   bright: 'Hình từ camera quá sáng.',
   labels: 'Chưa tải được danh sách biển. Hãy kết nối mạng rồi mở lại ứng dụng.',
+  visionStopped: 'Bộ nhận diện biển bị lỗi nhiều lần nên đã dừng. Sẽ thử lại ở chuyến đi sau.',
+  enableHidden: 'Ứng dụng đã bị ẩn khi đang mở camera. Hãy bấm bật lại.',
   keepAwakeOn: 'Đã bật “Giữ màn hình sáng khi lái” vì camera chỉ chạy khi màn hình sáng.',
 });
 
@@ -128,7 +138,10 @@ export function stateText(st) {
   if (!st.support.ok) return SUPPORT_TEXT[st.support.reason] || SUPPORT_TEXT['no-simd'];
   if (st.models !== 'ok') return VISION_TEXT['no-models'];
   if (!st.enabled) return TEXT.off;
-  if (st.visionError && st.visionError !== 'args') return VISION_TEXT[st.visionError] || VISION_TEXT.load;
+  if (st.visionError && st.visionError !== 'args') {
+    if (st.visionGaveUp && st.visionError === 'worker') return TEXT.visionStopped; // không còn "Đang chạy lại"
+    return VISION_TEXT[st.visionError] || VISION_TEXT.load;
+  }
   if (st.camera.startsWith('error:')) return CAMERA_ERROR_TEXT[st.camera.slice(6)] || CAMERA_ERROR_TEXT.failed;
   if (st.block) return TEXT[st.block] || TEXT.off;
   if (st.vision === 'loading') {
@@ -185,6 +198,7 @@ export class CameraController {
   #cam = null;
   #vision = null;
   #evalCrops = null;
+  #evalExpiredAt = null; // lần gần nhất xoá ảnh kiểm tra quá hạn (ms, đồng hồ của máy)
   #still;
   #battery = null;
   #labels = null;
@@ -194,6 +208,7 @@ export class CameraController {
   #lastKey = '';
   #lastFix = null;
   #speedMs = null;
+  #movedAt = null; // lần cuối xe chạy từ CAPTURE_SPEED trở lên (mono ms; OBD hay GPS thật, không tính chạy thử)
   #block = 'off';
   #blockSince = 0;
   #driving = false;
@@ -207,7 +222,9 @@ export class CameraController {
   #visionRetry = 0;
   #visionTimer = null;
   #visionLoad = null;
-  #visionGaveUp = false; // đã thử lại đủ VISION_RETRY_MS: thôi cho tới lần bật lại
+  #visionGaveUp = false; // đã thử lại đủ VISION_RETRY_MS: thôi (và trả camera) cho tới chuyến sau, lần bật lại hay khi có mạng lại
+  #visionOkFrames = 0; // số khung xử lý được liên tiếp từ lần tải gần nhất (VISION_STABLE_FRAMES)
+  #loaded = null; // promise đọc kho biển đã học (clear() chỉ chờ cái này, không chờ labels.json)
   #progress = null;
   #argsLogged = false;
   #keepAwakeTurnedOn = false;
@@ -222,7 +239,10 @@ export class CameraController {
    * @param signs          SignEngine (đọc lastCorridor, lastCorridorTime)
    * @param getMode        () → state.mode của main.js
    * @param carStationary  () → true/false (tốc độ của xe qua OBD, không thì GPS), như carStationary() của main.js
-   * Thay khi kiểm thử: document, navigator, ImageCapture, createImageBitmap, fetch, digest, manifest, base (gốc ứng
+   * @param carSpeed       () → tốc độ do xe báo (km/h) khi còn mới, hoặc null: để biết xe vừa chạy, kể cả khi mất GPS
+   * @param isSimulated    () → true khi đang "Chạy thử" (state.simulate của main.js): camera không mở, kể cả trước
+   *                       lần định vị giả đầu tiên
+   * Thay khi kiểm thử: document, window (sự kiện 'online'), navigator, ImageCapture, createImageBitmap, fetch, digest, manifest, base (gốc ứng
    * dụng), now (Date.now), mono (performance.now), setTimeout, clearTimeout, learnedBackend, evalBackend,
    * cameraFactory(deps), visionFactory(deps), support (() → { ok, reason }), log.
    */
@@ -236,7 +256,10 @@ export class CameraController {
       signs: opts.signs || null,
       getMode: opts.getMode || (() => 'browse'),
       carStationary: opts.carStationary || (() => null),
+      carSpeed: opts.carSpeed || (() => null),
+      isSimulated: opts.isSimulated || (() => false),
       document: 'document' in opts ? opts.document : g.document || null,
+      window: 'window' in opts ? opts.window : g.window || null,
       navigator: 'navigator' in opts ? opts.navigator : g.navigator || null,
       ImageCapture: 'ImageCapture' in opts ? opts.ImageCapture : g.ImageCapture || null,
       createImageBitmap: 'createImageBitmap' in opts ? opts.createImageBitmap : g.createImageBitmap || null,
@@ -298,10 +321,18 @@ export class CameraController {
       doc.addEventListener('visibilitychange', fn);
       this.#offs.push(() => doc.removeEventListener('visibilitychange', fn));
     }
+    const win = o.window;
+    if (win && typeof win.addEventListener === 'function') {
+      const fn = () => this.#onOnline();
+      win.addEventListener('online', fn);
+      this.#offs.push(() => win.removeEventListener('online', fn));
+    }
+    this.#warmLabelsOnControl();
     this.#wasEnabled = this.#s.camEnabled === true;
-    this.#still.update(this.#stillInput());
+    this.#stillUpdate();
+    const loaded = this.#learned.load().catch(() => 0);
+    this.#loaded = loaded;
     this.#ready = (async () => {
-      const loaded = this.#learned.load().catch(() => 0);
       await this.#loadLabels();
       this.#makeLearner();
       try {
@@ -314,6 +345,9 @@ export class CameraController {
         this.#battery = null;
       }
       await loaded;
+      // Kho ảnh kiểm tra: đọc (load() xoá ảnh quá hạn) cả khi camEval tắt, để ảnh đã lưu từ trước không nằm lại quá
+      // hạn và số ảnh hiện đúng. Không thêm ảnh khi camEval tắt (EvalCrops#add kiểm enabled()).
+      await this.#evalStore().load().catch(() => 0);
       this.#applySettings();
       return this;
     })();
@@ -350,11 +384,27 @@ export class CameraController {
       return null;
     }
     this.#labelsState = 'loading';
+    // Hạn chót (mạng treo, "lie-fi"): không có thì init() và clear() có thể chờ tới khi trình duyệt tự bỏ yêu cầu.
+    const ac = typeof AbortController === 'function' ? new AbortController() : null;
+    let timer = null;
+    const deadline = new Promise((resolve, reject) => {
+      timer = o.setTimeout(() => {
+        try {
+          ac?.abort();
+        } catch {
+          // đã huỷ
+        }
+        reject(new Error('timeout'));
+      }, VISION_LIMITS.LOAD_IDLE);
+    });
     try {
-      const url = new URL(`${LABELS_PATH}?v=${entry.sha256.slice(0, VISION_LIMITS.HASH_QUERY)}`, o.base || DEFAULT_BASE).href;
-      const res = await o.fetch(url, { credentials: 'same-origin' });
-      if (!res || !res.ok) throw new Error(`HTTP ${res ? res.status : '?'}`);
-      const buf = await res.arrayBuffer();
+      const url = this.#labelsUrl(entry);
+      const get = async () => {
+        const res = await o.fetch(url, ac ? { credentials: 'same-origin', signal: ac.signal } : { credentials: 'same-origin' });
+        if (!res || !res.ok) throw new Error(`HTTP ${res ? res.status : '?'}`);
+        return res.arrayBuffer();
+      };
+      const buf = await Promise.race([get(), deadline]);
       await verifyBytes(buf, { path: LABELS_PATH, sha256: entry.sha256, size: entry.size }, o.digest);
       const json = JSON.parse(new TextDecoder().decode(buf));
       if (!P.checkLabels(json).ok) throw new Error('labels');
@@ -364,8 +414,63 @@ export class CameraController {
     } catch (err) {
       this.#labelsState = 'error';
       o.log('Không tải được labels.json:', err);
+    } finally {
+      o.clearTimeout(timer);
     }
     return this.#labels;
+  }
+
+  /** Đúng URL mà Vision dùng cho labels.json (?v=<16 ký tự đầu SHA-256>). */
+  #labelsUrl(entry) {
+    return new URL(`${LABELS_PATH}?v=${entry.sha256.slice(0, VISION_LIMITS.HASH_QUERY)}`, this.#o.base || DEFAULT_BASE).href;
+  }
+
+  /**
+   * Lần mở đầu tiên: init() tải labels.json trước khi service worker kịp điều khiển trang, nên tệp không vào bộ nhớ
+   * đệm dữ liệu nhận diện và lần mở sau không có mạng sẽ thiếu. Khi service worker nhận trang ('controllerchange'), tải
+   * lại đúng URL đó một lần (qua service worker, nó kiểm SHA-256 trước khi lưu). Không đổi trạng thái labels; lỗi bỏ qua.
+   */
+  #warmLabelsOnControl() {
+    let sw = null;
+    try {
+      sw = this.#o.navigator?.serviceWorker || null;
+      if (!sw || sw.controller || typeof sw.addEventListener !== 'function') return;
+    } catch {
+      return;
+    }
+    const entry = this.#o.manifest?.files?.[LABELS_PATH];
+    if (!entry || typeof entry.sha256 !== 'string') return;
+    const off = () => {
+      try {
+        sw.removeEventListener('controllerchange', warm);
+      } catch {
+        // đã gỡ
+      }
+    };
+    const warm = () => {
+      off();
+      if (this.#disposed) return;
+      try {
+        Promise.resolve(this.#o.fetch(this.#labelsUrl(entry), { credentials: 'same-origin' }))
+          .then((res) => res?.arrayBuffer?.())
+          .catch(() => {});
+      } catch {
+        // chỉ để làm nóng bộ nhớ đệm
+      }
+    };
+    sw.addEventListener('controllerchange', warm);
+    this.#offs.push(off);
+  }
+
+  /** Có mạng lại: tải lại labels.json đã lỗi; bộ nhận diện đã thôi vì không tải được thì thử lại từ đầu. */
+  #onOnline() {
+    if (this.#disposed || !this.#limit) return;
+    if (this.#labelsState === 'error') this.#loadLabels().then(() => this.#makeLearner());
+    if (this.#visionGaveUp && this.#visionError === 'load') {
+      this.#visionGaveUp = false;
+      this.#visionRetry = 0;
+      this.refresh();
+    }
   }
 
   /** Bộ học dùng đúng đối tượng labels của kho. Chưa có labels: vẫn tạo (CameraLimit vẫn nghe được lượt đi qua). */
@@ -392,6 +497,7 @@ export class CameraController {
     if (!fix || !Array.isArray(fix.coord)) return;
     this.#lastFix = fix;
     this.#speedMs = Number.isFinite(carSpeed) && carSpeed >= 0 ? carSpeed / 3.6 : Number.isFinite(fix.speed) ? fix.speed : null;
+    if (!fix.simulated) this.#noteMoving(this.#speedMs);
     const o = this.#o;
     const s = this.#s;
     const signs = o.signs;
@@ -419,20 +525,60 @@ export class CameraController {
 
   /** Gọi mỗi giây và mỗi khi xe báo tốc độ: để biết xe đã đỗ đủ lâu chưa, kể cả khi không có định vị mới. */
   tick() {
-    this.#still.update(this.#stillInput());
+    this.#stillUpdate();
     this.refresh();
+  }
+
+  /** Ghi lại lúc xe đang chạy (speedMs m/s từ CAPTURE_SPEED trở lên): rung nhẹ của GPS khi đỗ không tới mức này. */
+  #noteMoving(speedMs) {
+    if (Number.isFinite(speedMs) && speedMs >= CAPTURE_SPEED) this.#movedAt = this.#o.mono();
+  }
+
+  /**
+   * Cập nhật bộ đếm đứng yên. Trong chế độ lái thì không đếm (đặt lại): chỉ tính thời gian đứng yên sau khi đã rời
+   * chế độ lái. Tốc độ do xe báo (OBD) cũng ghi lại lúc xe chạy, kể cả khi không có định vị mới.
+   */
+  #stillUpdate() {
+    let kmh = null;
+    try {
+      kmh = this.#o.carSpeed();
+    } catch {
+      kmh = null;
+    }
+    if (Number.isFinite(kmh)) this.#noteMoving(kmh / 3.6);
+    const input = this.#stillInput();
+    if (DRIVING_MODES.has(this.#o.getMode())) {
+      this.#still.reset();
+      return { input, sinceMs: 0 };
+    }
+    return { input, sinceMs: this.#still.update(input) };
   }
 
   /** Chuyến đi mới: quên lịch sử định vị, lượt bám, các biển đang xét, giới hạn camera; bộ chọn mức tải đo lại. */
   newTrip() {
+    this.#forgetSimFix();
     this.#learner?.reset();
     this.#sched?.reset();
     this.#limit?.reset();
+    // Bộ nhận diện đã thôi thử lại ở chuyến trước (mạng yếu, lỗi lặp lại): chuyến mới được thử lại VISION_RETRY_MS.
+    const gaveUp = this.#visionGaveUp;
+    this.#visionGaveUp = false;
+    this.#visionRetry = 0;
+    if (gaveUp) this.refresh();
   }
 
   /** Quên giới hạn tốc độ camera (khi main.js tạo lại SpeedMonitor: chạy thử, đổi loại xe). */
   resetLimit() {
+    this.#forgetSimFix();
     this.#limit?.reset();
+  }
+
+  /** Quên lần định vị giả cuối (chạy thử vừa xong): chuyến thật bắt đầu trước lần định vị thật đầu tiên không bị coi là chạy thử. */
+  #forgetSimFix() {
+    if (this.#lastFix?.simulated) {
+      this.#lastFix = null;
+      this.#speedMs = null;
+    }
   }
 
   #stillInput() {
@@ -446,11 +592,14 @@ export class CameraController {
     return { speed: this.#lastFix && Number.isFinite(this.#lastFix.speed) ? this.#lastFix.speed : null, carStationary };
   }
 
-  /** Xe đã đỗ (không ở chế độ lái, đứng yên ít nhất 5 giây): điều kiện cho mọi thao tác với camera và kho biển. */
+  /**
+   * Xe đã đỗ (không ở chế độ lái, đứng yên ít nhất 5 giây sau khi rời chế độ lái, không chạy trong PARK_RECENT_MS vừa
+   * qua): điều kiện cho mọi thao tác với camera và kho biển.
+   */
   isParked() {
-    const input = this.#stillInput();
-    const sinceMs = this.#still.update(input);
-    return isParked({ mode: this.#o.getMode(), ...input, sinceMs });
+    const { input, sinceMs } = this.#stillUpdate();
+    const movedAgoMs = this.#movedAt == null ? Infinity : this.#o.mono() - this.#movedAt;
+    return isParked({ mode: this.#o.getMode(), ...input, sinceMs, movedAgoMs });
   }
 
   #modelsOk() {
@@ -470,20 +619,29 @@ export class CameraController {
 
   #computeBlock() {
     return captureBlock({
-      camEnabled: this.#s.camEnabled === true && this.#available(),
+      // Bộ nhận diện đã thôi thử lại: không giữ camera (không khung nào được xử lý), như khi không chạy được.
+      camEnabled: this.#s.camEnabled === true && this.#available() && !this.#visionGaveUp,
       mode: this.#o.getMode(),
       visible: this.#visible(),
       speed: this.#speedMs,
       battery: this.#battery,
-      simulated: Boolean(this.#lastFix?.simulated),
+      simulated: this.#simulated() || Boolean(this.#lastFix?.simulated),
     });
+  }
+
+  #simulated() {
+    try {
+      return this.#o.isSimulated() === true;
+    } catch {
+      return false;
+    }
   }
 
   /** Camera có nên mở lúc này không (cũng là canResume của CameraService khi trang hiện lại). */
   #wantCamera() {
     const block = this.#computeBlock();
     const blockedMs = block && block === this.#block ? this.#o.mono() - this.#blockSince : 0;
-    return holdCamera({ block, blockedMs });
+    return holdCamera({ block, blockedMs }) && this.#visionState === 'ready';
   }
 
   /**
@@ -493,6 +651,7 @@ export class CameraController {
   refresh() {
     if (!this.#limit || this.#disposed) return; // chưa init(), hoặc đã dispose()
     const o = this.#o;
+    this.#expireEval();
     const driving = DRIVING_MODES.has(o.getMode());
     if (this.#driving && !driving) this.#limit.reset(); // rời chế độ lái
     this.#driving = driving;
@@ -509,16 +668,23 @@ export class CameraController {
       if (!hold) {
         this.#stopLoop();
         if (this.#cam) {
-          if (block === 'off' || block === 'mode') {
+          if (block === 'off' || block === 'mode' || block === 'simulated') {
             if (this.#cam.state !== 'off') this.#cam.stop();
           } else if (block !== 'hidden') {
-            this.#cam.suspend(); // xe chậm, pin yếu, chạy thử quá IDLE_RELEASE_MS: trả camera, vẫn giữ ý muốn chạy
+            this.#cam.suspend(); // xe chậm, pin yếu quá IDLE_RELEASE_MS: trả camera, vẫn giữ ý muốn chạy
           }
         }
       } else if (this.#s.camEnabled === true) {
         this.#ensureVision();
         const cam = this.#camera();
-        if (this.#armed && cam.state !== 'on' && cam.state !== 'starting') {
+        if (this.#visionState !== 'ready') {
+          // Bộ nhận diện chưa chạy được (đang tải, hỏng và đang chờ tải lại): không mở camera vô ích; đang mở thì trả
+          // lại. Mở (một lần, theo quy tắc tự mở) khi bộ nhận diện sẵn sàng.
+          if (cam.state === 'on' || cam.state === 'starting') {
+            cam.suspend();
+            this.#armed = true;
+          }
+        } else if (this.#armed && cam.state !== 'on' && cam.state !== 'starting') {
           this.#armed = false;
           // Tự mở: KHÔNG có userGesture, nên chỉ mở khi quyền đã là 'granted' và không bao giờ hỏi quyền.
           cam.start({ deviceId: this.#s.camDeviceId ?? null });
@@ -534,6 +700,8 @@ export class CameraController {
     if (!this.#visible()) {
       this.#stopLoop(); // CameraService tự trả camera khi trang ẩn
       this.#learner?.pause();
+      // Luồng "Kiểm tra camera" là luồng riêng: cũng đóng (PLAN §5.1). Không tự mở lại khi hiện lại (phải bấm).
+      this.closeCheck();
     }
     this.refresh();
   }
@@ -564,8 +732,22 @@ export class CameraController {
       this.#evalCrops = new EvalCrops({ backend: this.#o.evalBackend, now: this.#o.now, enabled: () => this.#s.camEval === true });
       this.#evalCrops.onChange?.(() => this.#emit());
       this.#evalCrops.load().catch(() => 0);
+      this.#evalExpiredAt = this.#o.now(); // load() vừa xoá ảnh quá hạn
     }
     return this.#evalCrops;
+  }
+
+  /** Ứng dụng mở lâu: xoá ảnh kiểm tra quá hạn, nhiều nhất mỗi EVAL_EXPIRE_MS một lần (đồng hồ chỉnh lùi: xoá ngay). */
+  #expireEval() {
+    const ec = this.#evalCrops;
+    if (!ec) return;
+    const now = this.#o.now();
+    const last = this.#evalExpiredAt;
+    if (last != null && now >= last && now - last < EVAL_EXPIRE_MS) return;
+    this.#evalExpiredAt = now;
+    ec.load()
+      .then(() => ec.expire())
+      .catch(() => 0);
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -612,7 +794,7 @@ export class CameraController {
         () => {
           if (this.#vision !== v) return null;
           this.#visionState = 'ready';
-          this.#visionRetry = 0;
+          this.#visionOkFrames = 0; // số lần thử lại chỉ trả lại sau VISION_STABLE_FRAMES khung tốt
           this.#progress = null;
           v.level = this.#sched.level;
           this.#loadLabels().then(() => this.#makeLearner()); // labels lỗi lúc khởi động mà nay mạng đã có
@@ -645,10 +827,41 @@ export class CameraController {
           this.refresh(); // tải lại nếu vẫn cần camera
         }, ms);
       } else {
+        // Thôi: giải phóng worker và bộ nhớ; computeBlock coi như tắt nên refresh() đóng camera.
         this.#visionGaveUp = true;
+        this.#dropVision();
       }
     }
     this.refresh();
+  }
+
+  /** Khung xử lý được: đủ VISION_STABLE_FRAMES khung liên tiếp thì trả lại số lần thử lại. */
+  #visionOk() {
+    if (this.#visionRetry && ++this.#visionOkFrames >= VISION_STABLE_FRAMES) this.#visionRetry = 0;
+  }
+
+  /** Dừng hẹn thử lại và kết thúc bộ nhận diện (worker, bộ nhớ), giữ nguyên trạng thái lỗi. */
+  #dropVision() {
+    if (this.#visionTimer != null) this.#o.clearTimeout(this.#visionTimer);
+    this.#visionTimer = null;
+    const v = this.#vision;
+    this.#vision = null;
+    this.#visionLoad = null;
+    this.#progress = null;
+    try {
+      v?.terminate();
+    } catch {
+      // đã kết thúc
+    }
+  }
+
+  /** Giải phóng bộ nhận diện và đặt lại trạng thái của nó (giữ lỗi không tự thử lại). */
+  #releaseVision() {
+    this.#dropVision();
+    this.#visionState = 'idle';
+    if (!VISION_FATAL.includes(this.#visionError)) this.#visionError = null;
+    this.#visionRetry = 0;
+    this.#visionGaveUp = false;
   }
 
   #onProgress(p) {
@@ -737,6 +950,7 @@ export class CameraController {
         }
         if (r) {
           fed = true;
+          this.#visionOk();
           learner.onVision(r, { width, height });
           this.#sched.record(r.ms.total, { passes: plan.passes });
           this.#vision.level = this.#sched.level;
@@ -778,16 +992,7 @@ export class CameraController {
     this.closeCheck();
     if (this.#cam) this.#cam.stop();
     this.#learner?.pause();
-    if (this.#visionTimer != null) this.#o.clearTimeout(this.#visionTimer);
-    this.#visionTimer = null;
-    if (this.#vision) this.#vision.terminate();
-    this.#vision = null;
-    this.#visionLoad = null;
-    this.#visionState = 'idle';
-    if (!VISION_FATAL.includes(this.#visionError)) this.#visionError = null;
-    this.#visionRetry = 0;
-    this.#visionGaveUp = false;
-    this.#progress = null;
+    this.#releaseVision();
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -810,15 +1015,18 @@ export class CameraController {
     if (this.#visionError === 'integrity') this.#visionError = null; // người dùng thử lại: tải lại từ đầu
     this.#visionRetry = 0;
     this.#visionGaveUp = false;
+    this.#enabling = true; // trước closeCheck(): giữ bộ nhận diện vừa tải ở "Đo tốc độ xử lý"
     this.closeCheck();
-    this.#enabling = true;
     const cam = this.#camera();
     const p = cam.start({ deviceId: id, userGesture: true });
     return Promise.resolve(p).then((settings) => {
       this.#enabling = false;
       if (!settings) {
         const code = cam.error || 'failed'; // đọc trước refresh(): camera đóng lại thì mã lỗi bị xoá
+        const hidden = !cam.error && (cam.state === 'paused' || !this.#visible());
         this.refresh();
+        // Trang bị ẩn trong lúc hỏi quyền hay mở camera: không phải lỗi, chỉ cần bấm lại khi ứng dụng đang hiện.
+        if (hidden) return { ok: false, reason: 'hidden', text: TEXT.enableHidden, keepAwake: false };
         return { ok: false, reason: code, text: CAMERA_ERROR_TEXT[code] || CAMERA_ERROR_TEXT.failed, keepAwake: false };
       }
       let keepAwake = false;
@@ -860,7 +1068,7 @@ export class CameraController {
     if (!this.support.ok) return no(this.support.reason, SUPPORT_TEXT[this.support.reason] || SUPPORT_TEXT['no-simd']);
     const md = this.#o.navigator?.mediaDevices;
     if (!md || typeof md.getUserMedia !== 'function') return no('unsupported', CAMERA_ERROR_TEXT.unsupported);
-    this.closeCheck();
+    this.#closeCheck(false); // mở lại, đổi camera: giữ bộ nhận diện đã tải để đo
     if (this.#cam && this.#cam.state !== 'off') this.#cam.stop(); // xe đỗ: camera lúc lái vốn đã đóng
     const id = deviceId === undefined ? this.#s.camDeviceId ?? null : deviceId || null;
     const gen = ++this.#checkGen;
@@ -921,6 +1129,7 @@ export class CameraController {
     const n = Math.min(CHECK_FRAMES_MAX, Math.max(1, Math.round(frames) || CHECK_FRAMES));
     const gen = this.#checkGen;
     const v = await this.#ensureVision();
+    if (gen !== this.#checkGen) return { ok: false, reason: 'closed', text: null };
     if (!v || !v.ready) {
       const code = this.#visionError || (this.#available() ? 'load' : this.#modelsOk() ? 'unsupported' : 'no-models');
       return { ok: false, reason: code, text: VISION_TEXT[code] || VISION_TEXT.load };
@@ -953,12 +1162,15 @@ export class CameraController {
         r = await v.process({ bitmap, t: o.mono() }, { passes, foe: foeFor(this.#s.camAim, width, height) });
       } catch (err) {
         const code = err?.code || 'worker';
+        // Luồng kiểm tra vừa đóng (bộ nhận diện bị giải phóng theo): không phải lỗi của bộ nhận diện.
+        if (gen !== this.#checkGen || this.#vision !== v) return { ok: false, reason: 'closed', text: null };
         if (code !== 'args') {
           this.#visionFailed(code);
           return { ok: false, reason: code, text: VISION_TEXT[code] || VISION_TEXT.load };
         }
       }
       if (r) {
+        this.#visionOk();
         times[passes.length > 1 ? 'AB' : 'A'].push(r.ms.total);
         if (onProgress) {
           try {
@@ -1012,9 +1224,20 @@ export class CameraController {
     };
   }
 
-  /** Đóng luồng kiểm tra (gọi bao nhiêu lần cũng được). */
+  /**
+   * Đóng luồng kiểm tra (gọi bao nhiêu lần cũng được). Tính năng đang tắt thì cũng giải phóng bộ nhận diện mà "Đo tốc độ
+   * xử lý" đã tải (hàng chục MB), trừ khi đang bật (enable() giữ nó lại).
+   */
   closeCheck() {
+    this.#closeCheck(true);
+  }
+
+  #closeCheck(release) {
     this.#checkGen++;
+    if (release && this.#vision && this.#s.camEnabled !== true && !this.#enabling) {
+      this.#releaseVision();
+      this.#emit();
+    }
     if (!this.#check) return;
     stopTracks(this.#check.stream);
     this.#check = null;
@@ -1063,7 +1286,7 @@ export class CameraController {
 
   /** "Xoá các biển đã học": luôn được. Cũng thôi giới hạn tốc độ đang lấy từ biển camera. */
   async clear() {
-    await this.#ready;
+    await this.#loaded; // chỉ chờ đọc kho xong (để không bị ghi lại), không chờ labels.json
     this.#limit?.reset();
     this.#learner?.reset();
     if (this.#learned) await this.#learned.clear();
@@ -1153,6 +1376,7 @@ export class CameraController {
       cameraError: this.#cam?.error ?? null,
       vision: this.#visionState,
       visionError: this.#visionError,
+      visionGaveUp: this.#visionGaveUp,
       progress: this.#progress,
       models: this.#modelsOk() ? 'ok' : 'no-models',
       labels: this.#labelsState,

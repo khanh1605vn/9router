@@ -22,7 +22,8 @@ export const EVAL_OUTCOMES = Object.freeze(['accepted', 'near-miss']);
 export const EVAL_FILE_VERSION = 1; // phiên bản tệp xuất (label-crops.html đọc phiên bản 1)
 export const EVAL_FILE_NAME = 'anh-bien-kiem-tra.json';
 
-// Chữ cho giao diện (cài đặt nằm trong "Kiểm tra camera", chỉ khi xe đứng yên).
+// Chữ cho giao diện (cài đặt nằm trong "Kiểm tra camera", chỉ khi xe đứng yên; nút xoá còn có ở mục Cài đặt, luôn bấm
+// được).
 export const EVAL_TEXT = Object.freeze({
   setting: 'Lưu ảnh biển để kiểm tra độ chính xác',
   note: 'Giữ trên máy tối đa 30 ngày các ảnh nhỏ cắt sát biển mà camera ghi nhận, để kiểm tra lại khi xe đứng yên. Ảnh có thể có một phần xe cộ phía sau biển.',
@@ -43,6 +44,17 @@ const isBlob = (b) => b !== null && typeof b === 'object' && typeof b.arrayBuffe
  */
 export function evalIdbBackend(name = EVAL_DB, { indexedDB: idb = globalThis.indexedDB } = {}) {
   let dbp = null;
+  // Kho được đọc lúc khởi động cả khi camEval tắt (để xoá ảnh quá hạn): chưa từng lưu ảnh nào thì đọc và xoá không mở,
+  // nên không tạo cơ sở dữ liệu rỗng. Chỉ put() mới tạo. Trình duyệt không có indexedDB.databases(): mở như thường.
+  const exists = async () => {
+    if (dbp || !idb || typeof idb.databases !== 'function') return true;
+    try {
+      const list = await idb.databases();
+      return !Array.isArray(list) || list.some((d) => d && d.name === name);
+    } catch {
+      return true;
+    }
+  };
   const open = () => {
     if (dbp) return dbp;
     dbp = new Promise((resolve) => {
@@ -79,6 +91,7 @@ export function evalIdbBackend(name = EVAL_DB, { indexedDB: idb = globalThis.ind
   };
   return {
     async getAll() {
+      if (!(await exists())) return [];
       const db = await open();
       if (!db) return [];
       return new Promise((resolve) => {
@@ -92,8 +105,8 @@ export function evalIdbBackend(name = EVAL_DB, { indexedDB: idb = globalThis.ind
       });
     },
     put: (rec) => write((st) => st.put(rec)),
-    delete: (id) => write((st) => st.delete(id)),
-    clear: () => write((st) => st.clear()),
+    delete: async (id) => (await exists()) && write((st) => st.delete(id)),
+    clear: async () => (await exists()) && write((st) => st.clear()),
   };
 }
 

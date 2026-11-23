@@ -48,6 +48,7 @@ import {
   OVER_AT_1_MS,
   PARK_SPEED,
   PARK_STILL_MS,
+  PARK_RECENT_MS,
   PAUSE_MS,
   RISE_FACTOR,
   RISE_MIN,
@@ -1061,6 +1062,18 @@ test('isStill / isParked: ngoài chế độ lái, đứng yên ít nhất 5 gi�
   assert.equal(isParked(), false);
 });
 
+test('isParked: xe vừa chạy chưa tới PARK_RECENT_MS thì chưa đỗ, dù đã rời chế độ lái (dừng đèn đỏ)', () => {
+  assert.equal(PARK_RECENT_MS, 120e3);
+  assert.ok(PARK_RECENT_MS >= 90e3, 'phủ một lần đèn đỏ dài');
+  const base = { mode: 'browse', speed: 0, sinceMs: 60e3 };
+  assert.equal(isParked({ ...base, movedAgoMs: 8000 }), false);
+  assert.equal(isParked({ ...base, movedAgoMs: PARK_RECENT_MS - 1 }), false);
+  assert.equal(isParked({ ...base, movedAgoMs: PARK_RECENT_MS }), true);
+  assert.equal(isParked({ ...base, movedAgoMs: Infinity }), true, 'chưa chạy từ lúc mở ứng dụng');
+  assert.equal(isParked({ ...base, movedAgoMs: NaN }), false);
+  assert.equal(isParked(base), true);
+});
+
 test('StillTimer đếm thời gian đứng yên liên tục', () => {
   let t = 0;
   const st = new StillTimer({ now: () => t });
@@ -1139,8 +1152,8 @@ test('pin yếu thì tạm dừng, cắm sạc thì chạy lại (watchBattery)'
 test('holdCamera: đóng hẳn camera khi không lấy khung quá lâu', () => {
   assert.equal(IDLE_RELEASE_MS, 120e3);
   assert.equal(holdCamera({ block: null }), true);
-  for (const b of ['off', 'mode', 'hidden']) assert.equal(holdCamera({ block: b, blockedMs: 0 }), false, b);
-  for (const b of ['slow', 'battery', 'simulated']) {
+  for (const b of ['off', 'mode', 'hidden', 'simulated']) assert.equal(holdCamera({ block: b, blockedMs: 0 }), false, b);
+  for (const b of ['slow', 'battery']) {
     assert.equal(holdCamera({ block: b, blockedMs: IDLE_RELEASE_MS - 1 }), true, b);
     assert.equal(holdCamera({ block: b, blockedMs: IDLE_RELEASE_MS }), false, b);
   }

@@ -24,7 +24,7 @@ import {
   WAY_CONFIRM_FIXES,
   WAY_LOST_FIXES,
 } from '../js/alerts.js';
-import { SignEngine } from '../js/signengine.js';
+import { joinSays, SignEngine } from '../js/signengine.js';
 import { buildQuery, cellKey, cellOf, parseMaxspeed, parseOverpass, RoadData } from '../js/roaddata.js';
 import { parseRoute } from '../js/routing.js';
 import { RouteTracker } from '../js/tracker.js';
@@ -244,6 +244,23 @@ test('câu đọc biển báo: tắt đọc giới hạn tốc độ thì bỏ b
   assert.equal(signSpeech(two, { speakLimit: false }), 'Phía trước 150 mét, đèn tín hiệu giao thông, bắt đầu khu đông dân cư');
 });
 
+test('tắt đọc giới hạn tốc độ: biển camera như bộ máy biển báo (bản đồ thắng biển camera cùng loại, "camera ghi nhận" nói một lần)', () => {
+  const cam = (code, say, d, extra = {}) => ({ key: `c${code}@${d}`, code, kind: `sign:${code}`, value: null, say: `${say} (camera ghi nhận)`, distance: d, src: 'camera', quiet: false, meta: { plate: false }, ...extra });
+  const osm = (code, say, d, extra = {}) => ({ key: `o${code}@${d}`, code, kind: `sign:${code}`, value: null, say, distance: d, ...extra });
+  // Hai biển camera đã xác nhận và một biển tốc độ camera: bỏ biển tốc độ, câu "camera ghi nhận" chỉ một lần.
+  const f1 = [cam('P.123a', 'cấm rẽ trái', 140), cam('P.124a', 'cấm quay đầu xe', 142), cam('P.127', 'tốc độ tối đa 50 ki lô mét trên giờ', 145, { value: 50, kind: 'speed:50' })];
+  const r1 = { fired: f1, say: `Phía trước 150 mét, ${joinSays(f1)}` };
+  assert.equal(signSpeech(r1, { speakLimit: false }), 'Phía trước 150 mét, cấm rẽ trái và cấm quay đầu xe (camera ghi nhận)');
+  assert.equal(signSpeech(r1, { speakLimit: true }), r1.say);
+  // Biển camera P.123a gần hơn, biển bản đồ P.123a cách 35 m (cùng câu): đọc theo bản đồ, không có "camera ghi nhận".
+  const f2 = [cam('P.123a', 'cấm rẽ trái', 120), osm('P.127', 'tốc độ tối đa 60 ki lô mét trên giờ', 130, { value: 60, kind: 'speed:60' }), osm('P.123a', 'cấm rẽ trái', 155)];
+  const r2 = { fired: f2, say: `Phía trước 100 mét, ${joinSays([f2[1], f2[2]])}` };
+  assert.equal(signSpeech(r2, { speakLimit: false }), 'Phía trước 100 mét, cấm rẽ trái');
+  // Một biển camera có biển phụ: vẫn nói "camera ghi nhận" (không bao giờ đọc biển camera như biển bản đồ).
+  const f3 = [LIMIT, cam('P.123a', 'cấm rẽ trái', 130)];
+  assert.equal(signSpeech({ fired: f3, say: 'x' }, { speakLimit: false }), 'Phía trước 150 mét, cấm rẽ trái (camera ghi nhận)');
+});
+
 test('tắt đọc giới hạn tốc độ: chạy qua chỗ đổi 60 → 40 km/h có đèn tín hiệu, chỉ nghe báo đèn', () => {
   const O = [106.695, 10.785];
   const line = (start, brg, length) => {
@@ -425,6 +442,7 @@ test('giới hạn camera: không bắt đầu từ biển chưa xác nhận, c�
     ['hết tốc độ theo biển ghép', passed(signRec(200, { code: 'DP.127', value: null }))],
     ['xe chưa tới biển', passed(signRec(200), 'none', 'left')],
     ['camera đọc trị số khác ở đúng chỗ', passed(signRec(200), 'miss', 'value')],
+    ['camera thấy (chưa đủ tin) cùng mã khác trị số ở đúng chỗ', { ...passed(signRec(200), 'none', 'conflict'), valueChanged: true }],
     ['kết quả lạ', passed(signRec(200), 'maybe', null)],
     ['không có bản ghi', { outcome: 'none' }],
   ];
@@ -435,6 +453,9 @@ test('giới hạn camera: không bắt đầu từ biển chưa xác nhận, c�
   // Biển có biển phụ vẫn được giữ lại để xét: nó thay (làm hết) giới hạn đang dùng.
   assert.equal(new CameraLimit().onPassed(passed(signRec(200, { plate: 'unread' }))), true);
   assert.equal(new CameraLimit().onPassed(passed(signRec(200, { status: 'candidate' }))), false);
+  // Biển khác mã cùng họ ở cạnh (P.103a cùng cột với P.127): 'conflict' không có valueChanged vẫn được tính.
+  assert.equal(new CameraLimit().onPassed(passed(signRec(200), 'none', 'conflict')), true);
+  assert.equal(runCamera(roads, { to: 330, events: [{ x: 215, evt: passed(signRec(200), 'none', 'conflict') }] }).curAt(300)?.n, 50);
 });
 
 test('giới hạn camera: tin "thấy lại" đến trước khi tới biển thì đợi xe qua biển', () => {
@@ -760,7 +781,7 @@ test('giới hạn camera: tin đến muộn sau khi xe đã qua nút giao thì 
   }
 });
 
-test('đồng hồ tốc độ: lấy giới hạn thấp hơn giữa bản đồ và camera, camera không bao giờ nâng giới hạn', () => {
+test('đồng hồ tốc độ: lấy giới hạn thấp hơn giữa bản đồ (hay tốc độ tự đặt) và camera, camera không bao giờ nâng giới hạn', () => {
   const roads = cameraRoads();
   const f = { coord: at(200), heading: 0, speed: 40 / 3.6, accuracy: 5, time: 0 };
   const m = roads.matchWay(f);
@@ -774,9 +795,13 @@ test('đồng hồ tốc độ: lấy giới hạn thấp hơn giữa bản đ�
   for (const bad of [{ n: 0 }, { n: 300 }, { n: NaN }, { n: 'abc' }, { n: 55.5 }, {}]) {
     assert.equal(sp({ camera: bad }).source, 'road', JSON.stringify(bad));
   }
-  // Không có dữ liệu đường: camera dùng được; tốc độ tự đặt chỉ khi cả hai đều không có.
+  // Không có dữ liệu đường: giới hạn nền là tốc độ tự đặt; camera chỉ hạ nó, không bao giờ nâng.
   const none = (opts) => new SpeedMonitor().update(f, null, { hasData: true, ...opts });
-  assert.deepEqual([none({ camera: { n: 50 }, customMax: 40 }).limit, none({ camera: { n: 50 }, customMax: 40 }).source], [50, 'camera']);
+  assert.deepEqual([none({ camera: { n: 50 }, customMax: 40 }).limit, none({ camera: { n: 50 }, customMax: 40 }).source], [40, 'custom']);
+  assert.deepEqual([none({ camera: { n: 80 }, customMax: 60 }).limit, none({ camera: { n: 80 }, customMax: 60 }).source], [60, 'custom']);
+  assert.deepEqual([none({ camera: { n: 50 }, customMax: 60 }).limit, none({ camera: { n: 50 }, customMax: 60 }).source], [50, 'camera']);
+  assert.deepEqual([none({ camera: { n: 60 }, customMax: 60 }).limit, none({ camera: { n: 60 }, customMax: 60 }).source], [60, 'custom']);
+  assert.deepEqual([none({ camera: { n: 50 } }).limit, none({ camera: { n: 50 } }).source], [50, 'camera']);
   assert.deepEqual([none({ customMax: 40 }).limit, none({ customMax: 40 }).source], [40, 'custom']);
   assert.deepEqual([none({ camera: { n: 50 }, camSpeed: false, customMax: 40 }).limit, none({ camera: { n: 50 }, camSpeed: false, customMax: 40 }).source], [40, 'custom']);
   assert.deepEqual([none({ camera: { n: 50 }, camSpeed: false }).limit, none({ camera: { n: 50 }, camSpeed: false }).source], [null, null]);

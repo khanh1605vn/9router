@@ -453,15 +453,27 @@ SC.S4 = {
       const R = recOf(pass.after, 'R.122');
       const outP = pass.log.passed.filter((e) => e.id === p0.id).map((e) => `${e.outcome}${e.reason ? `:${e.reason}` : ''}`);
       const outW = pass.log.passed.filter((e) => e.id === w0.id).map((e) => `${e.outcome}${e.reason ? `:${e.reason}` : ''}`);
-      timeline.push({ day: pass.day, P: P && recBrief(P), W: Wr && recBrief(Wr), R: R && recBrief(R), outP, outW });
+      const outR = R ? pass.log.passed.filter((e) => e.id === R.id).map((e) => `${e.outcome}${e.reason ? `:${e.reason}` : ''}`) : [];
+      timeline.push({ day: pass.day, P: P && recBrief(P), W: Wr && recBrief(Wr), R: R && recBrief(R), outP, outW, outR });
       res.check(`ngày ${pass.day}: P.127[50] có đúng một lần thiếu`, P && P.misses === lastP.misses + 1, { before: recBrief(lastP), after: P && recBrief(P), events: outP });
       if (lastW.status !== 'retired') res.check(`ngày ${pass.day}: W.224 có đúng một lần thiếu`, Wr && Wr.misses === lastW.misses + 1, { after: Wr && recBrief(Wr), events: outW });
-      res.check(`ngày ${pass.day}: R.122 (vẫn còn) được thấy lại, vẫn đã xác nhận`, R && R.status === 'confirmed' && R.hitDays === (lastR?.hitDays ?? 0) + 1, R && recBrief(R));
+      // PLAN §5.8 chỉ đòi biển vẫn còn không bao giờ bị tính là thiếu: 'hit', hoặc 'none:seen' khi lượt bám thấy biển nhưng
+      // chưa đủ tin (p của oracle 0,80–0,99 mỗi khung, trung bình 3–5 khung dưới 0,85 vào 3–8 % số lần) đều đúng.
+      res.check(
+        `ngày ${pass.day}: R.122 (vẫn còn) không bị tính thiếu ('hit' hoặc 'none:seen'), vẫn đã xác nhận`,
+        R && lastR && outR.length === 1 && ['hit', 'none:seen'].includes(outR[0]) && R.misses === lastR.misses && R.status === 'confirmed' &&
+          R.hitDays === lastR.hitDays + (outR[0] === 'hit' ? 1 : 0),
+        { events: outR, before: lastR && recBrief(lastR), after: R && recBrief(R) },
+      );
       if (P) lastP = P;
       if (Wr) lastW = Wr;
       if (R) lastR = R;
     }
     res.data.timeline = timeline;
+    // Đường thấy lại vẫn phải chạy: ít nhất một ngày là 'hit'; số ngày 'none:seen' được ghi lại.
+    const rSeen = timeline.filter((x) => x.outR?.[0] === 'none:seen').length;
+    const rHits = timeline.filter((x) => x.outR?.[0] === 'hit').length;
+    res.check(`R.122: thấy lại (hit) ${rHits} ngày, 'none:seen' ${rSeen} ngày; có ít nhất một ngày thấy lại`, rHits >= 1, { hit: rHits, seen: rSeen });
     const retiredAtP = timeline.find((x) => x.P?.status === 'retired');
     const retiredAtW = timeline.find((x) => x.W?.status === 'retired');
     res.check(`P.127[50] bị loại đúng ở lần thiếu thứ ${kP}`, retiredAtP && retiredAtP.P.misses - p0.misses === kP && timeline.filter((x) => x.P?.status === 'confirmed').every((x) => x.P.misses - p0.misses < kP), retiredAtP?.P);

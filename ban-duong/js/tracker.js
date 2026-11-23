@@ -17,6 +17,18 @@ const lowerFirst = (s) => (s ? s[0].toLocaleLowerCase('vi') + s.slice(1) : s);
 
 const LEVELS = ['far', 'mid', 'near'];
 
+/** Khoảng cách (m) tới chỗ rẽ mà câu "Còn … mét" (far, mid) và câu rẽ ngay (near) được đọc, theo tốc độ (m/s). */
+function cueDistances(speed) {
+  const fast = speed > 16.7; // trên 60 km/h
+  return { far: fast ? 1000 : 500, mid: fast ? 400 : 200, near: Math.max(35, Math.min(150, speed * 3.5)) };
+}
+
+// Câu biển do camera ghi nhận (có lời rào) sắp bắt đầu ngay trước câu "Còn … mét, rẽ …": giữ lại tới khi câu rẽ đã
+// được đọc, để câu rẽ không phải xếp hàng sau nó (PLAN §7 An toàn 5: chỉ dẫn rẽ được ưu tiên). Câu rẽ sắp tới trong
+// chừng này giây ở tốc độ hiện tại thì giữ; giữ lâu nhất CAMERA_HOLD_MAX_MS (xe dừng giữa chừng) rồi đọc, không bỏ.
+export const CAMERA_HOLD_S = 5;
+export const CAMERA_HOLD_MAX_MS = 6000;
+
 export class RouteTracker {
   constructor(route) {
     this.route = route;
@@ -118,15 +130,29 @@ export class RouteTracker {
       remainingDuration,
       offRoute,
       arrived: this.arrived,
+      speed,
       cue,
     };
   }
 
+  /**
+   * Câu "Còn … mét" (far hay mid) của chỗ rẽ kế tiếp chưa đọc và sẽ được đọc trong vòng `meters` m nữa (p là kết quả
+   * update() của lần định vị này).
+   */
+  cueSoon(p, meters) {
+    if (!p || !p.next || this.arrived || !(meters > 0)) return false;
+    const d = cueDistances(p.speed ?? 0);
+    const done = this.spoken.get(p.stepIndex) || new Set();
+    if (done.has('near')) return false;
+    for (const level of ['far', 'mid']) {
+      if (done.has(level)) continue;
+      if (p.distToNext > d[level] && p.distToNext - d[level] <= meters) return true;
+    }
+    return false;
+  }
+
   #cueFor(k, next, dist, speed, changed) {
-    const fast = speed > 16.7; // trên 60 km/h
-    const farD = fast ? 1000 : 500;
-    const midD = fast ? 400 : 200;
-    const nearD = Math.max(35, Math.min(150, speed * 3.5));
+    const { far: farD, mid: midD, near: nearD } = cueDistances(speed);
     const done = this.spoken.get(k) || new Set();
     this.spoken.set(k, done);
 
@@ -165,5 +191,48 @@ export class RouteTracker {
       if (long) return { level: 'start', text: `Đi tiếp ${spokenDistance(dist)}` };
     }
     return null;
+  }
+}
+
+/**
+ * Giữ câu biển do camera ghi nhận khi câu "Còn … mét, rẽ …" sắp được đọc (dẫn đường). Mỗi lần định vị gọi step() sau
+ * khi đã đọc câu rẽ của lần đó; trả các câu biển cần đọc ngay bây giờ. Chỉ câu mà mọi biển trong đó đều do camera ghi
+ * nhận (items có src) mới bị giữ; câu có biển bản đồ (đường sắt, biển OSM…) luôn đọc ngay. Câu bị giữ được đọc khi câu
+ * rẽ đã đọc, khi câu rẽ không còn sắp tới, hoặc sau CAMERA_HOLD_MAX_MS: không bao giờ bị bỏ.
+ */
+export class CameraSayGate {
+  constructor({ now = () => Date.now() } = {}) {
+    this._now = now;
+    this.held = null; // { says: [câu], at }
+  }
+
+  /**
+   * @param say       câu biển của lần định vị này (hoặc null)
+   * @param items     các mục biển được đọc trong câu (sr.fired)
+   * @param tracker   RouteTracker khi đang dẫn đường, hoặc null
+   * @param progress  kết quả tracker.update() của lần định vị này
+   * @param cue       câu rẽ vừa được đọc ở lần định vị này (progress.cue), hoặc null
+   * @returns các câu cần đọc ngay, theo thứ tự
+   */
+  step({ say = null, items = [], tracker = null, progress = null, cue = null } = {}) {
+    const now = this._now();
+    const soon = Boolean(tracker && progress && tracker.cueSoon(progress, Math.max(0, progress.speed || 0) * CAMERA_HOLD_S));
+    const out = [];
+    if (this.held && (cue || !soon || now - this.held.at >= CAMERA_HOLD_MAX_MS)) {
+      out.push(...this.held.says);
+      this.held = null;
+    }
+    if (say) {
+      const camOnly = Array.isArray(items) && items.length > 0 && items.every((it) => it && it.src);
+      if (camOnly && soon && !cue) {
+        if (this.held) this.held.says.push(say);
+        else this.held = { says: [say], at: now };
+      } else out.push(say);
+    }
+    return out;
+  }
+
+  reset() {
+    this.held = null;
   }
 }

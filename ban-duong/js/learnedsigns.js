@@ -44,6 +44,9 @@ export const TEMP_CODES = new Set(['W.227']); // biển tạm thời
 export const MATCH_ALONG = 25; // cùng biển: cách nhau dọc đường không quá chừng này (m)
 export const MATCH_LATERAL = 10; // … và lệch ngang không quá chừng này (m), để không gộp biển của đường song song
 export const MATCH_FACING = 45; // … và hướng mặt biển lệch không quá chừng này (độ)
+// Hai biển cùng được camera thấy trong một lượt đi qua (coSeen): mỗi bản ghi nhớ tối đa chừng này biển, mỗi biển với
+// số ngày khác nhau có thấy cả hai và ngày gần nhất (không có giờ, không có chuyến đi).
+export const CO_MAX = 4;
 // … và cùng đường: lần thấy mang obs.ways (các đường của hành lang quanh chỗ thấy, do Learner tính) thì bản ghi có
 // wayId phải thuộc các đường đó. Bản ghi không có wayId (biển nhập) chỉ xét lệch ngang.
 export const SUPPRESS_RADIUS = 30; // biển bị báo sai chặn học lại cùng mã trong bán kính này (m), hướng ±45°
@@ -86,6 +89,17 @@ export function dayNumber(ms) {
   const d = new Date(ms);
   return Math.floor(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()) / DAY_MS);
 }
+
+// Ngày lái xe bắt đầu lúc 04:00 giờ máy, không phải nửa đêm: một chuyến đêm qua 00:00 (vài vòng quanh một khu phố lúc
+// 23:50 rồi 00:05) vẫn là một ngày, không đủ "hai ngày khác nhau" để xác nhận biển.
+export const DRIVE_DAY_START_H = 4;
+
+/**
+ * Số thứ tự "ngày lái xe" của kho: như dayNumber nhưng ngày bắt đầu lúc DRIVE_DAY_START_H giờ (00:00–03:59 tính vào
+ * ngày hôm trước). Mọi trường ngày của bản ghi (firstDay, lastHitDay, hitDays, until, co) dùng số này; nên một lần thấy
+ * lúc 00:00–03:59 hiện là ngày hôm trước trong "Thấy lần đầu…", ghi chú của biển và tệp xuất.
+ */
+export const driveDay = (ms) => dayNumber(ms - DRIVE_DAY_START_H * 3600e3);
 
 /** Số thứ tự ngày → "YYYY-MM-DD". */
 export function dayString(day) {
@@ -258,14 +272,30 @@ function sanitize(r) {
     night: r.night === true,
     posErr: isNum(r.posErr) && r.posErr > 0 ? r.posErr : POS_ERR_DEFAULT,
     src: r.src === 'import' ? 'import' : 'camera',
+    co: sanitizeCo(r.co),
   };
 }
 
+/** Danh sách co của bản ghi đọc từ nơi lưu: tối đa CO_MAX mục { id, days ≥ 1, last } hợp lệ, không trùng id. */
+function sanitizeCo(list) {
+  const out = [];
+  if (!Array.isArray(list)) return out;
+  for (const c of list) {
+    if (out.length >= CO_MAX) break;
+    if (!c || typeof c !== 'object' || typeof c.id !== 'string' || !ID_RE.test(c.id) || out.some((o) => o.id === c.id)) continue;
+    if (!isNum(c.days) || !isNum(c.last)) continue;
+    out.push({ id: c.id, days: clamp(Math.round(c.days), 1, 99999), last: Math.round(c.last) });
+  }
+  return out;
+}
+
+const copyCo = (co) => (Array.isArray(co) ? co.map((c) => ({ ...c })) : []);
+
 /** Bản ghi đem lưu: thêm khoá ô 'cell' cho chỉ mục. */
-const stored = (rec) => ({ ...rec, coord: [...rec.coord], cell: cellKey(...cellOf(rec.coord)) });
+const stored = (rec) => ({ ...rec, coord: [...rec.coord], co: copyCo(rec.co), cell: cellKey(...cellOf(rec.coord)) });
 
 /** Bản sao chỉ đọc của bản ghi trả ra ngoài. */
-const snapshot = (rec) => (rec ? { ...rec, coord: [...rec.coord] } : null);
+const snapshot = (rec) => (rec ? { ...rec, coord: [...rec.coord], co: copyCo(rec.co) } : null);
 
 const temporary = (rec) => TEMP_CODES.has(rec.code);
 const needDays = (rec) =>
@@ -366,7 +396,7 @@ export class LearnedSigns {
   }
 
   #today() {
-    return dayNumber(this.now());
+    return driveDay(this.now());
   }
 
   // ---- Chỉ mục ----
@@ -454,12 +484,34 @@ export class LearnedSigns {
     this.expire();
     const out = [];
     for (const r of this.#near(coord, radius)) {
-      if (!SHOWN.has(r.status)) continue;
+      if (!SHOWN.has(r.status) || this.#superseded(r)) continue;
       let f = this.#feats.get(r.id);
       if (!f) this.#feats.set(r.id, (f = featOf(r)));
       out.push(f);
     }
     return out;
+  }
+
+  /**
+   * Biển đã xác nhận rec có một biển đã xác nhận khác cùng mã, khác trị số, ở đúng chỗ (cùng quy tắc so khớp như
+   * match(): dọc đường ≤ 25 m, ngang ≤ 10 m, hướng mặt ±45°, cùng đường khi cả hai có wayId) mà được thấy lại gần đây
+   * hơn (lastHitDay muộn hơn; bằng nhau thì biển có sau, firstDay muộn hơn): biển đã đổi trị số (60 → 50). Chỉ biển
+   * mới được hiện và đọc; điểm của cả hai không đổi, nên một lần đọc nhầm trị số tự sửa ở lần đọc đúng kế tiếp
+   * (PLAN §5.9). Bộ học vẫn xét lượt đi qua cả hai (recordsNear không lọc).
+   */
+  #superseded(rec) {
+    if (rec.status !== 'confirmed') return false;
+    const mine = rec.lastHitDay ?? -Infinity;
+    for (const o of this.#near(rec.coord, Math.hypot(MATCH_ALONG, MATCH_LATERAL) + 1)) {
+      if (o === rec || o.status !== 'confirmed' || o.code !== rec.code || (o.value ?? null) === (rec.value ?? null)) continue;
+      if (!facingClose(o.facing, rec.facing)) continue;
+      if (o.wayId != null && rec.wayId != null && o.wayId !== rec.wayId) continue; // biển của đường khác
+      const { along, lateral } = offsets(rec.coord, o.coord, (rec.facing + 180) % 360);
+      if (along > MATCH_ALONG || lateral > MATCH_LATERAL) continue;
+      const theirs = o.lastHitDay ?? -Infinity;
+      if (theirs > mine || (theirs === mine && o.firstDay > rec.firstDay)) return true;
+    }
+    return false;
   }
 
   /** Bản sao các bản ghi chưa xác nhận và đã xác nhận trong bán kính radius (m) (bộ học dùng để xét lượt đi qua). */
@@ -696,6 +748,7 @@ export class LearnedSigns {
         night: Boolean(o.night),
         posErr: isNum(o.posErr) && o.posErr > 0 ? o.posErr : POS_ERR_DEFAULT,
         src: 'camera',
+        co: [],
       };
       rec.until = this.#untilFor(rec, day);
       this.#index(rec);
@@ -734,6 +787,41 @@ export class LearnedSigns {
     this.#touch(rec);
     this.#emit();
     return snapshot(rec);
+  }
+
+  /**
+   * Camera vừa thấy cả hai biển a và b trong cùng một lượt đi qua, bằng hai lượt bám riêng có nhãn khác nhau
+   * (signlearn.js): hai biển thật đứng cạnh nhau, không phải một biển bị đọc nhầm. Ghi cho cả hai bản ghi số ngày khác
+   * nhau đã thấy cả hai (mỗi ngày tính một lần) và ngày gần nhất; mỗi bản ghi giữ tối đa CO_MAX biển (bỏ biển lâu nhất
+   * không cùng thấy). Không đổi điểm. → true khi có thay đổi.
+   */
+  coSeen(idA, idB) {
+    const a = this.#records.get(this.#id(idA));
+    const b = this.#records.get(this.#id(idB));
+    if (!a || !b || a === b) return false;
+    const day = this.#today();
+    let changed = false;
+    for (const [x, y] of [[a, b], [b, a]]) {
+      if (!Array.isArray(x.co)) x.co = [];
+      const c = x.co.find((e) => e.id === y.id);
+      if (c && c.last >= day) continue;
+      if (c) {
+        c.days++;
+        c.last = day;
+      } else {
+        if (x.co.length >= CO_MAX) {
+          let k = 0;
+          x.co.forEach((e, i) => {
+            if (e.last < x.co[k].last) k = i;
+          });
+          x.co.splice(k, 1);
+        }
+        x.co.push({ id: y.id, days: 1, last: day });
+      }
+      this.#touch(x);
+      changed = true;
+    }
+    return changed;
   }
 
   /** "Sai": ẩn và không học lại cùng mã ở chỗ này trong 180 ngày. */
@@ -940,6 +1028,7 @@ export class LearnedSigns {
       night: false,
       posErr: IMPORT_POS_ERR,
       src: 'import',
+      co: [],
     };
     rec.until = this.#untilFor(rec, day);
     this.#index(rec);

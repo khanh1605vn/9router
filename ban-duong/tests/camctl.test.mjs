@@ -10,14 +10,15 @@ import { buildLabels } from '../tools/camera/lib.mjs';
 import { DEFAULT_SETTINGS } from '../js/store.js';
 import { CAMERA_ERROR_CODES, CAMERA_ERROR_TEXT, SUPPORT_TEXT } from '../js/camera.js';
 import { VISION_ERROR_CODES } from '../js/vision.js';
-import { memoryBackend } from '../js/learnedsigns.js';
+import { dayNumber, memoryBackend } from '../js/learnedsigns.js';
 import { memoryBackend as evalMemoryBackend } from '../js/evalcrops.js';
-import { PARK_STILL_MS, FAST_P90_MS, IDLE_RELEASE_MS } from '../js/camsched.js';
+import { PARK_STILL_MS, PARK_RECENT_MS, FAST_P90_MS, IDLE_RELEASE_MS } from '../js/camsched.js';
 import {
   CameraController,
   CHECK_FRAMES,
   CHECK_FRAMES_MAX,
   CHECK_GRAB_FAILS,
+  EVAL_EXPIRE_MS,
   EXPORT_WARNING,
   GRAB_RETRY_MS,
   importText,
@@ -189,7 +190,7 @@ class FakeVision {
   }
 }
 
-function makeEnv({ perm = 'granted', mode = 'drive', settings = {}, models = true, labelHash, support = { ok: true, reason: null }, vision = null, cameraFactory = null, visionFactory } = {}) {
+function makeEnv({ perm = 'granted', mode = 'drive', settings = {}, models = true, labelHash, support = { ok: true, reason: null }, vision = null, cameraFactory = null, visionFactory, evalBackend = evalMemoryBackend() } = {}) {
   const env = { perm, mode, stationary: null, timers: [], clock: { t: 1000 }, logs: [], tracks: [], grabs: 0 };
   let timerId = 0;
   env.setTimeout = (fn, ms) => {
@@ -273,6 +274,8 @@ function makeEnv({ perm = 'granted', mode = 'drive', settings = {}, models = tru
     signs: { lastCorridor: null, lastCorridorTime: null },
     getMode: () => env.mode,
     carStationary: () => env.stationary,
+    carSpeed: () => env.carKmh ?? null,
+    isSimulated: () => env.simulate === true,
     document: env.doc,
     navigator: env.nav,
     ImageCapture: env.ImageCapture,
@@ -288,7 +291,7 @@ function makeEnv({ perm = 'granted', mode = 'drive', settings = {}, models = tru
     setTimeout: env.setTimeout,
     clearTimeout: env.clearTimeout,
     learnedBackend: memoryBackend(),
-    evalBackend: evalMemoryBackend(),
+    evalBackend,
     support: () => support,
     cameraFactory,
     visionFactory: visionFactory === undefined ? () => env.vision : visionFactory,
@@ -613,6 +616,94 @@ test('enable(): bị từ chối khi chưa đỗ (đang lái, đang chạy, đ�
   env.ctl.dispose();
 });
 
+test('dừng đèn đỏ rồi rời chế độ lái ("Kết thúc", nhấn giữ bản đồ): chưa đỗ cho tới PARK_RECENT_MS sau lần chạy cuối', async () => {
+  for (const leaveTo of ['browse', 'place']) {
+    const env = makeEnv({ perm: 'prompt', mode: 'drive' });
+    await env.ctl.init();
+    // Đang chạy 36 km/h ở chế độ lái, rồi dừng đèn đỏ 8 giây.
+    for (let k = 0; k < 5; k++) {
+      env.fix(10);
+      await env.advance(1000);
+    }
+    env.stationary = true;
+    env.fix(0);
+    for (let k = 0; k < 8; k++) {
+      env.ctl.tick();
+      await env.advance(1000);
+    }
+    assert.equal(env.ctl.isParked(), false, 'chế độ lái');
+    env.mode = leaveTo;
+    env.ctl.refresh();
+    assert.equal(env.ctl.isParked(), false, `${leaveTo}: ngay khi rời chế độ lái`);
+    for (const wait of [5000, 60e3]) {
+      await env.advance(wait);
+      env.ctl.tick();
+      assert.equal(env.ctl.isParked(), false, `${leaveTo}: thêm ${wait} ms`);
+      assert.equal(env.ctl.state.parked, false);
+      assert.equal((await env.ctl.enable()).reason, 'not-parked');
+      assert.equal((await env.ctl.openCheck()).reason, 'not-parked');
+      assert.equal(env.ctl.exportGeoJSON().reason, 'not-parked');
+    }
+    assert.equal(env.md.calls.length, 0, 'không bao giờ hỏi quyền camera lúc dừng đèn đỏ');
+    // Đứng yên tới PARK_RECENT_MS sau lần chạy cuối: đã đỗ.
+    await env.advance(PARK_RECENT_MS);
+    env.ctl.tick();
+    assert.equal(env.ctl.isParked(), true);
+    env.ctl.dispose();
+  }
+});
+
+test('chạy ở chế độ xem bản đồ (chưa tự vào chế độ lái) rồi dừng 10 giây: chưa đỗ; tốc độ OBD cũng tính, rung GPS thì không', async () => {
+  const env = makeEnv({ perm: 'prompt', mode: 'browse' });
+  await env.ctl.init();
+  env.fix(8);
+  env.stationary = true;
+  env.fix(0);
+  for (let k = 0; k < 10; k++) {
+    env.ctl.tick();
+    await env.advance(1000);
+  }
+  assert.equal(env.ctl.isParked(), false);
+  await env.advance(PARK_RECENT_MS);
+  env.ctl.tick();
+  assert.equal(env.ctl.isParked(), true);
+  // Mất GPS, xe báo 30 km/h qua OBD (không có định vị mới): không còn đỗ, kể cả sau khi xe dừng hẳn.
+  env.carKmh = 30;
+  env.ctl.tick();
+  env.carKmh = 0;
+  await env.advance(PARK_STILL_MS + 1000);
+  env.ctl.tick();
+  assert.equal(env.ctl.isParked(), false, 'OBD vừa báo xe chạy');
+  await env.advance(PARK_RECENT_MS);
+  env.ctl.tick();
+  assert.equal(env.ctl.isParked(), true);
+  // GPS rung 1,5 m/s lúc đỗ: không tính là vừa chạy (chỉ đặt lại bộ đếm đứng yên 5 giây).
+  env.stationary = null;
+  env.fix(1.5);
+  env.fix(0);
+  await env.advance(PARK_STILL_MS + 10);
+  env.ctl.tick();
+  assert.equal(env.ctl.isParked(), true);
+  // Chạy thử (định vị giả nhanh) không tính là xe vừa chạy.
+  env.fix(15, { simulated: true });
+  env.fix(0);
+  await env.advance(PARK_STILL_MS + 10);
+  env.ctl.tick();
+  assert.equal(env.ctl.isParked(), true);
+  env.ctl.dispose();
+});
+
+test('đỗ từ lúc mở ứng dụng (chưa chạy): đỗ sau 5 giây, như trước', async () => {
+  const env = makeEnv({ perm: 'prompt', mode: 'browse' });
+  await env.ctl.init();
+  env.stationary = true;
+  env.ctl.tick();
+  await env.advance(PARK_STILL_MS + 10);
+  env.ctl.tick();
+  assert.equal(env.ctl.isParked(), true);
+  env.ctl.dispose();
+});
+
 test('enable(): bật cả "giữ màn hình sáng" và báo lại; chưa lái thì camera đóng lại ngay', async () => {
   const env = makeEnv({ perm: 'prompt', mode: 'browse', settings: { keepAwake: false } });
   await env.ctl.init();
@@ -837,6 +928,43 @@ test('rời chế độ lái và lần định vị chạy thử: không lấy k
   env.ctl.dispose();
 });
 
+test('chạy thử ("Chạy thử"): camera không bao giờ mở, kể cả trước lần định vị giả đầu tiên; xong thì chuyến thật mở lại', async () => {
+  const env = makeEnv({ settings: { camEnabled: true }, mode: 'routes' });
+  await env.ctl.init();
+  env.fix(0); // lần định vị thật cuối cùng, đứng ở màn hình chọn đường
+  await env.advance(1500);
+  assert.equal(env.md.calls.length, 0);
+  // startNav(true): state.simulate rồi setMode('nav') → refresh(), trước locator.startSimulation.
+  env.simulate = true;
+  env.mode = 'nav';
+  env.ctl.refresh();
+  await env.advance(100);
+  assert.equal(env.ctl.state.block, 'simulated');
+  assert.equal(env.md.calls.length, 0);
+  assert.equal(env.live(), 0);
+  for (let k = 0; k < 60; k++) {
+    env.fix(12, { simulated: true });
+    await env.advance(1000);
+    assert.equal(env.md.calls.length, 0, `giây ${k}`);
+    assert.equal(env.live(), 0);
+  }
+  assert.equal(env.ctl.state.block, 'simulated');
+  assert.equal(env.ctl.state.camera === 'on', false);
+  assert.equal(env.ctl.state.text, TEXT.simulated);
+  assert.equal(env.grabs, 0);
+  // endNav → startDrive: state.simulate = false, chuyến mới. Lần định vị giả cũ không còn tính, kể cả trước định vị thật.
+  env.simulate = false;
+  env.mode = 'drive';
+  env.ctl.newTrip();
+  env.ctl.refresh();
+  assert.notEqual(env.ctl.state.block, 'simulated');
+  env.fix(10);
+  await env.advance(1500);
+  assert.equal(env.live(), 1);
+  assert.equal(env.md.calls.length, 1);
+  env.ctl.dispose();
+});
+
 test("lỗi bộ nhận diện: 'args' bỏ khung và chạy tiếp; 'worker' tải lại sau VISION_RETRY_MS", async () => {
   const env = makeEnv({ settings: { camEnabled: true } });
   let mode = 'args';
@@ -963,6 +1091,38 @@ test('xem lại, nhập, xuất chỉ khi đỗ; "Xoá các biển đã học" l
   assert.equal((await env.ctl.evalClear()).ok, true);
   assert.deepEqual(env.ctl.evalCounts(), { total: 0, accepted: 0, nearMiss: 0 });
   env.ctl.dispose();
+});
+
+test('ảnh kiểm tra đã lưu: camEval tắt vẫn xoá ảnh quá 30 ngày lúc khởi động và khi mở lâu, đếm đúng, xoá được khi chạy', async () => {
+  assert.equal(EVAL_EXPIRE_MS, 3_600_000);
+  const today = dayNumber(1_763_900_000_000 + 1000);
+  const png = new Blob([new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0])], { type: 'image/png' });
+  const row = (id, day) => ({ id, day, label: 'R.122', p: 0.9, outcome: 'accepted', reason: 'new', pred: [['R.122', 0.9]], w: 40, night: false, blob: png });
+  const backend = evalMemoryBackend([row(1, today - 200), row(2, today - 1)]);
+  const env = makeEnv({ mode: 'drive', settings: { camEval: false }, evalBackend: backend });
+  await env.ctl.init();
+  await settle();
+  assert.deepEqual([...backend.map.keys()], [2]); // ảnh 200 ngày trước đã bị xoá dù camEval tắt
+  assert.equal(env.ctl.state.evalCount, 1);
+  assert.equal(env.ctl.evalCounts().total, 1);
+  assert.equal(env.ctl.learner.onEvalCrop, null); // camEval tắt: không thêm ảnh mới
+  // Ứng dụng mở liền 30 ngày: lần refresh() sau đó xoá nốt ảnh quá hạn.
+  env.clock.t += 30 * 86_400_000;
+  env.ctl.refresh();
+  await settle();
+  assert.equal(backend.map.size, 0);
+  assert.equal(env.ctl.state.evalCount, 0);
+  // "Xoá ảnh biển đã lưu" khi đang lái (không đỗ) vẫn được.
+  await backend.put(row(3, today)); // env2 khởi động lại từ hôm nay
+  const env2 = makeEnv({ mode: 'drive', settings: { camEval: false }, evalBackend: backend });
+  await env2.ctl.init();
+  assert.equal(env2.ctl.state.evalCount, 1);
+  assert.equal(env2.ctl.isParked(), false);
+  assert.equal((await env2.ctl.evalClear()).ok, true);
+  assert.equal(backend.map.size, 0);
+  assert.equal(env2.ctl.state.evalCount, 0);
+  env.ctl.dispose();
+  env2.ctl.dispose();
 });
 
 test('onChange: báo trạng thái khi đổi, không báo lại khi không đổi; lỗi của bên nghe bị bỏ qua', async () => {

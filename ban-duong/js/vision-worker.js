@@ -5,6 +5,8 @@
 // Là worker CỔ ĐIỂN vì trình nạp của LiteRT.js dùng importScripts. Mã LiteRT (tệp IIFE và tệp nạp wasm) cùng tệp wasm
 // và hai mô hình đều do trang tải, kiểm SHA-256 rồi chuyển sang dưới dạng byte; worker kiểm lại một lần nữa rồi chỉ chạy
 // đúng những byte đó (tệp .js nạp qua blob:, tệp wasm qua Module.instantiateWasm), không tự tải gì từ mạng.
+// Nếu có thêm Content-Security-Policy: phản hồi của chính tệp này phải cho phép script-src 'self' blob:
+// 'wasm-unsafe-eval' (xem mục "Nếu thêm Content-Security-Policy" trong README.md).
 //
 // Giao thức (mọi thông điệp được kiểm bằng VisionProto; kiểu lạ bị bỏ qua):
 //   → { type:'init', base, build:'compat'|'relaxed', files:{ iife, loader, wasm, det, cls }, sha256:{…}, labels }

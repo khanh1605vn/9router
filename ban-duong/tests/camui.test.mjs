@@ -33,7 +33,10 @@ import {
   seenLine,
   settingsView,
   UI_TEXT,
+  clearEvalText,
+  evalCountText,
 } from '../js/camui.js';
+import { EVAL_TEXT } from '../js/evalcrops.js';
 import { TEXT } from '../js/camctl.js';
 import { CAPTURE_SPEED, FOE_Y_FRAC, foeFor } from '../js/camsched.js';
 import { dayNumber, MAX_IMPORT_CHARS } from '../js/learnedsigns.js';
@@ -183,6 +186,23 @@ test('settingsView: chỉ bật được khi xe đã đỗ; tắt và xoá luôn
   assert.equal(Object.hasOwn(v, 'clearDisabled'), false); // "Xoá các biển đã học" không có trạng thái khoá
 });
 
+test('settingsView: còn ảnh kiểm tra đã lưu thì hiện số ảnh và nút "Xoá ảnh biển đã lưu" ở Cài đặt, kể cả khi không đỗ, máy không chạy được hay không có mô hình', () => {
+  assert.equal(settingsView(st({ parked: true, evalCount: 0 })).evalShown, false);
+  for (const extra of [{ parked: false }, { parked: false, models: 'no-models' }, { parked: false, support: { ok: false, reason: 'no-simd' } }]) {
+    const v = settingsView(st({ evalCount: 2, ...extra }));
+    assert.equal(v.evalShown, true, JSON.stringify(extra));
+    assert.equal(Object.hasOwn(v, 'evalClearDisabled'), false); // nút xoá ảnh không có trạng thái khoá
+  }
+  assert.equal(evalCountText(0), EVAL_TEXT.empty);
+  assert.equal(evalCountText(1234), 'Đã lưu 1.234 ảnh biển trên máy.');
+  assert.equal(clearEvalText(3), 'Xoá cả 3 ảnh biển đã lưu để kiểm tra độ chính xác');
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(html, /<p id="camEvalCount" class="note" hidden><\/p>/);
+  assert.match(html, /<div class="row wrap cam-actions" hidden><button id="btnCamEvalClear" class="btn" type="button">/);
+  const ui = readFileSync(new URL('../js/camui.js', import.meta.url), 'utf8');
+  assert.match(ui, /\$\('btnCamEvalClear'\)\.addEventListener\('click', clearEval\)/);
+});
+
 test('aimToPoint / pointToAim: đi hai chiều, khớp foeFor của bộ học', () => {
   const W = 1920;
   const H = 1080;
@@ -254,7 +274,10 @@ test('lời giới thiệu và ghi chú: đủ các ý của PLAN §6.1, §7', (
   assert.match(all, /Camera sau của điện thoại/);
   assert.match(all, /Camera có sẵn của ô tô thường không dùng được/);
   assert.match(all, /tuỳ máy/);
-  assert.match(all, /không được lưu hay gửi đi/);
+  assert.match(all, /hình ảnh không được gửi đi và không được lưu \(trừ khi bạn tự bật lưu ảnh biển/);
+  // Ảnh kiểm tra (camEval) là hình ảnh được lưu: không câu nào được hứa "không bao giờ lưu" vô điều kiện.
+  assert.doesNotMatch(`${all} ${UI_TEXT.intro}`, /không lưu hình ảnh|không được lưu hay gửi/);
+  assert.match(UI_TEXT.intro, /chỉ lưu ảnh biển khi bạn bật “Lưu ảnh biển để kiểm tra độ chính xác”/);
   assert.match(all, /Không cầm hay bấm điện thoại khi đang lái/);
   assert.ok(all.includes(OBEY_REAL_SIGNS));
   assert.match(runNote(), new RegExp(`dưới khoảng ${Math.round(CAPTURE_SPEED * 3.6)}\u00a0km/h`));

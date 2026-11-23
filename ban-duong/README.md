@@ -28,20 +28,32 @@ Cần Node.js 22 trở lên.
 ```bash
 cd ban-duong
 npm start          # mở http://localhost:5173
-npm test           # 625 bài kiểm thử logic (không cần mạng)
+npm test           # 635 bài kiểm thử logic (không cần mạng)
 ```
 
 Trên máy tính không có GPS, ứng dụng lấy tâm bản đồ làm điểm xuất phát; dùng nút **Chạy thử** để xem dẫn đường hoạt động.
 
 ## Đưa lên mạng để dùng trên điện thoại
 
-Trình duyệt chỉ cấp quyền vị trí cho trang chạy bằng **HTTPS**, nên cần đưa thư mục này lên một dịch vụ lưu trữ tĩnh. Cách nhanh nhất:
+Trình duyệt chỉ cấp quyền vị trí cho trang chạy bằng **HTTPS**, nên cần đưa ứng dụng lên một dịch vụ lưu trữ tĩnh. Trang dùng khi lái chỉ nên chứa các tệp của ứng dụng: `index.html`, `manifest.webmanifest`, `sw.js` và các thư mục `css/`, `js/`, `icons/`, `vendor/`, `models/`. **Không đưa `tests/` và `tools/` lên trang này**: các trang thử nghiệm trong đó chạy cùng địa chỉ nên dùng chung quyền camera, bộ nhớ trình duyệt và danh sách biển đã học của ứng dụng. Cách nhanh nhất:
 
-1. Mở <https://app.netlify.com/drop> trên máy tính và đăng nhập.
-2. Kéo cả thư mục `ban-duong` thả vào trang.
-3. Netlify trả về một địa chỉ dạng `https://ten-ngau-nhien.netlify.app`. Mở địa chỉ đó trên điện thoại.
+1. Chạy `npm run dist`: lệnh này chép đúng các tệp trên vào thư mục `dist/` (xoá bản cũ trước).
+2. Mở <https://app.netlify.com/drop> trên máy tính và đăng nhập.
+3. Kéo thư mục `dist` thả vào trang.
+4. Netlify trả về một địa chỉ dạng `https://ten-ngau-nhien.netlify.app`. Mở địa chỉ đó trên điện thoại.
 
-Các lựa chọn khác dùng được y như vậy: Cloudflare Pages, Vercel, hoặc GitHub Pages của một repo riêng chứa nội dung thư mục này ở gốc. Không cần cấu hình gì thêm vì mọi đường dẫn trong ứng dụng đều là đường dẫn tương đối.
+Các lựa chọn khác dùng được y như vậy: Cloudflare Pages, Vercel, hoặc GitHub Pages của một repo riêng chứa nội dung thư mục `dist` ở gốc. Không cần cấu hình gì thêm vì mọi đường dẫn trong ứng dụng đều là đường dẫn tương đối.
+
+Muốn chạy `tests/browser/device-bench.html` (đo tốc độ nhận diện trên điện thoại thật) hay `tools/camera/label-crops.html` qua mạng, hãy đưa **cả thư mục** `ban-duong` lên một trang tạm **khác địa chỉ** với trang dùng khi lái, rồi xoá trang đó khi xong, để các trang thử nghiệm không bao giờ dùng chung quyền camera và dữ liệu của ứng dụng.
+
+### Nếu thêm Content-Security-Policy
+
+Ứng dụng hiện không gửi Content-Security-Policy (CSP). Nếu bạn thêm CSP qua cấu hình của dịch vụ lưu trữ (ví dụ tệp `_headers` của Netlify hay Cloudflare Pages), phải tách hai chính sách:
+
+- **Trang** (`/` và `/index.html`): `default-src 'self'; script-src 'self'; worker-src 'self' blob:; img-src 'self' data: blob:` cộng các máy chủ ô bản đồ; `connect-src 'self'` cộng các máy chủ kiểu bản đồ, ô bản đồ, Overpass, tìm địa điểm và tìm đường (lấy danh sách từ `js/mapview.js`, `js/roaddata.js`, `js/routing.js`, `js/search.js`, đừng chép cố định); `style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com`. Cần `blob:` trong `worker-src` vì MapLibre chạy worker vẽ bản đồ từ địa chỉ `blob:`; chỉ có `worker-src 'self'` thì bản đồ không hiện.
+- **`js/vision-worker.js`** (bộ nhận diện biển): worker này nhận chính sách từ chính phản hồi của tệp đó, không theo trang. Nó cần `script-src 'self' blob: 'wasm-unsafe-eval'`: `blob:` để chạy mã LiteRT đã kiểm SHA-256, `'wasm-unsafe-eval'` để dịch WebAssembly. Chỉ đặt `blob:` và `'wasm-unsafe-eval'` cho riêng tệp này.
+
+Đừng đặt chính sách của trang chung cho mọi đường dẫn (`/*`): khi đó nó cũng áp lên `js/vision-worker.js` và camera không nhận diện được biển (mục cài đặt báo không tải được dữ liệu nhận diện). Sau khi thêm CSP, hãy mở bản đồ và **Kiểm tra camera** → **Đo tốc độ xử lý** để chắc chắn mọi thứ vẫn chạy.
 
 ### Cài ra màn hình chính
 
@@ -121,7 +133,7 @@ Khi xe đang ở nguồn FM/radio hoặc USB thì giọng đọc của điện t
 
 Tính năng này **tắt sẵn** và đang thử nghiệm. Bật trong **Cài đặt → Camera nhận diện biển (thử nghiệm)**, chỉ bật được khi xe đã đỗ.
 
-- **Báo lúc nào**: không bao giờ ở lần đi đầu tiên. Camera ghi nhận biển khi xe đi qua; biển được đọc thành tiếng (khoảng 100–200 m trước, như biển lấy từ bản đồ, kèm lời “camera ghi nhận”) ở những lần đi sau, khi đã được thấy vào **2 ngày khác nhau**. Biển mới thấy một lần chỉ hiện trên thanh vàng và dải biển với viền nét đứt và dòng “Camera thấy 1 lần”, không đọc. Biển có trên bản đồ OpenStreetMap thì dùng dữ liệu bản đồ. Biển tốc độ do camera ghi nhận chỉ có thể **hạ** giới hạn trên đồng hồ tốc độ (dòng chữ “Camera” trên biển giới hạn), không bao giờ nâng lên; có công tắc để tắt.
+- **Báo lúc nào**: không bao giờ ở lần đi đầu tiên. Camera ghi nhận biển khi xe đi qua; biển được đọc thành tiếng (khoảng 100–200 m trước, như biển lấy từ bản đồ, kèm lời “camera ghi nhận”) ở những lần đi sau, khi đã được thấy vào **2 ngày khác nhau** (một ngày tính từ 4 giờ sáng, nên một chuyến đêm qua nửa đêm vẫn là một ngày). Biển mới thấy một lần chỉ hiện trên thanh vàng và dải biển với viền nét đứt và dòng “Camera thấy 1 lần”, không đọc. Biển có trên bản đồ OpenStreetMap thì dùng dữ liệu bản đồ. Biển tốc độ do camera ghi nhận chỉ có thể **hạ** giới hạn trên đồng hồ tốc độ (dòng chữ “Camera” trên biển giới hạn), không bao giờ nâng lên; có công tắc để tắt.
 - **Vì sao không báo được ngay lần đầu**: biển tròn cỡ thường khoảng 70 cm, ở 150 m chỉ còn vài điểm ảnh trên khung hình camera điện thoại, quá nhỏ để đọc chắc chắn. Theo tính toán (chưa đo trên đường), camera đọc được biển cỡ thường từ khoảng **45 m** khi quay 1920×1080 và khoảng **30 m** khi quay 1280×720 trở lại gần; xoay dọc hoặc độ phân giải thấp hơn thì ngắn hơn. Mục **Kiểm tra camera** hiện con số ước tính cho camera của bạn.
 - **Độ chính xác trên đường thật chưa được đo.** Mô hình nhận diện được huấn luyện từ hình biển tự vẽ của ứng dụng ghép lên ảnh đường phố nước ngoài, chưa từng thấy ảnh biển thật ở Việt Nam. Hãy chờ đợi bỏ sót khi trời tối, mưa, ngược nắng, bị xe tải hay xe máy che, biển mờ hoặc cong, và đôi khi nhận nhầm; quy tắc 2 ngày, biển chưa xác nhận không được đọc và nút **Sai** để giảm nhầm lẫn. Kết quả kiểm tra trên dữ liệu tổng hợp nằm trong [thẻ mô hình](models/MODEL_CARD.md) (có sau lần huấn luyện đầy đủ).
 - **Chỉ 47 loại biển** được học: tốc độ tối đa cho phép 20–120 km/h, hết tốc độ tối đa, hết tất cả các lệnh cấm; các biển cấm thường gặp (đường cấm, cấm đi ngược chiều, cấm ô tô, xe máy, xe tải, cấm rẽ, cấm quay đầu, cấm vượt, cấm dừng và đỗ xe, hạn chế trọng tải và chiều cao); dừng lại; các biển giao nhau (đường giao nhau, giao nhau với đường ưu tiên hoặc không ưu tiên, có tín hiệu đèn, vòng xuyến); các biển nguy hiểm thường gặp (chỗ ngoặt, giao nhau với đường sắt, gồ giảm tốc, người đi bộ cắt ngang, trẻ em, công trường, nguy hiểm khác) và hướng phải đi vòng chướng ngại vật. Không đọc biển có chữ, biển phụ, mũi tên chỉ hướng, biển chỉ dẫn, và trị số của biển hạn chế tải trọng, chiều cao, chiều ngang. Biển tốc độ có biển phụ không bao giờ dùng cho đồng hồ tốc độ.
@@ -139,8 +151,8 @@ Tính năng này **tắt sẵn** và đang thử nghiệm. Bật trong **Cài đ
 
   Máy cần hỗ trợ WebAssembly SIMD (Chrome Android 91 trở lên); nếu không, mục cài đặt ghi “Thiết bị này không chạy được tính năng nhận diện biển.”
 - **Máy nóng và pin**: tốc độ xử lý, độ nóng và mức hao pin trên điện thoại thật **chưa được đo**. Ứng dụng tự giảm số khung hình xử lý mỗi giây (2, 3 hoặc 5), tự tạm dừng khi xe chạy dưới khoảng 11 km/h, khi máy chậm đi vì nóng hoặc khi pin dưới 20 % mà không sạc; điện thoại kẹp trên kính dưới nắng vẫn có thể quá nóng. Lần đầu chạy, ứng dụng tải dữ liệu nhận diện một lần (khoảng 12 MB chưa nén, ít hơn nếu máy chủ nén tệp). Bật camera cũng bật **Giữ màn hình sáng khi lái**, vì camera chỉ chạy khi màn hình sáng.
-- **Quyền riêng tư**: mọi xử lý diễn ra trên máy. Hình ảnh từ camera không bao giờ được lưu hay gửi đi. Danh sách biển đã học (mã biển, vị trí, hướng, số ngày thấy) cho thấy những nơi bạn đã đi, nên được coi là dữ liệu vị trí nhạy cảm: nó chỉ nằm trong bộ nhớ trình duyệt của máy, chỉ được xuất ra tệp khi bạn bấm **Xuất tệp** (kèm lời nhắc trước khi lưu; mặc định không kèm ngày), và xoá được bất cứ lúc nào bằng **Xoá các biển đã học**. Ứng dụng không tự đưa biển lên OpenStreetMap. Tuỳ chọn **Lưu ảnh biển để kiểm tra độ chính xác** (tắt sẵn) giữ ảnh nhỏ cắt sát biển trên máy tối đa 30 ngày; ảnh có thể có một phần xe cộ phía sau biển.
-- **Luật**: điện thoại phải được kẹp cố định; không cầm hay bấm điện thoại khi xe đang chạy (Luật Trật tự, an toàn giao thông đường bộ 2024 cấm người lái dùng điện thoại khi xe đang chạy; theo nguồn thứ cấp, mức phạt với người lái ô tô là 4–6 triệu đồng và trừ 4 điểm giấy phép lái xe theo Nghị định 168/2024). Vì vậy bật camera, chọn camera, xem hình, kiểm tra và xem lại danh sách chỉ làm được khi xe đã đỗ; ứng dụng không bao giờ tự hỏi quyền camera. Khi đang chạy chỉ có một nút camera nhỏ cạnh các nút bản đồ (xanh: đang bật, xám: tạm dừng, gạch chéo: cần bật lại khi xe đỗ); chạm một lần là tắt.
+- **Quyền riêng tư**: mọi xử lý diễn ra trên máy. Hình ảnh từ camera không bao giờ được gửi đi, và không được lưu trừ khi bạn bật **Lưu ảnh biển để kiểm tra độ chính xác** (xem cuối mục này). Danh sách biển đã học (mã biển, vị trí, hướng, số ngày thấy) cho thấy những nơi bạn đã đi, nên được coi là dữ liệu vị trí nhạy cảm: nó chỉ nằm trong bộ nhớ trình duyệt của máy, chỉ được xuất ra tệp khi bạn bấm **Xuất tệp** (kèm lời nhắc trước khi lưu; mặc định không kèm ngày), và xoá được bất cứ lúc nào bằng **Xoá các biển đã học**. Ứng dụng không tự đưa biển lên OpenStreetMap. Tuỳ chọn **Lưu ảnh biển để kiểm tra độ chính xác** (tắt sẵn, trong **Kiểm tra camera**) giữ ảnh nhỏ cắt sát biển trên máy tối đa 30 ngày; ảnh có thể có một phần xe cộ phía sau biển. Ảnh quá 30 ngày bị xoá cả khi đã tắt tuỳ chọn này. Khi còn ảnh đã lưu, mục Cài đặt hiện số ảnh và nút **Xoá ảnh biển đã lưu**, bấm được bất cứ lúc nào; hộp **Xoá các biển đã học** cũng hỏi xoá luôn các ảnh này.
+- **Luật**: điện thoại phải được kẹp cố định; không cầm hay bấm điện thoại khi xe đang chạy (Luật Trật tự, an toàn giao thông đường bộ 2024 cấm người lái dùng điện thoại khi xe đang chạy; theo nguồn thứ cấp, mức phạt với người lái ô tô là 4–6 triệu đồng và trừ 4 điểm giấy phép lái xe theo Nghị định 168/2024). Vì vậy bật camera, chọn camera, xem hình, kiểm tra và xem lại danh sách chỉ làm được khi xe đã đỗ (ngoài chế độ lái, đứng yên ít nhất 5 giây và không chạy trong 2 phút vừa qua, để một lần dừng đèn đỏ không được tính là đỗ); ứng dụng không bao giờ tự hỏi quyền camera. Khi đang chạy chỉ có một nút camera nhỏ cạnh các nút bản đồ (xanh: đang bật, xám: tạm dừng, gạch chéo: cần bật lại khi xe đỗ); chạm một lần là tắt.
 - **Luôn tuân theo biển báo và hiệu lệnh thực tế trên đường.**
 
 ## Cấu trúc mã nguồn
@@ -211,6 +223,6 @@ Biển báo và hiệu lệnh thực tế trên đường luôn là căn cứ đ
 
 Ứng dụng không có máy chủ riêng và không thu thập dữ liệu. Vị trí chỉ được gửi tới các dịch vụ bản đồ ở bảng trên để tìm đường, tìm địa điểm và tải dữ liệu quanh vị trí hiện tại. Cài đặt, địa điểm đã lưu, điểm đánh dấu và nhật ký chuyến đi nằm trong bộ nhớ trình duyệt của thiết bị.
 
-Camera nhận diện biển xử lý hình ảnh ngay trên máy và không lưu hay gửi hình ảnh đi đâu. Biển đã học chỉ nằm trên máy, chỉ được xuất ra tệp khi bạn yêu cầu, và xoá được bất cứ lúc nào (xem [Camera nhận diện biển](#camera-nhận-diện-biển-thử-nghiệm)).
+Camera nhận diện biển xử lý hình ảnh ngay trên máy và không gửi hình ảnh đi đâu; hình ảnh chỉ được lưu (ảnh nhỏ cắt sát biển, tối đa 30 ngày, chỉ trên máy) khi bạn bật **Lưu ảnh biển để kiểm tra độ chính xác**. Biển đã học chỉ nằm trên máy, chỉ được xuất ra tệp khi bạn yêu cầu, và xoá được bất cứ lúc nào (xem [Camera nhận diện biển](#camera-nhận-diện-biển-thử-nghiệm)).
 
 Dữ liệu đọc từ xe qua bộ OBD (tốc độ, vòng tua, nhiệt độ, nhiên liệu, điện áp, mã lỗi) chỉ dùng trên máy, không gửi đi đâu và không được lưu lại. Ứng dụng chỉ gửi tới bộ đọc các lệnh trong một danh sách cố định; không đọc số khung (VIN) và không có lệnh xoá mã lỗi.

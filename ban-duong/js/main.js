@@ -5,7 +5,7 @@ import { REPORT_TYPES, store } from './store.js';
 import { LocationService } from './location.js';
 import { MapView } from './mapview.js';
 import { fetchRoutes, RouteError } from './routing.js';
-import { RouteTracker } from './tracker.js';
+import { CameraSayGate, RouteTracker } from './tracker.js';
 import { clearRoadCache, RoadData } from './roaddata.js';
 import { AlertEngine, describePoint, overSpeedSay, signSpeech, SpeedMonitor } from './alerts.js';
 import { PRIORITY, voice } from './voice.js';
@@ -84,6 +84,8 @@ const roads = new RoadData();
 const alerts = new AlertEngine();
 const signs = new SignEngine();
 let speedMon = new SpeedMonitor();
+// Câu biển camera (có lời rào) sắp chen trước câu "Còn … mét, rẽ …": giữ lại tới sau câu rẽ (tracker.js).
+const cameraSayGate = new CameraSayGate();
 
 // Kết nối với ô tô qua bộ OBD-II.
 const car = {
@@ -101,7 +103,16 @@ const isDriving = () => state.mode === 'nav' || state.mode === 'drive';
 
 // Camera nhận diện biển (thử nghiệm): kho biển đã học, bộ học, camera, bộ nhận diện và giới hạn tốc độ từ biển camera
 // đều nằm trong camctl.js. Mọi thao tác với camera chỉ làm được khi xe đã đỗ (camctl.isParked()).
-const camctl = new CameraController({ store, roads, signs, getMode: () => state.mode, carStationary: () => carStationary() });
+const camctl = new CameraController({
+  store,
+  roads,
+  signs,
+  getMode: () => state.mode,
+  carStationary: () => carStationary(),
+  // Tốc độ do xe báo (km/h, còn mới), để biết xe vừa chạy (chưa coi là đã đỗ), như carStationary().
+  carSpeed: () => (car.snap?.speed != null && Date.now() - car.snap.speedTime < 5000 ? car.snap.speed : null),
+  isSimulated: () => state.simulate === true, // "Chạy thử": không bao giờ mở camera
+});
 /** Xe đã đỗ (không ở chế độ lái, đứng yên ít nhất 5 giây): dùng cho các mục camera trong cài đặt. */
 const isParked = () => camctl.isParked();
 
@@ -709,6 +720,10 @@ async function reroute() {
 function startDrive(auto = false) {
   voice.unlock();
   state.simulate = false;
+  // Tự vào chế độ lái vì xe đã chạy: đóng mọi bảng đang mở (Cài đặt, danh sách biển camera, kiểm tra camera…) để
+  // bản đồ, biển báo và đồng hồ tốc độ hiện ra mà người lái không phải chạm máy. Đóng hộp thoại thì camui tự đóng
+  // màn hình kiểm tra camera (theo dõi #modal).
+  if (auto) closeOverlays();
   setMode('drive');
   map.setFollow('drive');
   startTrip();
@@ -730,6 +745,7 @@ function startTrip() {
   signs.reset();
   car.watch.reset();
   state.limitSaid.clear();
+  cameraSayGate.reset();
   camctl.newTrip(); // bộ học, bộ chọn mức tải và giới hạn tốc độ camera bắt đầu lại
 }
 
@@ -861,9 +877,17 @@ function onFix(fix) {
     speakSpeed(sp);
     renderAlert(result, sr);
     renderStrip(sr);
-    if (result.fired || signSay) voice.chime('alert');
+    const navOn = state.mode === 'nav' && state.tracker && state.progress;
+    const signSays = cameraSayGate.step({
+      say: signSay,
+      items: sr.fired,
+      tracker: navOn ? state.tracker : null,
+      progress: navOn ? state.progress : null,
+      cue: navOn ? state.progress.cue : null,
+    });
+    if (result.fired || signSays.length) voice.chime('alert');
     if (result.fired) voice.speak(result.say, PRIORITY.alert);
-    if (signSay) voice.speak(signSay, PRIORITY.alert);
+    for (const say of signSays) voice.speak(say, PRIORITY.alert);
     updateTrip(fix);
   } else if (state.mode === 'browse') {
     // Đang chạy xe mà chưa bật chế độ lái thì tự bật để vẫn có cảnh báo.
@@ -1355,6 +1379,10 @@ function onCarData(client, snap) {
     toast(warn, 6000);
   }
   // Mất GPS (trong hầm…) mà xe vẫn báo tốc độ: cập nhật đồng hồ và cảnh báo quá tốc độ theo đoạn đường khớp gần nhất.
+  // Giới hạn của đường và giới hạn camera (camctl.speedLimit) đều được giữ suốt lúc mất GPS, dù xe đi bao xa: biển
+  // P.127 ở cửa hầm phải còn hiệu lực trong cả hầm (hầm hầu như không có nút giao). Camera chỉ hạ giới hạn (SpeedMonitor
+  // lấy số thấp hơn), nên giữ lâu chỉ có thể nhắc thừa, không bao giờ làm mất lời nhắc quá tốc độ. Có lại GPS thì
+  // CameraLimit.update xét lại (nhảy quá 300 m, đổi đường, nút giao).
   if (!isDriving() || !state.fix || state.fix.simulated || now - state.lastFixAt <= 3000 || now - car.onlyAt < 1000) return;
   const kmh = carSpeed();
   if (kmh == null) return;

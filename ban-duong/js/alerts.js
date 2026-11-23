@@ -3,7 +3,7 @@
 
 import { angleDiff, bearing, distance, nearestOnLine } from './geo.js';
 import { SPEED_MAX, SPEED_MIN, travelFor } from './learnedsigns.js';
-import { locate, mapItems } from './signengine.js';
+import { joinSays, locate, mapItems } from './signengine.js';
 import { APPLY_ANGLE, ARM_CHORD } from './signlearn.js';
 import { REPORT_TYPES } from './store.js';
 import { spokenDistance } from './tracker.js';
@@ -117,16 +117,20 @@ export function signSpeech(result, settings = {}) {
   if (settings.speakLimit !== false) return result.say;
   const keep = result.fired.filter((it) => !LIMIT_CODES.has(it.code));
   if (keep.length === result.fired.length) return result.say;
-  // Cùng một biển (cùng mã và trị số) chỉ đọc một lần, như bộ máy biển báo.
-  const says = [];
+  // Như SignEngine.update: cùng một biển (cùng mã và trị số) chỉ đọc một lần, biển bản đồ trước (bản đồ thắng biển
+  // camera cùng loại), biển camera sau, và câu "camera ghi nhận" chỉ nói một lần cho cả nhóm (joinSays).
+  const parts = [];
   const seen = new Set();
-  for (const it of keep) {
-    const dup = `${it.code ?? it.kind}|${it.value ?? ''}`;
-    if (seen.has(dup)) continue;
-    seen.add(dup);
-    if (it.say && !says.includes(it.say)) says.push(it.say);
+  for (const camera of [false, true]) {
+    for (const it of keep) {
+      if (Boolean(it.src) !== camera || !it.say) continue;
+      const dup = `${it.code ?? it.kind}|${it.value ?? ''}`;
+      if (seen.has(dup)) continue;
+      seen.add(dup);
+      parts.push(it);
+    }
   }
-  return says.length ? `Phía trước ${spokenDistance(keep[0].distance)}, ${says.join(', ')}` : null;
+  return parts.length ? `Phía trước ${spokenDistance(keep[0].distance)}, ${joinSays(parts)}` : null;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -273,7 +277,9 @@ export class CameraLimit {
    * Tin từ Learner.onPassed: { record, outcome: 'hit'|'miss'|'none', reason }. Chỉ biển đã xác nhận được nghe:
    * P.127 không biển phụ (bắt đầu hay thay giới hạn), P.127 có biển phụ (thôi giới hạn), DP.134/DP.135 (hết).
    * Mọi kết quả đi qua đều tính, kể cả 'none' ('late', camera tắt…) và 'miss', trừ 'none' lý do 'left' (xe chưa tới
-   * biển) và 'miss' lý do 'value' (camera vừa đọc một trị số khác ở đúng chỗ đó: biển đã đổi, không dùng trị số cũ).
+   * biển), 'miss' lý do 'value' (camera vừa đọc một trị số khác ở đúng chỗ đó: biển đã đổi, không dùng trị số cũ) và
+   * 'none' lý do 'conflict' có valueChanged (camera thấy, dù chưa đủ tin, cùng mã khác trị số ở đó). 'conflict' do biển
+   * khác mã cùng họ (P.103a cạnh P.127) vẫn được tính.
    * @returns true khi tin được giữ lại để xét
    */
   onPassed(evt) {
@@ -282,6 +288,7 @@ export class CameraLimit {
     if (!PASSED_OUTCOMES.has(evt.outcome)) return false;
     if (evt.outcome === 'none' && evt.reason === 'left') return false;
     if (evt.outcome === 'miss' && evt.reason === 'value') return false;
+    if (evt.outcome === 'none' && evt.reason === 'conflict' && evt.valueChanged === true) return false;
     if (!Array.isArray(r.coord) || !isNum(r.coord[0]) || !isNum(r.coord[1]) || !isNum(r.facing)) return false;
     let kind;
     let n = null;
@@ -632,9 +639,9 @@ export class SpeedMonitor {
    * @param match     kết quả RoadData.matchWay (hoặc null)
    * @param camera    giới hạn từ biển do camera ghi nhận (CameraLimit.current, hoặc một số km/h), hoặc null
    * @param camSpeed  cài đặt "Dùng biển tốc độ do camera ghi nhận cho đồng hồ tốc độ"; false thì bỏ qua camera
-   * Giới hạn hiện ra là giới hạn thấp hơn giữa bản đồ và camera: camera không bao giờ nâng giới hạn. source là
-   * 'camera' chỉ khi trị số của camera thấp hơn hẳn (hoặc bản đồ không có); tốc độ tối đa tự đặt (customMax) chỉ
-   * dùng khi cả hai đều không có.
+   * Giới hạn hiện ra là min(bản đồ ?? tốc độ tối đa tự đặt, camera): camera không bao giờ nâng giới hạn, kể cả giới
+   * hạn tự đặt (customMax, chỉ dùng khi bản đồ không có). source là 'camera' chỉ khi trị số của camera thấp hơn hẳn
+   * (hoặc cả bản đồ lẫn tự đặt đều không có).
    * @returns { limit, source: 'road'|'camera'|'custom'|null, level: 'ok'|'near'|'over', sound: null|'voice'|'beep',
    *            announce: number|null }
    */
@@ -664,14 +671,13 @@ export class SpeedMonitor {
     const kmh = (fix.speed || 0) * 3.6;
     const road = this.limit;
     const cam = camSpeed === false ? null : cameraValue(camera);
-    let limit = road;
-    let source = road != null ? 'road' : null;
-    if (cam != null && (road == null || cam < road)) {
+    // Giới hạn nền: của đường, không có thì tốc độ tối đa tự đặt. Camera chỉ được hạ giới hạn nền, không bao giờ nâng.
+    const base = road != null ? road : customMax > 0 ? customMax : null;
+    let limit = base;
+    let source = road != null ? 'road' : base != null ? 'custom' : null;
+    if (cam != null && (base == null || cam < base)) {
       limit = cam;
       source = 'camera';
-    } else if (limit == null && customMax > 0) {
-      limit = customMax;
-      source = 'custom';
     }
 
     // Đọc giới hạn của đường khi đổi. Đang hiện giới hạn thấp hơn của camera thì không đọc số của đường (khác số đang

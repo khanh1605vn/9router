@@ -2,7 +2,7 @@
 // (thử nghiệm). Thuần logic, không đụng tới DOM; đầu vào là kết quả của Vision.process() (hợp đồng 5): hộp theo
 // pixel của cả khung, x, y là góc trên bên trái.
 // - Tracker: ghép hộp của khung mới với các lượt bám đang mở (IoU hoặc khoảng cách tâm, tỉ lệ cỡ hộp, hướng giãn ra
-//   từ điểm tụ FOE), lọc Kalman vận tốc không đổi trên tâm x, y và 1/w; phát hiện biển phụ ngay dưới biển.
+//   theo chiều dọc từ đường chân trời), lọc Kalman vận tốc không đổi trên tâm x, y và 1/w; phát hiện biển phụ ngay dưới biển.
 // - fitRange: biển đứng yên thì 1/w giảm tuyến tính theo quãng đường xe đi D: 1/w = (Z0 − D)/(f·W). Hồi quy có trọng
 //   số w⁴ cho Z0 (không phụ thuộc tiêu cự f) và cỡ biển W.
 // - acceptTrack: các bước lọc 1–11 của PLAN §5.5. Bước 12 (đã bị báo sai) nằm ở LearnedSigns.observe, bước 13
@@ -19,8 +19,7 @@ export const IOU_MIN = 0.2; // IoU với hộp dự đoán tối thiểu
 export const CENTRE_GATE = 0.6; // hoặc tâm lệch không quá chừng này lần bề rộng dự đoán
 export const SCALE_MIN = 0.8; // tỉ lệ bề rộng mỗi bước (khung đã xử lý) trong khoảng này
 export const SCALE_MAX = 1.6;
-export const FOE_MIN_MOVE = 3; // dịch chuyển trên chừng này (px) thì phải hướng ra xa điểm tụ
-export const FOE_ANGLE = 35; // lệch tối đa so với hướng ra xa điểm tụ (độ)
+export const FOE_MIN_MOVE = 3; // dịch chuyển dọc trên chừng này (px) thì phải hướng ra xa đường chân trời
 export const FOE_BASE = 3; // đo dịch chuyển từ hộp cách đó chừng này khung đã ghép (đỡ nhiễu tâm vài px)
 export const LONG_BONUS = 0.05; // điểm ghép cộng thêm cho lượt bám đã dài (tối đa, từ 10 khung)
 export const MAX_MISSED = 3; // số khung đã xử lý liên tiếp không ghép được thì kết thúc lượt bám
@@ -221,19 +220,17 @@ export class Tracker {
     const iwf = tr.kiw.p;
     const ratio = b.w / (iwf > 0 && 1 / iwf < 4 * this.width ? 1 / iwf : last.w);
     if (!(ratio >= SCALE_MIN ** steps && ratio <= SCALE_MAX ** steps)) return -1;
-    // Biển đứng yên trước xe đang chạy giãn ra từ điểm tụ: dịch chuyển (đo từ FOE_BASE khung trước, để nhiễu tâm vài
-    // px của biển ở xa không làm sai hướng) phải hướng ra ngoài. Lượt bám chưa đủ FOE_BASE khung thì chưa xét.
+    // Biển đứng yên trước xe đang chạy giãn ra từ điểm tụ. Chỉ xét theo chiều dọc: máy gắn lệch vài độ (camAim để mặc
+    // định) và xe vào cua dời cả khung theo chiều ngang (điểm tụ thật không ở điểm tụ giả định), nhưng không đổi chiều
+    // dọc. Hộp cách đường chân trời quá một bề rộng biển (đo ở FOE_BASE khung trước, để nhiễu tâm vài px của biển ở xa
+    // không làm sai hướng) mà dịch dọc quá FOE_MIN_MOVE px về phía đường chân trời thì không phải biển đó. Lượt bám chưa
+    // đủ FOE_BASE khung thì chưa xét.
     const c = centreOf(b);
-    const base = tr.points.length >= FOE_BASE ? centreOf(tr.points[tr.points.length - FOE_BASE]) : null;
-    const dx = base ? c.x - base.x : 0;
-    const dy = base ? c.y - base.y : 0;
-    if (base && Math.hypot(dx, dy) > FOE_MIN_MOVE) {
-      const rx = base.x - this.foe.x;
-      const ry = base.y - this.foe.y;
-      if (Math.hypot(rx, ry) > 1) {
-        const cos = (dx * rx + dy * ry) / (Math.hypot(dx, dy) * Math.hypot(rx, ry));
-        if (cos < Math.cos(FOE_ANGLE * RAD)) return -1;
-      }
+    const basePt = tr.points.length >= FOE_BASE ? tr.points[tr.points.length - FOE_BASE] : null;
+    if (basePt) {
+      const ry = centreOf(basePt).y - this.foe.y;
+      const dy = c.y - centreOf(basePt).y;
+      if (Math.abs(ry) > basePt.w && dy * ry < 0 && Math.abs(dy) > FOE_MIN_MOVE) return -1;
     }
     let best = -1;
     // Thêm một dự đoán theo mô hình giãn ra từ điểm tụ với chính tỉ lệ cỡ của hộp b: dùng được ngay từ khung thứ hai,

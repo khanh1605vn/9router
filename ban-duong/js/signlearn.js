@@ -10,7 +10,7 @@
 //    kiện (trừ điểm), hoặc không đủ bằng chứng (camera tắt hay ngừng giữa chừng, trời tối, kẹt xe…: không đổi điểm).
 // Lần định vị mô phỏng ("Chạy thử") bị bỏ qua.
 
-import { angleDiff, bearing } from './geo.js';
+import { angleDiff, bearing, distance } from './geo.js';
 import { vertexKey } from './roaddata.js';
 import * as SE from './signengine.js';
 import {
@@ -30,7 +30,7 @@ import {
   majorityLabel,
   Tracker,
 } from './signtrack.js';
-import { appliesTo, labelIndex, MATCH_ALONG, MATCH_LATERAL } from './learnedsigns.js';
+import { appliesTo, labelIndex, labelOf, MATCH_ALONG, MATCH_FACING, MATCH_LATERAL } from './learnedsigns.js';
 
 // ---- Đồng hồ và vị trí xe ----
 export const FIX_AGE_MAX = 3000; // tuổi lần định vị (ms) ngoài 0…chừng này là đồng hồ máy lệch giờ GPS: lấy lúc nhận
@@ -83,6 +83,11 @@ export const PASS_GRACE_MS = 2000; // … và đã qua chừng này (ms) (đợi
 export const LOST_MS = 5000; // biển không còn trên hành lang chừng này (ms) trước khi tới: xe đã rẽ đi
 export const PASS_MAX_MS = 120000; // xét một biển quá chừng này (ms) thì lượt đó không còn trừ điểm được ('timeout')
 export const CONFLICT_RADIUS = 25; // lượt bám biển khác cùng họ trong chừng này (m) quanh biển: không kết luận
+// … trừ khi lượt bám đó là một biển thứ hai đã biết ở cạnh: biển đã xác nhận có nhãn đó, cách biển đang xét không quá
+// CONFLICT_RADIUS, cùng hướng, và camera đã thấy cả hai (hai lượt bám riêng trong một lượt đi qua) vào ít nhất chừng này
+// ngày khác nhau (LearnedSigns.coSeen). Một biển bị đọc nhầm chỉ cho một lượt bám mỗi lượt: không bao giờ đủ.
+export const CO_SEEN_DAYS = 2;
+export const CO_SEEN_MS = 30000; // hai lần thấy cách nhau không quá chừng này (ms) là cùng một lượt đi qua
 export const HIT_DEBOUNCE_MS = 60000; // một biển chỉ được tính thấy lại một lần trong chừng này (ms)
 export const HEALTH_WINDOW_MS = 10000; // health() xét các khung trong chừng này (ms)
 // Ảnh biển để kiểm tra độ chính xác (PLAN §6.5, tuỳ chọn onEvalCrop): một lượt bám "suýt được nhận" chỉ trượt các
@@ -94,13 +99,17 @@ const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const lengthOf = (corr) => (corr && corr.cum && corr.cum.length ? corr.cum[corr.cum.length - 1] : 0);
 const usable = (corr) => Boolean(corr && Array.isArray(corr.coords) && corr.coords.length >= 2 && Array.isArray(corr.pieces));
+const codeOf = (label) => String(label).split('[')[0]; // 'P.127[50]' → 'P.127'
 const defaultMono = () => (globalThis.performance ? globalThis.performance.now() : Date.now());
 
 /**
  * Đường b nối tiếp đường a: chung một đầu mút (đỉnh đầu hoặc cuối của cả hai) và hướng đi vào đầu mút theo a lệch
  * hướng đi ra theo b không quá CONTINUE_ANGLE (đo theo đoạn sát đầu mút). Không theo chiều vẽ, không theo chiều đi.
+ * Có roads (RoadData, waysAtVertex): đầu mút đó còn phải không phải chỗ rẽ nhánh, tức là không nhánh nào khác ở đó
+ * (trừ nhánh xe đi tới theo a và chính b) lệch không quá FORK_ANGLE so với hướng đi vào. Ở ngã ba chữ Y, kể cả hai
+ * nhánh đối xứng ±10°, không nhánh nào là "đi tiếp"; nút giao có đường ngang (≈ 90°) vẫn có.
  */
-export function continuesWay(a, b) {
+export function continuesWay(a, b, roads = null) {
   if (!a || !b || a.id === b.id || !Array.isArray(a.g) || !Array.isArray(b.g)) return false;
   const na = a.g.length >> 1;
   const nb = b.g.length >> 1;
@@ -112,7 +121,36 @@ export function continuesWay(a, b) {
     const into = bearing(pt(a, prev), v);
     for (const [start, next] of [[0, 1], [nb - 1, nb - 2]]) {
       if (vertexKey(pt(b, start)) !== key) continue;
-      if (Math.abs(angleDiff(into, bearing(v, pt(b, next)))) <= CONTINUE_ANGLE) return true;
+      const out = bearing(v, pt(b, next));
+      if (Math.abs(angleDiff(into, out)) <= CONTINUE_ANGLE && !forkAt(roads, v, into, out, a.id, b.id)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Ở đỉnh v (xe đi vào theo hướng into, đi ra theo hướng out của đường bId) có một nhánh khác lệch không quá FORK_ANGLE
+ * so với into: đó là chỗ rẽ nhánh. Bỏ qua nhánh xe đi tới (ngược into trong ARM_SAME), các nhánh của đường aId và
+ * nhánh out của chính bId. Không có roads (hay waysAtVertex lỗi) thì coi là không rẽ nhánh.
+ */
+function forkAt(roads, v, into, out, aId, bId) {
+  if (!roads || typeof roads.waysAtVertex !== 'function') return false;
+  let arms;
+  try {
+    arms = roads.waysAtVertex(v);
+  } catch {
+    return false;
+  }
+  for (const { way, i } of arms || []) {
+    if (!way || !Array.isArray(way.g) || way.id === aId) continue;
+    const n = way.g.length >> 1;
+    for (const d of [-1, 1]) {
+      const k = i + d;
+      if (k < 0 || k >= n) continue;
+      const brg = bearing(v, [way.g[2 * k], way.g[2 * k + 1]]);
+      if (Math.abs(angleDiff((into + 180) % 360, brg)) < ARM_SAME) continue; // nhánh xe đi tới
+      if (way.id === bId && Math.abs(angleDiff(out, brg)) < 1) continue; // chính b
+      if (Math.abs(angleDiff(into, brg)) <= FORK_ANGLE) return true;
     }
   }
   return false;
@@ -264,21 +302,26 @@ export class Learner {
     this.lastPosed = null; // khung gần nhất có vị trí xe { t, D }: cửa sổ xét được xem tới đâu
     this.passes = new Map(); // id biển → trạng thái lượt đi qua
     this.recentHits = new Map(); // id biển → lúc tính thấy lại (mono)
+    this.sighted = new Map(); // id biển → { t (mono), label, family, coord, facing }: lần thấy gần đây (coSeen)
     this.simulated = false;
     this.tracker.reset();
     this.evalBest.clear();
   }
 
-  /** Nghe kết quả mỗi lượt đi qua biển: fn({ record, outcome: 'hit'|'miss'|'none', reason }). */
+  /**
+   * Nghe kết quả mỗi lượt đi qua biển: fn({ record, outcome: 'hit'|'miss'|'none', reason, valueChanged? }).
+   * valueChanged: true khi reason là 'conflict' và lượt bám gây ra nó là biển cùng mã khác trị số (camera vừa thấy,
+   * dù chưa đủ tin, một trị số khác ở đúng chỗ: biển có thể đã đổi, CameraLimit không dùng trị số cũ).
+   */
   onPassed(fn) {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }
 
-  #emit(record, outcome, reason = null) {
+  #emit(record, outcome, reason = null, extra = null) {
     for (const fn of this.listeners) {
       try {
-        fn({ record, outcome, reason });
+        fn(extra ? { record, outcome, reason, ...extra } : { record, outcome, reason });
       } catch {
         /* bỏ qua lỗi của bên nghe */
       }
@@ -566,6 +609,7 @@ export class Learner {
     const m = this.store.match(obs);
     const t = this.mono();
     if (m.match && this.#recentHit(m.match.id, t)) {
+      this.#coSight(m.match, t);
       this.#count('events', 'dup');
       this.#evalCrop(kept, o.label, 'accepted', 'dup', night);
       return { ok: true, event: 'dup', record: null, obs };
@@ -575,6 +619,7 @@ export class Learner {
     this.#evalCrop(kept, o.label, 'accepted', r.event, night);
     if (r.record && (r.event === 'hit' || r.event === 'conflict' || r.event === 'new')) {
       this.recentHits.set(r.record.id, t);
+      this.#coSight(r.record, t);
       if (!r.created) {
         // Thấy lại: kết luận ngay lượt đi qua biển này.
         this.passes.delete(r.record.id);
@@ -582,8 +627,11 @@ export class Learner {
       }
     }
     for (const old of r.missed || []) {
-      // Đổi trị số (50 → 60): kho đã trừ điểm biển cũ như một lần đi qua không thấy.
+      // Đổi trị số (50 → 60): kho đã trừ điểm biển cũ như một lần đi qua không thấy. Lượt đi qua này của biển cũ đã
+      // kết luận: ghi như vừa thấy để lần định vị kế tiếp không xét lại nó ('late') rồi báo nó đã đi qua (CameraLimit
+      // sẽ dùng lại trị số cũ ngay sau biển mới).
       this.passes.delete(old.id);
+      this.recentHits.set(old.id, t);
       this.#emit(old, 'miss', 'value');
     }
     return { ok: true, event: r.event, record: r.record, obs };
@@ -598,8 +646,11 @@ export class Learner {
     if (!this.passes.size) return;
     for (const st of this.passes.values()) {
       const k = this.#marks(track, st);
-      if (k === 'conflict') st.conflict = true;
-      else if (k === 'seen') st.seen = true;
+      if (k === 'conflict' && this.#explained(track, st)) continue; // biển thứ hai đã biết ở cạnh, không phải đọc nhầm
+      if (k === 'conflict') {
+        st.conflict = true;
+        if (codeOf(majorityLabel(track).label) === codeOf(st.label)) st.valueConflict = true;
+      } else if (k === 'seen') st.seen = true;
     }
   }
 
@@ -618,6 +669,45 @@ export class Learner {
     const s = st.sFix - (lp.D - st.DFix);
     if (Math.abs(Z - s) > CONFLICT_RADIUS) return null;
     return maj.label !== st.label ? 'conflict' : 'seen';
+  }
+
+  /**
+   * Lượt bám nhãn khác cùng họ (k = 'conflict' với biển đang xét st) là một biển thứ hai đã biết: một biển đã xác nhận
+   * mang đúng nhãn đó, cách st không quá CONFLICT_RADIUS, hướng mặt lệch ≤ MATCH_FACING, mà camera đã thấy cùng st
+   * (hai lượt bám riêng trong một lượt đi qua) vào ≥ CO_SEEN_DAYS ngày. Khi đó lượt bám không chặn st bị trừ điểm.
+   */
+  #explained(track, st) {
+    const maj = majorityLabel(track);
+    const mine = maj && typeof this.store.get === 'function' ? this.store.get(st.id) : null;
+    if (!mine || !Array.isArray(mine.co)) return false;
+    for (const c of mine.co) {
+      if (!(c.days >= CO_SEEN_DAYS)) continue;
+      const other = this.store.get(c.id);
+      if (!other || other.status !== 'confirmed' || labelOf(other.code, other.value) !== maj.label) continue;
+      if (!Array.isArray(other.coord) || distance(other.coord, mine.coord) > CONFLICT_RADIUS) continue;
+      if (Math.abs(angleDiff(other.facing, mine.facing)) > MATCH_FACING) continue;
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Một lần thấy được nhận cho biển rec (lúc t): biển khác nhãn, cùng họ, cùng hướng, cách không quá CONFLICT_RADIUS,
+   * được thấy trong CO_SEEN_MS trước đó (lượt bám khác, cùng lượt đi qua) → ghi vào kho là hai biển cùng được thấy.
+   */
+  #coSight(rec, t) {
+    if (!rec || !Array.isArray(rec.coord)) return;
+    const label = labelOf(rec.code, rec.value);
+    for (const [id, s] of this.sighted) {
+      if (t - s.t > CO_SEEN_MS) {
+        this.sighted.delete(id);
+        continue;
+      }
+      if (id === rec.id || s.label === label || s.family !== rec.family) continue;
+      if (distance(s.coord, rec.coord) > CONFLICT_RADIUS || Math.abs(angleDiff(s.facing, rec.facing)) > MATCH_FACING) continue;
+      if (typeof this.store.coSeen === 'function') this.store.coSeen(id, rec.id);
+    }
+    this.sighted.set(rec.id, { t, label, family: rec.family, coord: rec.coord, facing: rec.facing });
   }
 
   /** Biển vừa được tính thấy lại trong HIT_DEBOUNCE_MS (ms) trước t. */
@@ -773,7 +863,7 @@ export class Learner {
       for (;;) {
         const other = roads.matchWay(fix, '', { vehicle: this.vehicle, skip });
         if (!other || other.dist > PARALLEL_NEAR) return false;
-        if (!mine.some((w) => continuesWay(w, other.way))) return true;
+        if (!mine.some((w) => continuesWay(w, other.way, roads))) return true;
         skip.add(other.way.id);
         mine.push(other.way);
       }
@@ -879,6 +969,7 @@ export class Learner {
             accBad: false,
             switched: false,
             conflict: false,
+            valueConflict: false,
             seen: false,
             cross: null,
           };
@@ -960,6 +1051,6 @@ export class Learner {
     if (outcome === 'miss') record = this.store.pass(st.id, 'miss');
     else record = typeof this.store.get === 'function' ? this.store.get(st.id) : null;
     this.#count('events', outcome === 'miss' ? 'miss' : `none:${reason}`);
-    if (record) this.#emit(record, outcome, reason);
+    if (record) this.#emit(record, outcome, reason, reason === 'conflict' && st.valueConflict ? { valueChanged: true } : null);
   }
 }

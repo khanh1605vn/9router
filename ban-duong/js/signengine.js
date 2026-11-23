@@ -775,6 +775,7 @@ class Memo {
 /**
  * Số thứ tự ngày theo lịch của máy (learnedsigns.js dayNumber: số ngày từ 1/1/1970 tới ngày đó theo giờ địa phương)
  * → "dd/mm/yyyy", hoặc null. Số thứ tự đã mang sẵn ngày địa phương nên đọc lại theo UTC, không phụ thuộc múi giờ.
+ * Các ngày của kho biển là "ngày lái xe" (driveDay, bắt đầu 04:00): lần thấy lúc 00:00–03:59 hiện ngày hôm trước.
  */
 export function dayDate(day) {
   if (!Number.isFinite(day)) return null;
@@ -857,6 +858,23 @@ function learnedNear(learned, p) {
 
 /** Mục lấy từ bản đồ (mã dup) là cùng biển với biển đã học it: cùng dup; biển đã học không có trị số thì cùng mã. */
 const sameSign = (dup, it) => dup === it.dup || (it.value == null && it.code != null && dup.startsWith(`${it.code}|`));
+
+/** Biển giới hạn tối đa có trị số (tốc độ, trọng tải, tải trọng trục, chiều cao, chiều ngang, chiều dài): số nhỏ hơn là chặt hơn. */
+const MAX_LIMIT_CODES = new Set(['P.127', 'P.115', 'P.116', 'P.117', 'P.118', 'P.119']);
+const limitNumber = (v) => (/^\d+(?:\.\d+)?$/.test(String(v ?? '')) ? Number(v) : NaN);
+
+/**
+ * Mục bản đồ (mã dup) che biển đã học it: cùng biển (sameSign), hoặc cùng mã giới hạn tối đa nhưng trị số camera
+ * không chặt hơn (lớn hơn hay bằng, hoặc không so được). Biển camera chặt hơn hẳn thì giữ (giới hạn hiện ra là
+ * min(bản đồ, camera), camera không bao giờ nâng giới hạn): dữ liệu bản đồ thắng, trừ khi camera thấy giới hạn thấp hơn.
+ */
+const mappedCovers = (dup, it) => {
+  if (sameSign(dup, it)) return true;
+  if (it.code == null || !MAX_LIMIT_CODES.has(it.code) || !dup.startsWith(`${it.code}|`)) return false;
+  const osmN = limitNumber(dup.slice(it.code.length + 1));
+  const camN = limitNumber(it.value);
+  return !(osmN > 0 && camN > 0 && camN < osmN);
+};
 
 // ---------------------------------------------------------------------------------------------
 // C2. Các mục trên hành lang
@@ -1706,14 +1724,20 @@ export class SignEngine {
       this.lastSpeak = time;
     }
 
+    // Thanh cảnh báo: mục gần nhất trong tầm. Biển camera chưa xác nhận (quiet, không bao giờ đọc) chỉ lên thanh khi
+    // không có mục nào khác trong tầm, để thanh không hiện một biển khác với câu vừa đọc; nó vẫn nằm trong upcoming.
     let active = null;
-    for (const it of items) {
-      const e = this.seen.get(it.key);
-      // Mục đã báo hiện tới khi đi qua, nhưng không xa hơn khoảng lúc báo (vạch đo không bao giờ bắt đầu từ 0).
-      if (it.distance <= (e ? Math.max(trigger, e.reach) : trigger)) {
-        active = { item: publicItem(it), distance: it.distance, reach: e ? e.reach : Math.max(reachNow, it.distance) };
-        break;
+    for (const quiet of [false, true]) {
+      for (const it of items) {
+        if (Boolean(it.quiet) !== quiet) continue;
+        const e = this.seen.get(it.key);
+        // Mục đã báo hiện tới khi đi qua, nhưng không xa hơn khoảng lúc báo (vạch đo không bao giờ bắt đầu từ 0).
+        if (it.distance <= (e ? Math.max(trigger, e.reach) : trigger)) {
+          active = { item: publicItem(it), distance: it.distance, reach: e ? e.reach : Math.max(reachNow, it.distance) };
+          break;
+        }
       }
+      if (active) break;
     }
     active = this.#waiting(active, items, corr, fix, speed, time);
 
@@ -1753,8 +1777,8 @@ export class SignEngine {
   }
 
   /**
-   * Bỏ biển do camera ghi nhận mà bản đồ đã có (dữ liệu bản đồ luôn thắng): một mục bản đồ cùng biển (sameSign) phía
-   * trước cách nó không quá LEARNED_OSM_GAP m dọc hành lang, hoặc một mục bản đồ đã báo (seen, kể cả khi xe vừa đi
+   * Bỏ biển do camera ghi nhận mà bản đồ đã có (dữ liệu bản đồ luôn thắng): một mục bản đồ che nó (mappedCovers: cùng
+   * biển, hay cùng mã giới hạn tối đa mà trị số camera không chặt hơn) phía trước cách nó không quá LEARNED_OSM_GAP m dọc hành lang, hoặc một mục bản đồ đã báo (seen, kể cả khi xe vừa đi
    * qua nó) cùng chiều đi, cách nó không quá LEARNED_OSM_GAP m. Biển bản đồ ở ngay sau lưng xe không còn trên hành lang
    * nên phải nhờ seen: thiếu bước này, biển camera đặt lệch vài mét về phía trước sẽ hiện thay chỗ biển vừa đi qua.
    * Hành lang dài đủ LENGTH (bị cắt ở tầm nhìn, không phải ở cuối đường hay ở nút giao chưa rõ hướng): chưa thấy được
@@ -1767,9 +1791,9 @@ export class SignEngine {
     return items.filter((it) => {
       if (!it.src) return true;
       if (it.distance > horizon) return false;
-      if (mapped.some((o) => sameSign(o.dup, it) && Math.abs(o.distance - it.distance) <= LEARNED_OSM_GAP)) return false;
+      if (mapped.some((o) => mappedCovers(o.dup, it) && Math.abs(o.distance - it.distance) <= LEARNED_OSM_GAP)) return false;
       for (const e of this.seen.values()) {
-        if (e.src || !sameSign(e.dup, it) || !sameWay(e.brg, it.brg)) continue;
+        if (e.src || !mappedCovers(e.dup, it) || !sameWay(e.brg, it.brg)) continue;
         if (distance(e.coord, it.coord) <= LEARNED_OSM_GAP) return false;
       }
       return true;

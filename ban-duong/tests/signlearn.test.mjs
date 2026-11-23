@@ -13,6 +13,7 @@ import {
   ARM_SAME,
   CLS_MIN_PX,
   CONFLICT_RADIUS,
+  CO_SEEN_DAYS,
   CONTINUE_ANGLE,
   continuesWay,
   CORRIDOR_KEEP_MS,
@@ -54,6 +55,7 @@ import {
   WIN_NEAR,
 } from '../js/signlearn.js';
 import { acceptTrack, focalPx } from '../js/signtrack.js';
+import { CameraLimit } from '../js/alerts.js';
 
 // Cờ learn lấy từ danh sách học cố định (như models/labels.json chưa huấn luyện), không đọc tệp đã cài: một lần
 // huấn luyện đầy đủ có thể gỡ nhãn khỏi danh sách học (BD_PRUNE) mà phép thử logic học không được phụ thuộc vào đó.
@@ -124,7 +126,7 @@ function boxesAt(xCar, eastbound, signs, g, r, p) {
     if (Z <= 0.5) continue;
     const wTrue = (F * sg.size) / Z;
     const cx = FOE.x + (F * sg.lat) / Z + g();
-    const cy = FOE.y - (F * 1.2) / Z + g();
+    const cy = FOE.y - (F * (sg.height ?? 1.2)) / Z + g();
     const w = wTrue * (1 + 0.03 * g()) + 0.7 * g();
     const h = w * (1 + 0.02 * g());
     const inA = Math.abs(cx - FOE.x) <= 320 && Math.abs(cy - FOE.y) <= 176; // lượt A: 640×352 quanh điểm tụ
@@ -158,7 +160,7 @@ const NOON_HANOI = Date.UTC(2026, 10, 23, 5, 0); // 12:00 giờ Việt Nam
 function drive({
   seed, kmh = 50, day = 0, store, world = WORLD, signs = SIGNS, east = true, camera = true, start = 100, end = 1100, sigma = 4,
   wallStart = NOON_HANOI, p = 0.92, lum = { mean: 120, std: 40 }, stop = null, slow = null, accuracy = () => 5, mapCorridor = null,
-  simulated = false, cameraOn = null, evalCrops = false, onEvalCrop = null, sent = [],
+  simulated = false, cameraOn = null, evalCrops = false, onEvalCrop = null, sent = [], limit = null, path = null,
 }) {
   const r = rng(seed);
   const g = gaussOf(r);
@@ -170,6 +172,8 @@ function drive({
   const engine = new SignEngine();
   const passed = [];
   learner.onPassed((e) => passed.push(e));
+  if (limit) learner.onPassed((e) => limit.onPassed(e));
+  const limits = []; // limit: CameraLimit nghe bộ học, xét sau mỗi lần định vị → [{ x, n }]
   // Vị trí dọc đường (tính theo chiều đi) và tốc độ thật theo thời gian.
   const t1 = stop ? (stop.x - start) / v : Infinity;
   const s0 = slow ? (slow.x0 - start) / v : Infinity;
@@ -201,10 +205,12 @@ function drive({
     if (ev.fix != null) {
       const { d, speed } = pos(ev.fix);
       const x = xOf(d);
+      // path(x) → { c, h }: xe đi theo đường khác đường thẳng (rẽ nhánh), x vẫn là quãng đã đi tính từ O.
+      const pp = path ? path(x) : null;
       const fix = {
-        coord: off(along(x + sigma * g()), sigma * g()),
+        coord: pp ? off(destination(pp.c, pp.h, sigma * g()), sigma * g()) : off(along(x + sigma * g()), sigma * g()),
         speed: Math.max(0, speed + 0.2 * g()),
-        heading: ((east ? 90 : 270) + 2 * g() + 360) % 360,
+        heading: ((pp ? pp.h : east ? 90 : 270) + 2 * g() + 360) % 360,
         accuracy: accuracy(x),
         time: wall0 + ev.fix * 1000,
         simulated,
@@ -212,6 +218,11 @@ function drive({
       engine.update(fix, world.roads, {}, { vehicle: 'car', now: new Date(wall0 + simT * 1000) });
       const corr = engine.lastCorridor && mapCorridor ? mapCorridor(engine.lastCorridor, x) : engine.lastCorridor;
       learner.onFix(fix, { corridor: corr, corridorTime: engine.lastCorridorTime });
+      if (limit) {
+        const match = world.roads.matchWay(fix, '', { vehicle: 'car' });
+        limit.update(fix, match, { roads: world.roads, corridor: engine.lastCorridor, hasData: true, vehicle: 'car', now: new Date(wall0 + simT * 1000) });
+        limits.push({ x, n: limit.current ? limit.current.n : null });
+      }
     } else {
       const { d, speed } = pos(ev.frame);
       const x = xOf(d);
@@ -231,7 +242,7 @@ function drive({
       results.push(...res.results);
     }
   }
-  return { learner, passed, results };
+  return { learner, passed, results, limits };
 }
 
 function newStore(clock = { t: NOON_HANOI }) {
@@ -529,6 +540,11 @@ test('mô phỏng: từng trường hợp không đủ bằng chứng (không đ
     x > 455 && x < 495 ? { ...corr, pieces: corr.pieces.map((pc) => ({ ...pc, way: { ...pc.way, id: 99 } })) } : corr;
   assert.equal(reason({ seed: 7, mapCorridor: parallel }), 'none:way', 'khớp sang đường song song');
   assert.equal(reason({ seed: 8, signs: [{ ...P127, label: 'P.103a' }] }), 'none:conflict', 'biển khác cùng họ ở đúng chỗ');
+  // Cùng mã khác trị số thấy được nhưng chưa đủ tin: vẫn 'conflict', kèm valueChanged (CameraLimit bỏ trị số cũ).
+  const changed = (opts) => drive({ store, ...opts }).passed.filter((e) => e.record.id === id).map((e) => [`${e.outcome}:${e.reason}`, e.valueChanged === true]);
+  assert.deepEqual(changed({ seed: 8, signs: [{ ...P127, label: 'P.103a' }] }), [['none:conflict', false]]);
+  assert.deepEqual(changed({ seed: 12, signs: [{ ...P127, label: 'P.127[60]' }], p: 0.8 }), [['none:conflict', true]]);
+  assert.equal(store.get(id).L, L0);
   assert.equal(reason({ seed: 9, signs: [P127], p: 0.8 }), 'none:seen', 'thấy biển nhưng chưa đủ tin');
   assert.equal(reason({ seed: 10, start: 470 }), 'none:late', 'xe vào đường khi đã quá gần biển: chỉ báo đã đi qua, không trừ điểm');
   // Đổi biển 50 → 60: biển 60 mới, biển 50 bị trừ như không thấy.
@@ -536,6 +552,90 @@ test('mô phỏng: từng trường hợp không đủ bằng chứng (không đ
   assert.deepEqual(r.passed.filter((e) => e.record.code === 'P.127').map((e) => `${e.record.value}:${e.outcome}:${e.reason}`), ['50:miss:value']);
   assert.ok(store.get(id).L < L0);
   assert.equal(byCode(store, 'P.127') && store.list().filter((x) => x.code === 'P.127').length, 2);
+});
+
+test('đổi trị số 60 → 50: biển cũ chỉ bị trừ một lần mỗi lượt ("miss:value"), không bị xét lại ("late"); CameraLimit không dùng lại 60 sau biển mới', () => {
+  const P60 = { ...P127, label: 'P.127[60]' };
+  const tally = {};
+  for (let seed = 1; seed <= 8; seed++) {
+    const clock = { t: NOON_HANOI };
+    const store = newStore(clock);
+    // Biển 60 đã đứng lâu: camera thấy 3 ngày, đã xác nhận.
+    for (let d = 0; d < 3; d++) {
+      drive({ seed: 1000 + seed * 10 + d, store, signs: [P60], wallStart: clock.t });
+      clock.t += 864e5;
+    }
+    const old = store.list().find((x) => x.code === 'P.127' && x.value === '60');
+    assert.equal(old.status, 'confirmed');
+    // Biển được thay bằng 50: mỗi ngày đi qua một lần.
+    for (let d = 0; d < 5; d++) {
+      const limit = new CameraLimit();
+      const r = drive({ seed: seed * 100 + d, store, signs: [P127], wallStart: clock.t, limit });
+      const ev = outcomes(r, old.id);
+      tally[ev] = (tally[ev] || 0) + 1;
+      assert.equal(ev, 'miss:value', `seed ${seed}, ngày ${d}: biển cũ chỉ có một kết luận`);
+      const after = r.limits.filter((l) => l.x > P127.x + PASS_BEHIND && l.x < JX - 50).map((l) => l.n);
+      assert.ok(!after.includes(60), `seed ${seed}, ngày ${d}: sau biển 50, giới hạn ${[...new Set(after)].join('/')}`);
+      clock.t += 864e5;
+    }
+  }
+  assert.deepEqual(tally, { 'miss:value': 40 });
+});
+
+test('hai biển cùng họ đứng sát nhau (cùng cột, cách 15 m): biển bị dỡ vẫn bị trừ điểm và bị loại; biển còn lại không bị trừ', () => {
+  assert.equal(CO_SEEN_DAYS, 2);
+  for (const gap of [0, 15]) {
+    for (let seed = 1; seed <= 4; seed++) {
+      const clock = { t: NOON_HANOI };
+      const store = newStore(clock);
+      const A = { ...P127, height: 1.2 };
+      const B = { label: 'P.103a', family: 'ring', x: P127.x + gap, lat: 5, size: 0.7, height: gap ? 1.2 : 1.95 };
+      for (let d = 0; d < 3; d++) {
+        drive({ seed: seed * 50 + d, store, signs: [A, B], wallStart: clock.t });
+        clock.t += 864e5;
+      }
+      const a = byCode(store, 'P.127');
+      const b = byCode(store, 'P.103a');
+      assert.deepEqual([a.status, b.status], ['confirmed', 'confirmed'], `cách ${gap} m, seed ${seed}`);
+      assert.ok(store.get(b.id).co.some((c) => c.id === a.id && c.days >= CO_SEEN_DAYS), 'đã thấy cả hai cùng lượt');
+      // B bị dỡ: mỗi ngày đi qua một lần.
+      const seen = [];
+      let retiredOn = null;
+      for (let d = 0; d < 8; d++) {
+        const r = drive({ seed: seed * 50 + 10 + d, store, signs: [A], wallStart: clock.t });
+        seen.push(outcomes(r, b.id));
+        assert.ok(!outcomes(r, a.id).includes('miss'), `biển còn lại không bị trừ (cách ${gap} m, seed ${seed}, ngày ${d})`);
+        if (retiredOn == null && store.get(b.id).status === 'retired') retiredOn = d;
+        clock.t += 864e5;
+      }
+      assert.ok(!seen.includes('none:conflict'), `cách ${gap} m, seed ${seed}: ${seen.join(' ')}`);
+      assert.equal(retiredOn, 5, `cách ${gap} m, seed ${seed}: L 2,8 → loại sau 6 lần không thấy (${seen.join(' ')})`);
+      assert.equal(store.get(a.id).status, 'confirmed');
+    }
+  }
+});
+
+test('một biển bị đọc nhầm thành nhãn khác cùng họ ở mọi lượt (chỉ một lượt bám): biển thật không bao giờ bị trừ điểm', () => {
+  for (let seed = 1; seed <= 3; seed++) {
+    const clock = { t: NOON_HANOI };
+    const store = newStore(clock);
+    for (let d = 0; d < 3; d++) {
+      drive({ seed: seed * 70 + d, store, signs: [P127], wallStart: clock.t });
+      clock.t += 864e5;
+    }
+    const real = byCode(store, 'P.127');
+    const L0 = store.get(real.id).L;
+    const misread = { ...P127, label: 'P.103a' };
+    for (let d = 0; d < 6; d++) {
+      const r = drive({ seed: seed * 70 + 10 + d, store, signs: [misread], wallStart: clock.t });
+      assert.equal(outcomes(r, real.id), 'none:conflict', `seed ${seed}, ngày ${d}`);
+      clock.t += 864e5;
+    }
+    assert.equal(byCode(store, 'P.103a').status, 'confirmed', 'biển đọc nhầm đã được xác nhận (trường hợp xấu nhất)');
+    assert.equal(store.get(real.id).L, L0);
+    assert.equal(store.get(real.id).status, 'confirmed');
+    assert.deepEqual(store.get(real.id).co, [], 'không bao giờ thấy hai biển cùng lượt');
+  }
 });
 
 test('biển đã học qua SignEngine thật: chiều đúng được báo ở 100–200 m, chiều ngược lại im lặng', () => {
@@ -901,6 +1001,62 @@ test('continuesWay: chung đầu mút và lệch hướng ≤ CONTINUE_ANGLE là
   assert.equal(continuesWay(a, bend(CONTINUE_ANGLE + 2)), false, `lệch ${CONTINUE_ANGLE + 2}°`);
   assert.equal(continuesWay(a, { id: 8, g: [J] }), false, 'một đỉnh');
   assert.equal(continuesWay(null, b), false);
+});
+
+/**
+ * Đường chính bị OSM tách ở V (x = 600): id 1 trước, id 11 sau (đi thẳng), cộng các nhánh bắt đầu ở V lệch `forks`
+ * độ (dương: sang phải) so với hướng Đông, id 3, 4… và đường ngang ở JX như WORLD.
+ */
+function forkWorld(forks, { straight = true } = {}) {
+  const main = [];
+  for (let x = 0; x <= 1400; x += 50) main.push(along(x));
+  const V = main[12];
+  const J = main[JX / 50];
+  const ways = [{ id: 1, n: 'Đường chính', h: 'primary', c: null, m: null, o: 0, g: main.slice(0, 13).flat() }];
+  if (straight) ways.push({ id: 11, n: 'Đường chính', h: 'primary', c: null, m: null, o: 0, g: main.slice(12).flat() });
+  forks.forEach((deg, k) => {
+    ways.push({ id: 3 + k, n: 'Nhánh', h: 'primary', c: null, m: null, o: 0, g: [V, destination(V, 90 + deg, 150), destination(V, 90 + deg, 400)].flat() });
+  });
+  ways.push({ id: 2, n: 'Đường ngang', h: 'residential', c: null, m: null, o: 0, g: [off(J, -150), off(J, -50), J, off(J, 50), off(J, 150)].flat() });
+  const roads = new RoadData({ fetchImpl: () => Promise.reject(new Error('không có mạng')), cache: { get: async () => null, put: () => {} } });
+  roads.setCell(cellKey(...cellOf(O)), { ways, feats: [], v: 3, t: Date.now() });
+  const byId = (id) => ways.find((w) => w.id === id);
+  return { roads, ways, byId, V };
+}
+
+test('continuesWay có dữ liệu đường: ở chỗ rẽ nhánh (12°, chữ Y ±10°) không nhánh nào là đi tiếp; đường ngang 90° không làm mất đi tiếp', () => {
+  // Đi thẳng C (0°) và nhánh B 12°: không đường nào là đi tiếp của A (không biết xe theo nhánh nào).
+  const f = forkWorld([12]);
+  assert.equal(continuesWay(f.byId(1), f.byId(3)), true, 'không có roads: như trước');
+  assert.equal(continuesWay(f.byId(1), f.byId(3), f.roads), false, 'nhánh 12°');
+  assert.equal(continuesWay(f.byId(1), f.byId(11), f.roads), false, 'đường đi thẳng khi có nhánh 12° bên cạnh');
+  // Chữ Y đối xứng ±10°, không có đường đi thẳng.
+  const y = forkWorld([10, -10], { straight: false });
+  assert.equal(continuesWay(y.byId(1), y.byId(3), y.roads), false);
+  assert.equal(continuesWay(y.byId(1), y.byId(4), y.roads), false);
+  // Đường ngang 90° ở chỗ tách: đi thẳng vẫn là đi tiếp (sửa lỗi tách đường ở nút giao vẫn giữ).
+  const x = forkWorld([90, -90]);
+  assert.equal(continuesWay(x.byId(1), x.byId(11), x.roads), true);
+  assert.equal(continuesWay(x.byId(11), x.byId(1), x.roads), true, 'không theo chiều vẽ');
+  // Nhánh 50° (ngoài FORK_ANGLE): đi thẳng vẫn là đi tiếp.
+  const w = forkWorld([50]);
+  assert.equal(continuesWay(w.byId(1), w.byId(11), w.roads), true);
+  // waysAtVertex lỗi: coi như không rẽ nhánh.
+  assert.equal(continuesWay(f.byId(1), f.byId(11), { waysAtVertex: () => { throw new Error('x'); } }), true);
+});
+
+test('biển 10–20 m sau chỗ rẽ nhánh 12°, trên đường đi thẳng, xe theo nhánh: không đủ bằng chứng ("way"), không bị trừ điểm', () => {
+  const world = forkWorld([12]);
+  for (const dAfter of [10, 20]) {
+    for (let seed = 1; seed <= 4; seed++) {
+      const store = newStore();
+      const rec = store.observe({ code: 'P.103a', value: null, family: 'ring', coord: along(600 + dAfter), facing: 270, wayId: 11, junction: null, night: false, posErr: 4 }).record;
+      store.confirm(rec.id);
+      const path = (x) => (x <= 600 ? { c: along(x), h: 90 } : { c: destination(world.V, 102, x - 600), h: 102 });
+      const r = drive({ seed, store, world, signs: [], start: 350, end: 800, path });
+      assert.equal(outcomes(r, rec.id), 'none:way', `biển ${dAfter} m sau chỗ rẽ, seed ${seed}`);
+    }
+  }
 });
 
 test('biển của nút giao khi OSM tách đường ở nút giao: đoạn đi tiếp không bị coi là đường song song, biển bị dỡ vẫn bị trừ điểm', () => {

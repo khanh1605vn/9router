@@ -122,6 +122,27 @@ test('biển camera mới thấy một lần (chưa xác nhận): hiện nét đ
   for (const v of [6, 22]) assert.deepEqual(said(drive(world(), { store, v })), []);
 });
 
+test('thanh cảnh báo: câu vừa đọc là biển bản đồ thì thanh hiện biển đó, không phải biển camera chưa xác nhận ở gần hơn', () => {
+  for (const gap of [20, 40, 60]) {
+    const { store } = learned([{ x: 560 - gap, code: 'P.103a', value: null }], { twice: false });
+    const log = drive(world([SIGN('o', destination(along(560), 180, 6), 'VN:P.127[50]')]), { store });
+    const spoken = log.filter((r) => r.say);
+    assert.equal(spoken.length, 1, `cách ${gap} m`);
+    assert.match(spoken[0].say, /^Phía trước \d+ mét, biển tốc độ tối đa 50 ki lô mét trên giờ$/);
+    // Từ lúc đọc tới khi qua biển camera: thanh hiện biển bản đồ, biển camera chỉ nằm trong danh sách sắp tới.
+    const k = log.indexOf(spoken[0]);
+    const before = log.slice(k).filter((r) => r.x < 560 - gap);
+    assert.ok(before.length >= 2, `cách ${gap} m: ${before.length} lần định vị`);
+    for (const r of before) {
+      assert.equal(r.active && r.active.item.code, 'P.127', `x = ${r.x}, cách ${gap} m`);
+      assert.ok(r.upcoming.some((it) => it.src === 'camera' && it.quiet), `x = ${r.x}: biển camera vẫn trong danh sách`);
+    }
+  }
+  // Chỉ có biển camera chưa xác nhận trong tầm: thanh vẫn hiện nó (nét đứt).
+  const { store } = learned([{ x: 500, code: 'P.103a', value: null }], { twice: false });
+  assert.ok(drive(world(), { store }).some((r) => r.active && r.active.item.quiet === true));
+});
+
 test('lời rào: đúng câu chữ, kể cả khi gộp với biển bản đồ và với biển camera khác', () => {
   const sentence = (signs, feats = []) => said(drive(world(feats), { store: learned(signs).store }));
   const P123A = { code: 'P.123a', value: null, family: 'ring' };
@@ -208,6 +229,80 @@ test(`cuối hành lang dài đủ: biển camera chỉ hiện khi đã thấy �
   dead.setCell(cellKey(...cellOf(O)), { ways: [{ id: 1, n: 'Ngõ', h: 'residential', c: null, m: null, o: 0, g: main.flat() }], feats: [], v: 3, t: Date.now() });
   const { store: s2 } = learned([{ x: 590 }]);
   assert.deepEqual(said(drive(dead, { store: s2, from: 300, to: 600 })), ['Phía trước 100 mét, biển tốc độ tối đa 50 ki lô mét trên giờ (camera ghi nhận)']);
+});
+
+test(`biển tốc độ camera cao hơn biển bản đồ trong ${LEARNED_OSM_GAP} m: bản đồ thắng; camera thấp hơn thì vẫn giữ`, () => {
+  // Bản đồ 50, camera đã xác nhận 60 ở cùng chỗ: không bao giờ hiện hay đọc 60 (camera không nâng giới hạn).
+  const { store, ids } = learned([{ x: 500, value: '60' }]);
+  const at = store.get(ids[0]).coord;
+  for (const gap of [0, 5, -5, 29, -29]) {
+    const roads = world([SIGN('o', destination(at, 90, gap), 'VN:P.127[50]')]);
+    const log = drive(roads, { store });
+    assert.deepEqual(camShown(log), [], `bản đồ 50 cách ${gap} m: biển camera 60 không bao giờ hiện`);
+    assert.deepEqual(said(log), said(drive(roads)), `cách ${gap} m: câu đọc như khi không có camera`);
+    assert.equal(said(log).length, 1);
+    assert.match(said(log)[0], /^Phía trước \d+ mét, biển tốc độ tối đa 50 ki lô mét trên giờ$/);
+  }
+  // Bản đồ 60, camera 50 (chặt hơn, có thể là biển mới): biển camera vẫn hiện và được đọc kèm lời rào.
+  const { store: s2, ids: i2 } = learned([{ x: 500, value: '50' }]);
+  const at2 = s2.get(i2[0]).coord;
+  for (const gap of [5, -5]) {
+    const log = drive(world([SIGN('o', destination(at2, 90, gap), 'VN:P.127[60]')]), { store: s2 });
+    assert.ok(camShown(log).length > 0, `bản đồ 60 cách ${gap} m: biển camera 50 vẫn hiện`);
+    assert.ok(camShown(log).every((it) => String(it.value) === '50'));
+    assert.match(said(log).join(' '), /tối đa 50 ki lô mét trên giờ \(camera ghi nhận\)/);
+  }
+  // Biển hạn chế chiều cao (mô hình hiện chưa học trị số này: nút biển dựng tay, cùng dạng featsNear): camera
+  // 4,5 m hay 3,5 m dưới bản đồ 3,5 m thì bỏ; camera 3 m (chặt hơn) thì giữ.
+  for (const [cam, keep] of [['4.5', false], ['3.5', false], ['3', true]]) {
+    const base = store.featsNear(at, 70)[0];
+    const feat = { ...base, tags: { ...base.tags, traffic_sign: `VN:P.117[${cam}]` } };
+    const s3 = { featsNear: () => [feat] };
+    const log = drive(world([SIGN('o', along(505), 'VN:P.117[3.5]')]), { store: s3 });
+    assert.equal(camShown(log).length > 0, keep, `chiều cao camera ${cam} m, bản đồ 3,5 m`);
+  }
+});
+
+test('biển tốc độ camera đổi trị số (60 → 50) ở cùng chỗ, cả hai đã xác nhận: chỉ hiện và đọc biển thấy lại gần nhất', () => {
+  const { store, clock } = learned([{ x: 500, value: '60' }]);
+  const roads = world();
+  const values = (log) => [...new Set(camShown(log).map((it) => String(it.value)))];
+  const sentences = (log) => said(log).filter((t) => /camera ghi nhận/.test(t));
+  // Camera đọc 50 hai ngày liền ở đúng chỗ biển 60: 50 được xác nhận; 60 bị trừ điểm nhưng vẫn còn xác nhận.
+  for (let d = 0; d < 2; d++) {
+    clock.t += 864e5;
+    store.observe(obs({ x: 503, value: '50' }));
+  }
+  const byValue = (v) => store.list().find((r) => r.code === 'P.127' && r.value === v);
+  assert.equal(byValue('60').status, 'confirmed');
+  assert.equal(byValue('50').status, 'confirmed');
+  let log = drive(roads, { store });
+  assert.deepEqual(values(log), ['50'], 'chỉ hiện biển 50');
+  assert.equal(sentences(log).length, 1);
+  assert.match(sentences(log)[0], /tối đa 50 ki lô mét trên giờ/);
+  assert.doesNotMatch(sentences(log)[0], /60/, 'không câu nào nêu cả hai trị số');
+  // Đọc nhầm một lần thì tự sửa: hôm sau camera lại đọc 60 ở đó → chỉ hiện 60 (điểm của cả hai không đổi cách tính).
+  clock.t += 864e5;
+  store.observe(obs({ x: 500, value: '60' }));
+  log = drive(roads, { store });
+  assert.deepEqual(values(log), ['60']);
+  assert.match(sentences(log).join(' '), /tối đa 60 ki lô mét trên giờ/);
+  assert.doesNotMatch(sentences(log).join(' '), /50 ki lô mét/);
+  // Biển mới mới thấy một lần (chưa xác nhận): biển cũ vẫn được đọc, biển mới chỉ hiện nét đứt.
+  const { store: s2, clock: c2 } = learned([{ x: 500, value: '60' }]);
+  c2.t += 864e5;
+  s2.observe(obs({ x: 503, value: '50' }));
+  log = drive(roads, { store: s2 });
+  assert.deepEqual(values(log).sort(), ['50', '60']);
+  assert.match(said(log).join(' '), /tối đa 60 ki lô mét trên giờ \(camera ghi nhận\)/);
+  // Biển của đường khác (wayId khác) không bị coi là biển đã đổi trị số.
+  const { store: s3, clock: c3 } = learned([{ x: 500, value: '60' }]);
+  for (let d = 0; d < 2; d++) {
+    c3.t += 864e5;
+    s3.observe({ ...obs({ x: 503, value: '50' }), wayId: 2 });
+  }
+  assert.deepEqual(s3.list().filter((r) => r.code === 'P.127').map((r) => r.status), ['confirmed', 'confirmed']);
+  assert.equal(s3.featsNear(along(500), 50).length, 2);
 });
 
 test('biển camera không có trị số trùng biển bản đồ cùng mã có trị số: bỏ biển camera', () => {

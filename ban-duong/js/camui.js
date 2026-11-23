@@ -35,8 +35,8 @@ export const UI_TEXT = Object.freeze({
   section: 'Camera nhận diện biển (thử nghiệm)',
   intro:
     'Dùng camera sau của điện thoại kẹp cố định trên xe để ghi nhận biển báo khi xe đi qua. Biển đã ghi nhận được báo ' +
-    'trước 100–200 m ở những lần đi sau, khi đã thấy lại vào một ngày khác. Mọi xử lý diễn ra trên máy: không gửi và ' +
-    'không lưu hình ảnh.',
+    'trước 100–200 m ở những lần đi sau, khi đã thấy lại vào một ngày khác. Mọi xử lý diễn ra trên máy: không gửi hình ' +
+    'ảnh đi, và chỉ lưu ảnh biển khi bạn bật “Lưu ảnh biển để kiểm tra độ chính xác”.',
   permission:
     'Khi trình duyệt hỏi, hãy cho phép lâu dài (không chọn chỉ lần này); nếu không, lần sau camera sẽ tắt cho tới khi ' +
     'bạn bật lại lúc xe đỗ.',
@@ -168,10 +168,20 @@ export function chipLabel(kind, warn = null) {
   return 'Camera nhận diện biển chưa chạy, cần bật lại khi xe đã đỗ. Bấm để tắt.';
 }
 
+/** Dòng chọn trong hộp "Xoá các biển đã học?" khi còn ảnh kiểm tra: "Xoá cả 3 ảnh biển đã lưu để kiểm tra độ chính xác". */
+export const clearEvalText = (n) => `Xoá cả ${num(n)} ảnh biển đã lưu để kiểm tra độ chính xác`;
+
+/** Số ảnh kiểm tra độ chính xác đang lưu → "Đã lưu 3 ảnh biển trên máy." hoặc EVAL_TEXT.empty. */
+export function evalCountText(n) {
+  return n > 0 ? `Đã lưu ${num(n)} ảnh biển trên máy.` : EVAL_TEXT.empty;
+}
+
 /**
  * Trạng thái các nút trong mục Cài đặt (thuần, để kiểm thử quy tắc "chỉ khi xe đã đỗ"):
  * switchDisabled: công tắc bật không bấm được (tắt thì luôn được); checkDisabled: "Kiểm tra camera";
  * storeDisabled: xem danh sách, nhập tệp; exportDisabled: xuất tệp. "Xoá các biển đã học" không bao giờ bị khoá.
+ * evalShown: còn ảnh kiểm tra đã lưu, nên hiện số ảnh và nút "Xoá ảnh biển đã lưu" (không bao giờ bị khoá: không cần
+ * xe đỗ, máy chạy được hay có mô hình, vì ảnh đã lưu phải luôn xoá được).
  */
 export function settingsView(st) {
   const available = camAvailable(st);
@@ -190,6 +200,7 @@ export function settingsView(st) {
     storeDisabled: !parked,
     exportDisabled: !parked || !(st?.counts?.learned > 0),
     parkedHint: !parked,
+    evalShown: Number(st?.evalCount) > 0,
   };
 }
 
@@ -246,7 +257,8 @@ export function introParagraphs(manifest = ML_MANIFEST) {
     ],
     [
       'Quyền riêng tư',
-      'Mọi xử lý diễn ra trên máy, hình ảnh không được lưu hay gửi đi. Danh sách biển đã học cho thấy những nơi bạn đã ' +
+      'Mọi xử lý diễn ra trên máy, hình ảnh không được gửi đi và không được lưu (trừ khi bạn tự bật lưu ảnh biển để ' +
+        'kiểm tra độ chính xác). Danh sách biển đã học cho thấy những nơi bạn đã ' +
         'đi; nó chỉ nằm trên máy này và xoá được bất cứ lúc nào.',
     ],
     [
@@ -401,6 +413,14 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
     $('btnCamImport').disabled = v.storeDisabled;
     $('btnCamExport').disabled = v.exportDisabled;
     $('camParkedHint').hidden = !v.parkedHint;
+    $('camEvalCount').hidden = !v.evalShown;
+    $('camEvalCount').textContent = evalCountText(st.evalCount);
+    $('btnCamEvalClear').parentElement.hidden = !v.evalShown;
+  }
+
+  async function clearEval() {
+    await ctl.evalClear(); // luôn được
+    toast(UI_TEXT.evalCleared);
   }
 
   function onSwitch(e) {
@@ -525,10 +545,7 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
       if (!res.ok) return toast(res.text || TEXT.parkedOnly);
       saveFile(res.blob, res.filename);
     });
-    evalClear.addEventListener('click', async () => {
-      await ctl.evalClear();
-      toast(UI_TEXT.evalCleared);
-    });
+    evalClear.addEventListener('click', clearEval);
     renderCheck();
     startPreview(ui, undefined); // ngay trong lần bấm: trình duyệt có thể hỏi quyền
   }
@@ -702,7 +719,7 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
     ui.extra.replaceChildren(...notes);
     ui.measureBtn.disabled = !ui.live || ui.measuring || !st.parked;
     ui.evalSw.checked = st.camEval;
-    ui.evalCount.textContent = st.evalCount ? `Đã lưu ${num(st.evalCount)} ảnh biển trên máy.` : EVAL_TEXT.empty;
+    ui.evalCount.textContent = evalCountText(st.evalCount);
     ui.evalExport.disabled = !st.parked || !st.evalCount;
   }
 
@@ -866,14 +883,18 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
 
   function openClear() {
     const n = st.counts.learned;
+    // Còn ảnh kiểm tra đã lưu: hộp này nói rõ và cho xoá luôn (chọn sẵn), không âm thầm xoá hay bỏ sót.
+    const evalBox = st.evalCount > 0 ? el('input', { type: 'checkbox', class: 'switch', checked: true }) : null;
     const body = el(
       'div',
       { class: 'view' },
       el('p', { class: 'sub' }, n ? `Xoá hết ${num(n)} biển camera đã ghi nhận trên máy này. Không khôi phục được.` : UI_TEXT.empty),
+      evalBox ? el('label', { class: 'opt' }, el('span', {}, clearEvalText(st.evalCount)), evalBox) : null,
       el(
         'div',
         { class: 'row wrap' },
         iconBtn('btn danger grow', 'trash', 'Xoá', async () => {
+          if (evalBox?.checked) await ctl.evalClear();
           await ctl.clear();
           hideLayer();
           closeModal();
@@ -925,6 +946,8 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
   });
   $('camImportFile').addEventListener('change', onImportFile);
   $('btnCamClear').addEventListener('click', openClear);
+  $('btnCamEvalClear').lastElementChild.textContent = EVAL_TEXT.clear;
+  $('btnCamEvalClear').addEventListener('click', clearEval);
   $('btnCamChip').addEventListener('click', () => {
     ctl.disable(); // luôn được, một lần chạm
     toast(UI_TEXT.disabled);

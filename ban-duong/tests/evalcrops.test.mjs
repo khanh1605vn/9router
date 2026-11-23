@@ -313,3 +313,56 @@ test('IndexedDB: cơ sở dữ liệu "banduong-evalcrops" v1, kho "crops" khoá
   assert.equal(rows.size, 1);
   assert.equal(rows.get(1).label, 'P.127[50]');
 });
+
+test('IndexedDB: chưa từng lưu ảnh thì đọc và xoá lúc khởi động không tạo cơ sở dữ liệu rỗng; put() vẫn tạo', async () => {
+  const opened = [];
+  let names = [];
+  const rows = new Map();
+  const storeObj = {
+    put: (r) => rows.set(r.id, r),
+    delete: (id) => rows.delete(id),
+    clear: () => rows.clear(),
+    getAll() {
+      const req = {};
+      queueMicrotask(() => {
+        req.result = [...rows.values()];
+        req.onsuccess();
+      });
+      return req;
+    },
+  };
+  const db = {
+    objectStoreNames: { contains: () => true },
+    transaction() {
+      const tx = { objectStore: () => storeObj };
+      queueMicrotask(() => tx.oncomplete && tx.oncomplete());
+      return tx;
+    },
+  };
+  const fake = {
+    databases: async () => names.map((name) => ({ name, version: 1 })),
+    open(name) {
+      opened.push(name);
+      names = [...new Set([...names, name])];
+      const req = { result: db };
+      queueMicrotask(() => req.onsuccess());
+      return req;
+    },
+  };
+  const backend = evalIdbBackend(EVAL_DB, { indexedDB: fake });
+  const off = new EvalCrops({ backend, now: () => NOON, enabled: () => false });
+  assert.equal(await off.load(), 0);
+  await off.clear();
+  assert.deepEqual(opened, []); // camEval chưa từng bật: không có 'banduong-evalcrops'
+  const on = new EvalCrops({ backend, now: () => NOON, enabled: () => true });
+  await on.add(crop());
+  assert.deepEqual(opened, [EVAL_DB]);
+  assert.equal(rows.size, 1);
+  assert.equal((await backend.getAll()).length, 1);
+  // databases() lỗi: mở như thường
+  const flaky = { ...fake, databases: async () => { throw new Error('x'); } };
+  opened.length = 0;
+  names = [];
+  await evalIdbBackend(EVAL_DB, { indexedDB: flaky }).getAll();
+  assert.deepEqual(opened, [EVAL_DB]);
+});

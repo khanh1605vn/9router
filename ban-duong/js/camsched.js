@@ -2,7 +2,8 @@
 // - canAutoStart: tự mở camera (lúc khởi động, khi trang hiện lại) chỉ khi quyền đã được cấp hẳn; không bao giờ tự hỏi
 //   quyền vì người lái có thể đang chạy xe (PLAN §5.1, camera.verdict.md mục 1).
 // - isParked / StillTimer: các thao tác cần chạm máy (bật camera, kiểm tra camera, duyệt biển) chỉ được làm khi xe đã
-//   đỗ thật: ngoài chế độ lái và đứng yên ít nhất 5 giây. Dừng đèn đỏ không tính vì ứng dụng vẫn ở chế độ lái (§6.1).
+//   đỗ thật: ngoài chế độ lái, đứng yên ít nhất 5 giây và không chạy trong 2 phút vừa qua. Dừng đèn đỏ không tính, kể
+//   cả khi người lái rời chế độ lái lúc đang dừng (§6.1).
 // - shouldCapture / captureBlock: có lấy khung hình lúc này không (§5.1); holdCamera: có giữ camera mở không.
 // - LevelScheduler: chọn mức tải 0–3 theo thời gian worker đo được, để camera không chiếm quá 25 % một nhân và lùi lại
 //   khi máy nóng (§5.6). Trang web trên Android không đọc được nhiệt độ hay mức tải của máy (không có
@@ -13,6 +14,10 @@
 export const DRIVING_MODES = new Set(['nav', 'drive']); // các chế độ đang lái (main.js state.mode)
 export const PARK_SPEED = 1; // dưới tốc độ này (m/s) là xe đứng yên
 export const PARK_STILL_MS = 5000; // đứng yên ít nhất chừng này (ms) mới coi là đã đỗ
+// Xe vừa chạy (từ CAPTURE_SPEED trở lên, theo OBD hay GPS thật) cách đây chưa tới chừng này (ms) thì chưa coi là đã đỗ,
+// dù đã rời chế độ lái: dừng đèn đỏ (thường 30–90 giây) rồi bấm "Kết thúc" hay nhấn giữ bản đồ không phải là đỗ xe.
+// Trang web không phân biệt chắc được một lần dừng lâu với đỗ xe; đây là cách gần nhất.
+export const PARK_RECENT_MS = 120e3;
 
 // ---- Lấy khung hình (§5.1) ----
 export const CAPTURE_SPEED = 3; // chỉ lấy khung khi xe chạy từ chừng này (m/s, ~11 km/h) trở lên
@@ -67,9 +72,13 @@ export function isStill({ speed = null, carStationary = null } = {}) {
   return !(speed >= PARK_SPEED);
 }
 
-/** Xe đã đỗ: không ở chế độ lái và đứng yên liên tục ít nhất PARK_STILL_MS (sinceMs đo bằng StillTimer). */
-export function isParked({ mode, speed = null, carStationary = null, sinceMs = 0 } = {}) {
+/**
+ * Xe đã đỗ: không ở chế độ lái, đứng yên liên tục ít nhất PARK_STILL_MS (sinceMs đo bằng StillTimer) và lần cuối xe
+ * chạy (movedAgoMs, Infinity nếu chưa chạy từ lúc mở ứng dụng) đã cách ít nhất PARK_RECENT_MS.
+ */
+export function isParked({ mode, speed = null, carStationary = null, sinceMs = 0, movedAgoMs = Infinity } = {}) {
   if (DRIVING_MODES.has(mode)) return false;
+  if (!(movedAgoMs >= PARK_RECENT_MS)) return false;
   if (!isStill({ speed, carStationary })) return false;
   return Number.isFinite(sinceMs) && sinceMs >= PARK_STILL_MS;
 }
@@ -121,11 +130,12 @@ export function shouldCapture(input) {
 
 /**
  * Có giữ camera mở không. block là kết quả captureBlock, blockedMs là thời gian nó đã kéo dài liên tục.
- * Tắt tính năng, rời chế độ lái hay trang bị ẩn thì đóng ngay; xe chậm, pin yếu, chạy thử quá IDLE_RELEASE_MS thì đóng.
+ * Tắt tính năng, rời chế độ lái, trang bị ẩn hay đang chạy thử thì đóng ngay (chạy thử không bao giờ mở camera: không
+ * lấy khung nào, thường là ở trong nhà); xe chậm, pin yếu quá IDLE_RELEASE_MS thì đóng.
  */
 export function holdCamera({ block = null, blockedMs = 0 } = {}) {
   if (block === null) return true;
-  if (block === 'off' || block === 'mode' || block === 'hidden') return false;
+  if (block === 'off' || block === 'mode' || block === 'hidden' || block === 'simulated') return false;
   return !(blockedMs >= IDLE_RELEASE_MS);
 }
 

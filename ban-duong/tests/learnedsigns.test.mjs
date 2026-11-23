@@ -10,8 +10,11 @@ import {
   CONFIRM_DAYS_IMPORT,
   CONFIRM_DAYS_UNSURE,
   CONFIRMED_DAYS,
+  CO_MAX,
   dayNumber,
   dayString,
+  driveDay,
+  DRIVE_DAY_START_H,
   idbBackend,
   L_CONFIRM,
   L_HIT_DAY,
@@ -445,6 +448,77 @@ test('nơi lưu trong bộ nhớ: ghi từng thay đổi kèm khoá ô, đọc l
   await again.clear();
   assert.equal(again.size, 0);
   assert.equal(backend.map.size, 0);
+});
+
+test('coSeen: hai biển cùng được thấy trong một lượt, đếm theo ngày khác nhau, tối đa CO_MAX biển, đọc lại từ nơi lưu', async () => {
+  assert.equal(CO_MAX, 4);
+  const { store, clock, backend } = makeStore();
+  const a = store.observe(obs()).record.id;
+  const b = store.observe(obs({ code: 'P.103a', value: null })).record.id;
+  assert.deepEqual(store.get(a).co, []);
+  assert.equal(store.coSeen(a, b), true);
+  assert.equal(store.coSeen(b, a), false, 'cùng ngày: chỉ tính một lần');
+  const today = dayNumber(clock.t);
+  assert.deepEqual(store.get(a).co, [{ id: b, days: 1, last: today }]);
+  assert.deepEqual(store.get(b).co, [{ id: a, days: 1, last: today }]);
+  clock.day(1);
+  store.coSeen(a, b);
+  assert.deepEqual(store.get(a).co, [{ id: b, days: 2, last: today + 1 }]);
+  const L = store.get(a).L;
+  assert.equal(store.get(a).L, L, 'không đổi điểm');
+  // Bản sao: sửa bản trả ra không đổi kho.
+  store.get(a).co[0].days = 99;
+  assert.equal(store.get(a).co[0].days, 2);
+  // Tối đa CO_MAX biển: bỏ biển lâu nhất không cùng thấy.
+  const others = [];
+  for (let k = 0; k < CO_MAX; k++) {
+    clock.day(2 + k);
+    const id = store.observe(obs({ x: 200 * (k + 1), code: 'P.123a', value: null })).record.id;
+    others.push(id);
+    store.coSeen(a, id);
+  }
+  assert.equal(store.get(a).co.length, CO_MAX);
+  assert.ok(!store.get(a).co.some((c) => c.id === b), 'biển lâu nhất bị bỏ');
+  assert.equal(store.coSeen(a, a), false);
+  assert.equal(store.coSeen(a, 'ffffffffffff'), false);
+  // Đọc lại từ nơi lưu: giữ co hợp lệ, bỏ mục hỏng.
+  await new Promise((r) => setTimeout(r, 0));
+  const row = backend.map.get(b);
+  backend.map.set(b, { ...row, co: [{ id: a, days: 2, last: today + 1 }, { id: 'x' }, { id: a, days: 5, last: 1 }, 'z', { id: 'abcdefabcdef', days: 'x', last: 1 }] });
+  const again = new LearnedSigns({ backend, now: () => clock.t, labels });
+  await again.load();
+  assert.deepEqual(again.get(b).co, [{ id: a, days: 2, last: today + 1 }]);
+  assert.equal(again.get(a).co.length, CO_MAX);
+  assert.deepEqual(Object.keys(again.get(b).co[0]).sort(), ['days', 'id', 'last'], 'chỉ số ngày, không có giờ hay chuyến đi');
+});
+
+test('ngày lái xe bắt đầu lúc 04:00: chuyến đêm qua nửa đêm là một ngày; hai đêm liền nhau là hai ngày', () => {
+  assert.equal(DRIVE_DAY_START_H, 4);
+  const at = (d, h, m = 0) => new Date(2026, 10, d, h, m).getTime(); // giờ máy
+  assert.equal(driveDay(at(24, 3, 59)), driveDay(at(23, 23, 0)));
+  assert.equal(driveDay(at(24, 4, 0)), driveDay(at(23, 23, 0)) + 1);
+  assert.equal(driveDay(at(23, 12)), dayNumber(at(23, 12)), 'ban ngày: như dayNumber');
+  const run = (times) => {
+    const { store, clock } = makeStore();
+    let id = null;
+    for (const t of times) {
+      clock.t = t;
+      const r = store.observe(obs({ night: true }));
+      id = r.record.id;
+    }
+    return store.get(id);
+  };
+  // Vài vòng quanh một khu phố trong một chuyến đêm: 23:50, 00:05, 00:20 → vẫn một ngày, chưa xác nhận.
+  const loop = run([at(23, 23, 50), at(24, 0, 5), at(24, 0, 20)]);
+  assert.deepEqual([loop.status, loop.hitDays], ['candidate', 1]);
+  assert.ok(loop.L >= L_CONFIRM, 'đủ điểm, chỉ thiếu ngày');
+  // 23:50 đêm nay và 23:50 đêm mai: hai ngày.
+  const twoNights = run([at(23, 23, 50), at(24, 23, 50), at(25, 23, 50)]);
+  assert.deepEqual([twoNights.status, twoNights.hitDays], ['confirmed', 3]);
+  // 02:00 đêm nay và 02:00 đêm mai: hai ngày (cả hai cùng tính vào ngày hôm trước).
+  const late = run([at(24, 2), at(25, 2), at(25, 2, 30)]);
+  assert.deepEqual([late.status, late.hitDays], ['confirmed', 2]);
+  assert.equal(late.firstDay, dayNumber(at(23, 12)), 'thấy lúc 02:00 ngày 24 tính là ngày 23');
 });
 
 test('danh sách xem lại: gần trước, không có biển đã loại hay bị báo sai; đếm theo trạng thái', () => {
