@@ -18,6 +18,7 @@ import {
   CarWatch,
   createBleTransport,
   createSerialTransport,
+  describeCarState,
   describeConnectError,
   detectSupport,
   ObdClient,
@@ -765,7 +766,7 @@ function onFix(fix) {
   roads.ensureAround(fix.coord, fix.speed > 2 ? fix.heading : null);
 
   const s = store.settings;
-  const match = roads.matchWay(fix, state.progress?.step?.name || '');
+  const match = roads.matchWay(fix, state.progress?.step?.name || '', { vehicle: s.vehicle });
   state.lastMatch = match;
   // Có tốc độ do xe báo (bộ OBD) thì đồng hồ và cảnh báo quá tốc độ dùng số đó, chính xác hơn GPS.
   const kmh = fix.simulated ? null : carSpeed(); // chạy thử thì giữ tốc độ mô phỏng
@@ -1075,27 +1076,7 @@ function carReadout(snap) {
 }
 
 function carStatusText() {
-  const { state: st, info } = car;
-  // Tên chung của bộ đọc ('Bộ OBD Bluetooth…') đứng giữa câu nên viết thường; tên riêng của thiết bị giữ nguyên.
-  const name = (car.client?.name || 'bộ OBD').replace(/^Bộ OBD\b/, 'bộ OBD');
-  switch (st) {
-    case 'connecting':
-      return info?.attempt ? `Đang kết nối lại (lần ${info.attempt})…` : `Đang kết nối với ${name}…`;
-    case 'init':
-      return 'Đang khởi động bộ OBD…';
-    case 'searching':
-      return 'Đang dò giao thức của xe, có thể mất tới 20 giây…';
-    case 'ready':
-      return `Đã kết nối với xe qua ${info?.adapter || car.snap?.adapter || name}.`;
-    case 'nocar':
-      return 'Đã kết nối bộ OBD nhưng xe chưa trả lời. Hãy bật khoá điện hoặc nổ máy.';
-    case 'lost':
-      return `Mất kết nối với bộ OBD, thử lại sau ${Math.round((info?.delay || 0) / 1000)} giây…`;
-    case 'error':
-      return info?.message || 'Không kết nối được với bộ OBD.';
-    default:
-      return 'Chưa kết nối.';
-  }
+  return describeCarState(car.state, car.info, { name: car.client?.name, adapter: car.snap?.adapter });
 }
 
 /** Phần "Kết nối với ô tô" trong cài đặt. Tên và chuỗi phiên bản của thiết bị chỉ đi qua textContent. */
@@ -1204,6 +1185,9 @@ async function startObd(transport, { serial = false, quiet = false } = {}) {
   Object.assign(car, { client, state: 'idle', info: null, snap: null, dtc: null });
   // Chỉ lần tự mở lại lúc khởi động là im lặng; đã kết nối được rồi mà sau đó mất hẳn thì vẫn báo.
   let mute = quiet;
+  // "Đã kết nối với xe." chỉ báo lần đầu của phiên: những lần vào lại 'ready' sau đó (xe vừa nổ máy lại, đường
+  // truyền hết lỗi, bộ đọc tự nối lại) đã hiện ở dòng trạng thái và dòng số liệu, không cần hiện thêm khi đang lái.
+  let greeted = false;
   client.onState((st, info) => {
     if (car.client !== client) return;
     const was = car.state;
@@ -1212,7 +1196,8 @@ async function startObd(transport, { serial = false, quiet = false } = {}) {
     if (st === 'ready' && was !== 'ready') {
       mute = false;
       if (serial && !store.settings.obdAutoSerial) store.set('obdAutoSerial', true);
-      toast('Đã kết nối với xe.');
+      if (!greeted) toast('Đã kết nối với xe.');
+      greeted = true;
     } else if (st === 'error' && !mute) toast(info?.message || 'Không kết nối được với bộ OBD.', 5000);
     renderCar();
     renderObdPanel();

@@ -27,6 +27,7 @@ import {
   chooseCharacteristics,
   createBleTransport,
   createSerialTransport,
+  describeCarState,
   describeConnectError,
   detectSupport,
   reopenSerial,
@@ -111,6 +112,7 @@ class FakeElm {
     this.lvResetOnce = null;
     this.lvResetSilentOnce = null;
     this.err94Once = null;
+    this.override = null; // (cmd) → câu trả lời thay thế, hoặc null
     this.writes = [];
     this.writeLog = [];
     this.commands = [];
@@ -252,6 +254,8 @@ class FakeElm {
   }
 
   #answer(cmd) {
+    const forced = this.override?.(cmd);
+    if (forced) return forced;
     if (cmd === this.stallOnce) {
       this.stallOnce = null;
       return { stall: true };
@@ -899,6 +903,275 @@ test('đọc mã lỗi (Mode 03) chỉ khi được yêu cầu và khi đã kế
   assertSafeWrites(s.elm.writes);
 });
 
+const CAR_KEYS = ['speed', 'rpm', 'coolant', 'fuel', 'voltage'];
+
+test('lỗi đường truyền khi đang đọc (CAN ERROR, BUS ERROR…) → nocar, xoá số liệu, gửi lại ATSP0 rồi 0100, xe trả lời lại thì đọc tiếp', async () => {
+  for (const line of ['CAN ERROR', 'BUS ERROR', '<RX ERROR', 'FB ERROR', 'BUS INIT: ...ERROR']) {
+    const s = setup();
+    s.client.start();
+    await s.clock.advance(8000);
+    assert.equal(s.client.state, 'ready', line);
+    const n = s.elm.commands.length;
+    s.elm.override = (cmd) => (/^01/.test(cmd) ? { lines: [line] } : null);
+    await s.clock.advance(3000);
+    assert.equal(s.client.state, 'nocar', `${line}: vẫn ở trạng thái đã kết nối với xe`);
+    assert.equal(s.infos.at(-1).reason, 'error', line);
+    const snap = s.client.snapshot;
+    for (const k of CAR_KEYS) assert.equal(snap[k], null, `${line}: còn giữ ${k} cũ`);
+    await s.clock.advance(9000);
+    const list = s.cmds().slice(n);
+    const k = list.indexOf('ATSP0');
+    assert.ok(k > 0, `${line}: phải gửi lại ATSP0`);
+    assert.equal(list[k + 1], '0100', line);
+    assert.ok(!list.slice(0, k).includes('0100'), `${line}: ATSP0 phải đi trước lần thử 0100 đầu tiên`);
+
+    s.elm.override = null;
+    s.elm.speed = 42;
+    await s.clock.advance(15000);
+    assert.equal(s.client.state, 'ready', line);
+    assert.equal(s.snap.speed, 42, line);
+    assert.equal(s.elm.interrupted, 0);
+    assertSafeWrites(s.elm.writes);
+  }
+});
+
+test('lỗi đường truyền ngay khi vừa sẵn sàng (chưa PID nào kịp trả lời) cũng đưa về nocar, không kẹt ở ready', async () => {
+  const s = setup();
+  let armed = false;
+  s.client.onState((st) => {
+    if (st === 'ready' && !armed) {
+      armed = true; // lỗi bắt đầu đúng lúc 0100 vừa trả lời xong
+      s.elm.override = (cmd) => (/^01/.test(cmd) ? { lines: ['CAN ERROR'] } : null);
+    }
+  });
+  s.client.start();
+  await s.clock.advance(12000);
+  assert.ok(armed);
+  assert.equal(s.client.state, 'nocar');
+  assert.equal(s.infos.at(-1).reason, 'error');
+  assert.equal(s.snap?.rpm ?? null, null);
+});
+
+test('tắt máy mà các PID báo CAN ERROR, ATRV vẫn đọc 11,9 V: không nhắc ắc quy theo vòng tua cũ', async () => {
+  const s = setup();
+  const watch = new CarWatch();
+  const said = [];
+  s.client.onData((snap) => {
+    const w = watch.update(snap, s.clock.t).say;
+    if (w) said.push(w);
+  });
+  s.client.start();
+  await s.clock.advance(10000);
+  assert.equal(s.client.state, 'ready');
+  s.elm.override = (cmd) => (/^01/.test(cmd) ? { lines: ['CAN ERROR'] } : null);
+  s.elm.atrv = '11.9V';
+  await s.clock.advance(120000);
+  assert.deepEqual(said, []);
+  assert.equal(s.client.state, 'nocar');
+});
+
+test('một PID thôi trả lời trong khi PID khác vẫn chạy: số cũ bị xoá khỏi snapshot sau 5 giây, có số mới thì hiện lại', async () => {
+  const s = setup();
+  s.client.start();
+  await s.clock.advance(8000);
+  assert.equal(s.snap.rpm, 1850);
+  for (const k of CAR_KEYS) assert.ok(s.snap[`${k}Time`] > 0, `${k}Time`);
+  s.elm.noData.add(0x0c);
+  await s.clock.advance(1500);
+  const last = s.client.snapshot.rpmTime;
+  await s.clock.advance(last + 4500 - s.clock.t);
+  assert.equal(s.snap.rpm, 1850, 'chưa quá cũ');
+  await s.clock.advance(1000);
+  assert.equal(s.snap.rpm, null, 'vòng tua cũ vẫn còn trong snapshot');
+  assert.equal(s.snap.rpmTime, null);
+  assert.equal(s.snap.speed, 60);
+  assert.ok(s.clock.t - s.snap.speedTime < 1000);
+  assert.equal(s.client.state, 'ready');
+  s.elm.noData.delete(0x0c);
+  s.elm.rpm = 900;
+  await s.clock.advance(2000);
+  assert.equal(s.snap.rpm, 900);
+});
+
+test('trang bị ẩn lâu rồi hiện lại: không gửi số liệu đã quá ba chu kỳ đọc (ít nhất 5 giây)', async () => {
+  const s = setup();
+  const seen = [];
+  s.client.start();
+  await s.clock.advance(8000);
+  s.client.setPaused(true);
+  await s.clock.advance(120000);
+  s.client.onData((snap) => seen.push({ at: s.clock.t, ...snap }));
+  Object.assign(s.elm, { speed: 30, rpm: 1200, coolant: 70 });
+  s.client.setPaused(false);
+  await s.clock.advance(3000);
+  assert.ok(seen.length > 0);
+  // Tốc độ 300 ms, vòng tua 1 s, nước làm mát 15 s, nhiên liệu 60 s, ATRV 20 s một lần.
+  const maxAge = { speed: 5000, rpm: 5000, coolant: 45000, fuel: 180000, voltage: 60000 };
+  for (const x of seen) {
+    for (const k of CAR_KEYS) {
+      if (x[k] != null) assert.ok(x.at - x[`${k}Time`] <= maxAge[k], `${k} cũ ${x.at - x[`${k}Time`]} ms`);
+    }
+    assert.ok(x.speed == null || x.speed === 30, 'tốc độ cũ');
+    assert.ok(x.rpm == null || x.rpm === 1200, 'vòng tua cũ');
+    assert.ok(x.coolant == null || x.coolant === 70, 'nhiệt độ cũ');
+  }
+  assert.equal(seen.at(-1).speed, 30);
+  assert.ok(Math.abs(seen.at(-1).fuel - 40) < 0.5, 'nhiên liệu đọc 2 phút trước vẫn dùng được');
+});
+
+test('xe im rồi trả lời lại: snapshot đầu tiên khi sẵn sàng lại không mang số liệu cũ', async () => {
+  const s = setup();
+  const seen = [];
+  s.client.onData((snap) => seen.push({ ...snap }));
+  s.client.start();
+  await s.clock.advance(8000);
+  s.elm.carOff = true;
+  await s.clock.advance(3000);
+  assert.equal(s.client.state, 'nocar');
+  for (const k of CAR_KEYS) assert.equal(s.client.snapshot[k], null, k);
+  assert.equal(s.client.snapshot.adapter, 'ELM327 v1.5');
+  const n = seen.length;
+  s.elm.carOff = false;
+  Object.assign(s.elm, { speed: 20, rpm: 900, coolant: 70, fuel: 30 });
+  await s.clock.advance(12000);
+  assert.equal(s.client.state, 'ready');
+  const again = seen.slice(n);
+  assert.ok(again.length > 0);
+  assert.deepEqual(
+    CAR_KEYS.filter((k) => k !== 'voltage').map((k) => again[0][k]),
+    [null, null, null, null],
+    'số liệu từ trước khi xe im'
+  );
+  assert.equal(again[0].voltage, 13.9, 'điện áp vừa đọc lại khi dò xe');
+  assert.ok(again.every((x) => x.rpm == null || x.rpm === 900));
+  assert.ok(again.every((x) => x.coolant == null || x.coolant === 70));
+});
+
+/** Số yêu cầu lên bus của xe (Mode 01, 03) nhiều nhất trong một giây bất kỳ. */
+function maxBusPerSecond(commands) {
+  const ts = commands.filter((c) => /^0[13]/.test(c.cmd)).map((c) => c.t);
+  let most = 0;
+  for (let i = 0, j = 0; i < ts.length; i++) {
+    while (ts[i] - ts[j] >= 1000) j++;
+    most = Math.max(most, i - j + 1);
+  }
+  return most;
+}
+
+test('một loạt ngắn 3 lỗi CAN ERROR khi đang chạy: vẫn ở ready, gửi lại ATSP0 rồi 0100 ngay, có số mới sau vài giây', async () => {
+  const s = setup();
+  const seen = [];
+  s.client.onData((snap) => seen.push({ at: s.clock.t, ...snap }));
+  s.client.start();
+  await s.clock.advance(8000);
+  assert.equal(s.client.state, 'ready');
+  const nStates = s.states.length;
+  const from = s.elm.commands.length;
+  const t0 = s.clock.t;
+  let errors = 0;
+  s.elm.override = (cmd) => (/^01/.test(cmd) && errors < 3 ? (errors++, { lines: ['CAN ERROR'] }) : null);
+  s.elm.speed = 37;
+  await s.clock.advance(8000);
+  assert.equal(errors, 3);
+  // main.js báo "Đã kết nối với xe." mỗi lần vào 'ready', và "xe chưa trả lời" khi ở 'nocar'.
+  assert.deepEqual(s.states.slice(nStates), [], 'không được đổi trạng thái vì một lúc nhiễu ngắn');
+  const after = s.elm.commands.slice(from);
+  const thirdError = after.filter((c) => /^01/.test(c.cmd))[2];
+  const k = after.findIndex((c) => c.cmd === 'ATSP0');
+  assert.ok(k > 0, 'phải gửi lại ATSP0');
+  assert.equal(after[k + 1].cmd, '0100');
+  assert.ok(after[k].t > thirdError.t && after[k].t - thirdError.t < 1000, 'gửi lại ngay, không chờ 8 giây');
+  assert.equal(s.snap.speed, 37);
+  assert.ok(s.clock.t - s.snap.speedTime < 1000, 'tốc độ đã được đọc lại');
+  for (const x of seen.filter((x) => x.at >= t0)) {
+    assert.ok(x.rpm == null || x.at - x.rpmTime <= 5000, 'vòng tua cũ trong lúc dò lại giao thức');
+    assert.ok(x.speed == null || x.at - x.speedTime <= 5000, 'tốc độ cũ trong lúc dò lại giao thức');
+  }
+  assert.ok(maxBusPerSecond(s.elm.commands) <= 6);
+  assertSafeWrites(s.elm.writes);
+});
+
+test('0100 vẫn trả lời nhưng mọi PID báo CAN ERROR: sang nocar một lần rồi ở đó, không đổi qua lại ready ↔ nocar', async () => {
+  const s = setup();
+  s.client.start();
+  await s.clock.advance(8000);
+  assert.equal(s.client.state, 'ready');
+  const n = s.states.length;
+  const resent = s.count('ATSP0');
+  s.elm.override = (cmd) => (/^01/.test(cmd) && cmd !== '0100' ? { lines: ['CAN ERROR'] } : null);
+  await s.clock.advance(120000);
+  assert.deepEqual(s.states.slice(n), ['nocar'], 'mỗi lần vào lại ready là một lần báo "Đã kết nối với xe."');
+  assert.equal(s.infos.at(-1).reason, 'error');
+  for (const k of CAR_KEYS) assert.equal(s.client.snapshot[k], null, `còn giữ ${k} cũ`);
+  assert.ok(s.count('ATSP0') - resent >= 5, 'vẫn gửi lại ATSP0 rồi 0100 định kỳ');
+
+  s.elm.override = null;
+  s.elm.speed = 47;
+  await s.clock.advance(20000);
+  assert.deepEqual(s.states.slice(n), ['nocar', 'ready']);
+  assert.equal(s.snap.speed, 47);
+  assert.ok(maxBusPerSecond(s.elm.commands) <= 6, 'tối đa 6 yêu cầu mỗi giây, kể cả lúc dò lại xe');
+  assertSafeWrites(s.elm.writes);
+});
+
+test('câu trạng thái: xe báo lỗi đường truyền khi máy đang chạy không bị gọi là "xe chưa trả lời"; tắt máy vẫn nhắc bật khoá điện', async () => {
+  const noAnswer = 'Đã kết nối bộ OBD nhưng xe chưa trả lời. Hãy bật khoá điện hoặc nổ máy.';
+  // Lỗi đường truyền kéo dài trong lúc đang đọc (CAN ERROR cho mọi PID).
+  const s = setup();
+  s.client.start();
+  await s.clock.advance(8000);
+  assert.equal(describeCarState(s.client.state, s.infos.at(-1), { name: s.client.name }), 'Đã kết nối với xe qua ELM327 v1.5.');
+  s.elm.override = (cmd) => (/^01/.test(cmd) ? { lines: ['CAN ERROR'] } : null);
+  await s.clock.advance(30000);
+  assert.equal(s.client.state, 'nocar');
+  const busText = describeCarState(s.client.state, s.infos.at(-1), { name: s.client.name });
+  assert.notEqual(busText, noAnswer, 'máy đang chạy mà màn hình bảo bật khoá điện');
+  assert.match(busText, /lỗi đường truyền/);
+  assert.match(busText, /đang thử lại/);
+  assert.doesNotMatch(busText, /xe chưa trả lời/);
+
+  // Tắt máy: các PID thôi trả lời (NO DATA) → câu cũ, nhắc bật khoá điện.
+  const off = setup();
+  off.client.start();
+  await off.clock.advance(8000);
+  off.elm.carOff = true;
+  await off.clock.advance(10000);
+  assert.equal(off.client.state, 'nocar');
+  assert.notEqual(off.infos.at(-1).reason, 'error');
+  assert.equal(describeCarState(off.client.state, off.infos.at(-1), { name: off.client.name }), noAnswer);
+  assertSafeWrites(s.elm.writes);
+});
+
+test('câu trạng thái các bước kết nối giữ nguyên như trước', () => {
+  assert.equal(describeCarState('idle', null), 'Chưa kết nối.');
+  assert.equal(describeCarState('connecting', null, { name: 'Bộ OBD Bluetooth' }), 'Đang kết nối với bộ OBD Bluetooth…');
+  assert.equal(describeCarState('connecting', { attempt: 2 }, { name: 'OBDII' }), 'Đang kết nối lại (lần 2)…');
+  assert.equal(describeCarState('init', null), 'Đang khởi động bộ OBD…');
+  assert.equal(describeCarState('searching', null), 'Đang dò giao thức của xe, có thể mất tới 20 giây…');
+  assert.equal(describeCarState('ready', {}, { name: 'OBDII', adapter: 'ELM327 v2.1' }), 'Đã kết nối với xe qua ELM327 v2.1.');
+  assert.equal(describeCarState('ready', null, { name: 'OBDII' }), 'Đã kết nối với xe qua OBDII.');
+  assert.equal(describeCarState('nocar', { reason: 'unable' }), 'Đã kết nối bộ OBD nhưng xe chưa trả lời. Hãy bật khoá điện hoặc nổ máy.');
+  assert.equal(describeCarState('lost', { delay: 5000 }), 'Mất kết nối với bộ OBD, thử lại sau 5 giây…');
+  assert.equal(describeCarState('error', { message: 'Bộ OBD không trả lời.' }), 'Bộ OBD không trả lời.');
+  assert.equal(describeCarState('error', null), 'Không kết nối được với bộ OBD.');
+});
+
+test('sau lỗi đường truyền, xe báo hỗ trợ PID tốc độ mà PID đó luôn NO DATA: vẫn về ready nhờ PID khác trả lời', async () => {
+  const s = setup({ noData: [0x0d] });
+  s.client.start();
+  await s.clock.advance(12000);
+  assert.equal(s.client.state, 'ready');
+  s.elm.override = (cmd) => (/^01/.test(cmd) ? { lines: ['CAN ERROR'] } : null);
+  await s.clock.advance(15000);
+  assert.equal(s.client.state, 'nocar');
+  s.elm.override = null;
+  s.elm.rpm = 990;
+  await s.clock.advance(25000);
+  assert.equal(s.client.state, 'ready');
+  assert.equal(s.snap.rpm, 990);
+  assertSafeWrites(s.elm.writes);
+});
+
 // ---------------------------------------------------------------------------------------------
 // CarWatch
 
@@ -940,6 +1213,169 @@ test('CarWatch: điện áp dưới 12 V liên tục 30 giây khi máy đang ch�
   both.update({ coolant: 115, voltage: 11.5, rpm: 900 }, 0);
   assert.equal(both.update({ coolant: 115, voltage: 11.5, rpm: 900 }, 30000).say, CAR_MESSAGES.coolant);
   assert.equal(both.update({ coolant: 115, voltage: 11.5, rpm: 900 }, 30500).say, CAR_MESSAGES.battery);
+});
+
+test('CarWatch: chỉ tính lần đọc mới (coolantTime), cần hai lần đọc nóng liên tiếp cách nhau ít nhất 10 giây', () => {
+  // Một lần đọc 112 °C lúc 0, snapshot gửi lại số đó 5 lần mỗi giây cho tới lần đọc sau: chưa được nhắc.
+  const w = new CarWatch();
+  for (let t = 0; t <= 14800; t += 200) assert.equal(w.update({ coolant: 112, coolantTime: 0 }, t).say, null, `lúc ${t} ms`);
+  assert.equal(w.update({ coolant: 112, coolantTime: 15000 }, 15000).say, CAR_MESSAGES.coolant);
+  assert.equal(w.update({ coolant: 112, coolantTime: 30000 }, 30000).say, null, 'mỗi chuyến một lần');
+
+  // Hai lần đọc nóng cách nhau chưa tới 10 giây: chưa nhắc; lần thứ ba đủ 10 giây kể từ lần đầu thì nhắc.
+  const quick = new CarWatch();
+  assert.equal(quick.update({ coolant: 111, coolantTime: 0 }, 0).say, null);
+  assert.equal(quick.update({ coolant: 111, coolantTime: 4000 }, 4000).say, null);
+  assert.equal(quick.update({ coolant: 111, coolantTime: 4000 }, 14000).say, null, 'gửi lại số cũ không đếm');
+  assert.equal(quick.update({ coolant: 111, coolantTime: 10000 }, 14500).say, CAR_MESSAGES.coolant);
+
+  // Một lần đọc bình thường ở giữa thì đếm lại từ đầu.
+  const mid = new CarWatch();
+  mid.update({ coolant: 112, coolantTime: 0 }, 0);
+  mid.update({ coolant: 100, coolantTime: 15000 }, 15000);
+  assert.equal(mid.update({ coolant: 112, coolantTime: 30000 }, 30000).say, null);
+  assert.equal(mid.update({ coolant: 112, coolantTime: 45000 }, 45000).say, CAR_MESSAGES.coolant);
+
+  // Mất số liệu (bị xoá vì cũ hoặc xe im) cũng đếm lại; lần đọc cũ không được tính lại.
+  const gone = new CarWatch();
+  gone.update({ coolant: 112, coolantTime: 0 }, 0);
+  gone.update({ coolant: null, coolantTime: null }, 5000);
+  assert.equal(gone.update({ coolant: 112, coolantTime: 15000 }, 15000).say, null);
+  assert.equal(gone.update({ coolant: 112, coolantTime: 30000 }, 30000).say, CAR_MESSAGES.coolant);
+});
+
+test('CarWatch: điện áp thấp tính theo lần đọc ATRV (voltageTime), trải dài ít nhất 30 giây khi máy chạy', () => {
+  // ATRV đọc mỗi 20 giây; một lần đọc 11,8 V được gửi lại suốt 40 giây (vòng tua vẫn mới) thì chưa đủ.
+  const v = new CarWatch();
+  for (let t = 0; t <= 40000; t += 1000) {
+    assert.equal(v.update({ voltage: 11.8, voltageTime: 0, rpm: 800, rpmTime: t }, t).say, null, `lúc ${t} ms`);
+  }
+  assert.equal(v.update({ voltage: 11.8, voltageTime: 20000, rpm: 800 }, 41000).say, null, 'hai lần đọc mới chỉ cách 20 giây');
+  assert.equal(v.update({ voltage: 11.7, voltageTime: 40000, rpm: 800 }, 42000).say, CAR_MESSAGES.battery);
+
+  // Vòng tua tụt dưới 500 (chết máy) ở giữa: đếm lại, lần đọc điện áp cũ không được tính lại.
+  const dip = new CarWatch();
+  dip.update({ voltage: 11.8, voltageTime: 0, rpm: 800 }, 0);
+  dip.update({ voltage: 11.8, voltageTime: 0, rpm: 300 }, 5000);
+  dip.update({ voltage: 11.8, voltageTime: 0, rpm: 800 }, 6000);
+  assert.equal(dip.update({ voltage: 11.8, voltageTime: 20000, rpm: 800 }, 20000).say, null);
+  assert.equal(dip.update({ voltage: 11.8, voltageTime: 40000, rpm: 800 }, 40000).say, null, 'tính lại từ lần đọc lúc 20 giây');
+  assert.equal(dip.update({ voltage: 11.8, voltageTime: 60000, rpm: 800 }, 60000).say, CAR_MESSAGES.battery);
+
+  // Không có vòng tua (PID thôi trả lời, số cũ đã bị xoá) thì không nhắc.
+  const norpm = new CarWatch();
+  for (let t = 0; t <= 100000; t += 20000) assert.equal(norpm.update({ voltage: 11.5, voltageTime: t, rpm: null }, t).say, null);
+});
+
+test('CarWatch: vòng tua tạm mất (bộ đọc lỡ vài câu trả lời) không làm đếm lại; lần đọc điện áp lúc đó không được tính', () => {
+  // ATRV mỗi 20 giây đọc 11,8 V, máy chạy 850 vòng/phút; giữa các lần đọc, vòng tua bị xoá khỏi snapshot một lúc.
+  const w = new CarWatch();
+  const step = (t, voltageTime, rpm) => w.update({ voltage: 11.8, voltageTime, rpm, rpmTime: rpm == null ? null : t }, t).say;
+  assert.equal(step(0, 0, 850), null);
+  assert.equal(step(10000, 0, null), null);
+  assert.equal(step(20000, 20000, 850), null);
+  assert.equal(step(30000, 20000, null), null);
+  assert.equal(step(40000, 40000, 850), CAR_MESSAGES.battery, 'lần đọc thấp thứ ba, 40 giây sau lần đầu');
+
+  // Lần đọc lúc vòng tua đang mất không được tính, kể cả khi vòng tua có lại ngay sau đó.
+  const late = new CarWatch();
+  late.update({ voltage: 11.8, voltageTime: 0, rpm: 850 }, 0);
+  assert.equal(late.update({ voltage: 11.8, voltageTime: 30000, rpm: null }, 30000).say, null);
+  assert.equal(late.update({ voltage: 11.8, voltageTime: 30000, rpm: 850 }, 31000).say, null, 'lần đọc lúc 30 giây không được tính');
+  assert.equal(late.update({ voltage: 11.8, voltageTime: 50000, rpm: 850 }, 50000).say, CAR_MESSAGES.battery);
+});
+
+test('CarWatch: dãy lần đọc điện áp thấp bị đứt khi hai lần đọc cách nhau quá 60 giây hoặc mất số điện áp', () => {
+  // Xe im ('nocar') hay trang bị ẩn giữa hai lần đọc: không nối các lần đọc trước và sau thành một dãy.
+  const gap = new CarWatch();
+  gap.update({ voltage: 11.8, voltageTime: 0, rpm: 850 }, 0);
+  gap.update({ voltage: 11.8, voltageTime: 20000, rpm: 850 }, 20000);
+  assert.equal(gap.update({ voltage: 11.8, voltageTime: 600000, rpm: 850 }, 600000).say, null, 'dãy đã đứt');
+  assert.equal(gap.update({ voltage: 11.8, voltageTime: 620000, rpm: 850 }, 620000).say, null);
+  assert.equal(gap.update({ voltage: 11.8, voltageTime: 640000, rpm: 850 }, 640000).say, CAR_MESSAGES.battery);
+
+  // Lần đọc giữ nguyên (vòng tua tạm mất) vẫn nối dãy: không coi là đứt khi chỉ cách nhau 20 giây.
+  const held = new CarWatch();
+  held.update({ voltage: 11.8, voltageTime: 0, rpm: 850 }, 0);
+  for (const t of [20000, 40000, 60000]) held.update({ voltage: 11.8, voltageTime: t, rpm: null }, t);
+  assert.equal(held.update({ voltage: 11.8, voltageTime: 80000, rpm: 850 }, 80000).say, CAR_MESSAGES.battery);
+
+  // Không còn số điện áp (bị xoá vì quá 60 giây không đọc được) thì đếm lại.
+  const none = new CarWatch();
+  none.update({ voltage: 11.8, voltageTime: 0, rpm: 850 }, 0);
+  none.update({ voltage: 11.8, voltageTime: 20000, rpm: 850 }, 20000);
+  none.update({ voltage: null, voltageTime: null, rpm: 850 }, 30000);
+  assert.equal(none.update({ voltage: 11.8, voltageTime: 40000, rpm: 850 }, 40000).say, null);
+});
+
+test('bộ đọc lỡ hai câu trả lời vòng tua (vòng tua tạm mất khỏi snapshot): vẫn nhắc ắc quy ở lần đọc ATRV thấp thứ ba', async () => {
+  const s = setup();
+  const watch = new CarWatch();
+  const said = [];
+  const seen = [];
+  s.client.onData((snap) => {
+    seen.push({ at: s.clock.t, ...snap });
+    const w = watch.update(snap, s.clock.t).say;
+    if (w) said.push({ t: s.clock.t, w });
+  });
+  s.client.start();
+  await s.clock.advance(8000);
+  assert.equal(s.client.state, 'ready');
+  const atrv = () => s.elm.commands.filter((c) => c.cmd === 'ATRV').map((c) => c.t);
+  // Từ giờ máy vẫn chạy 1.850 vòng/phút nhưng điện áp chỉ 11,8 V (máy phát không sạc).
+  s.elm.atrv = '11.8V';
+  const t0 = s.clock.t;
+  let drops = 0;
+  s.elm.override = (cmd) => {
+    if (cmd !== '010C' || drops >= 2) return null;
+    const low = atrv().filter((t) => t > t0);
+    if (!low.length || s.clock.t < low[0] + 3000) return null;
+    drops++;
+    return { drop: true }; // câu trả lời bị mất: quá hạn, X, CR
+  };
+  await s.clock.advance(90000);
+  const low = atrv().filter((t) => t > t0);
+  assert.equal(drops, 2);
+  assert.ok(
+    seen.some((x) => x.at > low[0] && x.at < low[1] && x.rpm == null),
+    'vòng tua phải có lúc bị xoá khỏi snapshot giữa hai lần đọc ATRV'
+  );
+  assert.equal(said.length, 1);
+  assert.equal(said[0].w, CAR_MESSAGES.battery);
+  assert.ok(said[0].t >= low[2] && said[0].t < low[2] + 1000, `nhắc ở lần đọc thấp thứ ba (${said[0].t}; ${low.join(', ')})`);
+  assertSafeWrites(s.elm.writes);
+});
+
+test('CarWatch với snapshot thật của ObdClient: một lần đọc 112 °C rồi lần sau 95 °C thì không nhắc; nóng hai lần liền thì nhắc', async () => {
+  const s = setup();
+  const watch = new CarWatch();
+  const said = [];
+  s.client.onData((snap) => {
+    const w = watch.update(snap, s.clock.t).say;
+    if (w) said.push({ t: s.clock.t, w });
+  });
+  s.client.start();
+  await s.clock.advance(8000);
+  assert.equal(s.client.state, 'ready');
+  const reads = () => s.elm.commands.filter((c) => c.cmd === '0105').map((c) => c.t);
+  const first = reads().at(-1);
+  await s.clock.advance(first + 15000 - 500 - s.clock.t);
+  s.elm.coolant = 112;
+  await s.clock.advance(1000);
+  assert.equal(s.snap.coolant, 112);
+  assert.ok(s.clock.t - s.snap.coolantTime < 1000, 'snapshot có thời điểm đọc nước làm mát');
+  s.elm.coolant = 95;
+  await s.clock.advance(30000);
+  assert.deepEqual(said, [], 'một lần đọc nóng chưa đủ để nhắc');
+
+  const from = s.clock.t;
+  s.elm.coolant = 113;
+  await s.clock.advance(40000);
+  const hot = reads().filter((t) => t > from);
+  assert.equal(said.length, 1);
+  assert.equal(said[0].w, CAR_MESSAGES.coolant);
+  assert.ok(said[0].t > hot[1] && said[0].t < hot[1] + 1000, 'nhắc khi có lần đọc nóng thứ hai');
+  assert.ok(hot[1] - hot[0] >= 10000);
 });
 
 // ---------------------------------------------------------------------------------------------
@@ -1157,4 +1593,155 @@ test('transport Web Serial: mở cổng 38400, đọc liên tục, lỗi đọc 
   await t3.disconnect();
   assert.equal(await reopenSerial({ serial: { getPorts: async () => [] } }), null);
   assert.equal(await reopenSerial({}), null);
+});
+
+const settle = async (n = 20) => {
+  for (let i = 0; i < n; i++) await flush();
+};
+
+/** Cổng nối tiếp giả theo chuẩn Web Serial: open() chờ tới khi gọi release(); close() lỗi nếu chưa mở xong hoặc còn khoá. */
+function gatedPort() {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const port = {
+    state: 'closed',
+    readable: null,
+    writable: null,
+    release,
+    async open() {
+      if (port.state !== 'closed') throw Object.assign(new Error('already open'), { name: 'InvalidStateError' });
+      port.state = 'opening';
+      await gate;
+      port.state = 'opened';
+      port.readable = new ReadableStream({ start() {} });
+      port.writable = new WritableStream({ write() {} });
+    },
+    async close() {
+      if (port.state !== 'opened') throw Object.assign(new Error('The port is already closed.'), { name: 'InvalidStateError' });
+      if (port.readable.locked || port.writable.locked) throw new TypeError('locked');
+      port.state = 'closed';
+      port.readable = port.writable = null;
+    },
+  };
+  return port;
+}
+
+test('ngắt kết nối lúc cổng nối tiếp đang mở: mở xong thì đóng ngay, lần kết nối sau vẫn mở được', async () => {
+  const port = gatedPort();
+  const c1 = new ObdClient(createSerialTransport(port));
+  c1.start();
+  await settle();
+  assert.equal(c1.state, 'connecting');
+  await c1.stop();
+  port.release();
+  await settle();
+  assert.equal(c1.state, 'idle');
+  assert.equal(port.state, 'closed', 'cổng vẫn mở và bị khoá sau khi đã ngắt');
+
+  const tr2 = createSerialTransport(port);
+  await tr2.connect({ onData() {}, onClose() {} });
+  assert.equal(port.state, 'opened');
+  await tr2.disconnect();
+  assert.equal(port.state, 'closed');
+});
+
+test('ngắt kết nối lúc gatt.connect() đang chờ: huỷ lần nối đó, Bluetooth không còn nối, không bật notify', async () => {
+  let release;
+  const gate = new Promise((r) => (release = r));
+  const rx = {
+    uuid: U(0xfff1),
+    properties: { notify: true },
+    notifying: false,
+    started: 0,
+    addEventListener() {},
+    removeEventListener() {},
+    async startNotifications() { this.notifying = true; this.started++; },
+    async stopNotifications() { this.notifying = false; },
+  };
+  const tx = { uuid: U(0xfff2), properties: { write: true }, async writeValueWithResponse() {} };
+  const server = fakeServer({ [U(0xfff0)]: [rx, tx] });
+  const pending = new Set();
+  let disconnectCalls = 0;
+  // Theo chuẩn Web Bluetooth: disconnect() huỷ mọi lần connect() đang chờ (AbortError), kể cả khi chưa nối.
+  const gatt = {
+    connected: false,
+    connect() {
+      return new Promise((resolve, reject) => {
+        const a = { reject };
+        pending.add(a);
+        gate.then(() => {
+          if (!pending.delete(a)) return;
+          gatt.connected = true;
+          resolve(server);
+        });
+      });
+    },
+    disconnect() {
+      disconnectCalls++;
+      for (const a of pending) a.reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      pending.clear();
+      gatt.connected = false;
+    },
+  };
+  const device = { name: 'OBDII', gatt, addEventListener() {}, removeEventListener() {} };
+  const c = new ObdClient(createBleTransport(device));
+  const states = [];
+  c.onState((st) => states.push(st));
+  c.start();
+  await settle();
+  assert.equal(c.state, 'connecting');
+  await c.stop();
+  assert.ok(disconnectCalls >= 1, 'gatt.disconnect() phải được gọi để huỷ lần nối đang chờ');
+  assert.equal(pending.size, 0, 'lần gatt.connect() đang chờ chưa bị huỷ');
+  release();
+  await settle();
+  assert.equal(gatt.connected, false);
+  assert.equal(rx.started, 0, 'không được nối rồi bật notify sau khi đã ngắt');
+  assert.equal(rx.notifying, false);
+  assert.equal(c.state, 'idle');
+  assert.ok(!states.includes('error'), 'người dùng tự ngắt thì không báo lỗi');
+
+  // Trình duyệt không huỷ được lần nối đang chờ: GATT nối xong sau khi đã ngắt, rồi việc mở hỏng (không có kênh
+  // dữ liệu OBD). Phần đã nối vẫn phải được ngắt, và không báo lỗi.
+  let release2;
+  const gate2 = new Promise((r) => (release2 = r));
+  const gatt2 = {
+    connected: false,
+    async connect() {
+      await gate2;
+      gatt2.connected = true;
+      return fakeServer({});
+    },
+    disconnect() {
+      gatt2.connected = false;
+    },
+  };
+  const c2 = new ObdClient(createBleTransport({ name: 'Tai nghe', gatt: gatt2 }));
+  const states2 = [];
+  c2.onState((st) => states2.push(st));
+  c2.start();
+  await settle();
+  await c2.stop();
+  release2();
+  await settle();
+  assert.equal(gatt2.connected, false, 'GATT còn nối sau khi người dùng đã ngắt');
+  assert.equal(c2.state, 'idle');
+  assert.ok(!states2.includes('error'));
+});
+
+test('tên chung của bộ đọc viết thường vì đứng giữa câu; tên riêng của thiết bị giữ nguyên', () => {
+  assert.equal(createSerialTransport({}).name, 'bộ OBD Bluetooth thường');
+  assert.equal(createBleTransport({ gatt: {} }).name, 'bộ OBD Bluetooth');
+  assert.equal(createBleTransport({ name: '', gatt: {} }).name, 'bộ OBD Bluetooth');
+  assert.equal(createBleTransport({ name: 'vLinker MC-IOS', gatt: {} }).name, 'vLinker MC-IOS');
+  // Câu trạng thái mà main.js hiện (describeCarState): tên đứng sau "Đang kết nối với".
+  for (const [tr, text] of [
+    [createSerialTransport({}), 'Đang kết nối với bộ OBD Bluetooth thường…'],
+    [createBleTransport({ gatt: {} }), 'Đang kết nối với bộ OBD Bluetooth…'],
+    [createBleTransport({ name: 'OBDII', gatt: {} }), 'Đang kết nối với OBDII…'],
+  ]) {
+    const name = new ObdClient(tr).name;
+    assert.equal(`Đang kết nối với ${name}…`, text);
+    assert.equal(describeCarState('connecting', null, { name }), text);
+  }
 });

@@ -5,6 +5,7 @@ import {
   CELL,
   cellKey,
   cellOf,
+  onewayFor,
   OVERPASS_ENDPOINTS,
   overpassFailure,
   parseMaxspeed,
@@ -230,6 +231,9 @@ function fakeFetch(responses, onCall = () => {}) {
   return { calls, impl };
 }
 
+// Phiên bản bản ghi bộ đệm hiện tại (3: đường có thêm chiều một chiều riêng của xe máy).
+const VERSION = 3;
+
 // Giữa ô, để không kéo theo ô bên cạnh.
 const CENTER = [(Math.floor(106.7 / CELL) + 0.5) * CELL, (Math.floor(10.77 / CELL) + 0.5) * CELL];
 const CENTER_KEY = cellKey(...cellOf(CENTER));
@@ -246,7 +250,7 @@ async function until(cond, rounds = 500) {
   return cond();
 }
 
-test('tải ô: phản hồi báo lỗi thì thử máy chủ khác, lưu bộ đệm phiên bản 2', async () => {
+test('tải ô: phản hồi báo lỗi thì thử máy chủ khác, lưu bộ đệm phiên bản hiện tại', async () => {
   const cache = fakeCache();
   const { calls, impl } = fakeFetch([
     { json: { remark: 'runtime error: Query timed out in "query" at line 3 after 61 seconds.', elements: [] } },
@@ -262,7 +266,7 @@ test('tải ô: phản hồi báo lỗi thì thử máy chủ khác, lưu bộ �
   assert.equal(cache.puts.length, 1);
   const rec = cache.puts[0];
   assert.equal(rec.key, CENTER_KEY);
-  assert.equal(rec.v, 2);
+  assert.equal(rec.v, VERSION);
   assert.equal(typeof rec.t, 'number');
   assert.equal(rec.base, '2026-07-28T02:16:18Z');
   assert.equal(rec.ways.length, 2);
@@ -288,7 +292,7 @@ test('tải ô: mọi máy chủ đều lỗi thì không lưu gì', async () =>
   assert.equal(roads.hasData(CENTER), false);
 });
 
-test('bộ đệm cũ (chưa có v: 2) được dùng ngay nhưng vẫn tải lại', async () => {
+test('bộ đệm cũ (chưa có trường v) được dùng ngay nhưng vẫn tải lại', async () => {
   const old = { key: CENTER_KEY, t: Date.now(), ways: parseOverpass(sampleResponse()).ways, points: [] };
   const cache = fakeCache([old]);
   let hadDataWhileFetching = null;
@@ -302,13 +306,29 @@ test('bộ đệm cũ (chưa có v: 2) được dùng ngay nhưng vẫn tải l�
   assert.equal(hadDataWhileFetching, true, 'dữ liệu cũ vẫn cho giới hạn tốc độ trong lúc tải lại');
   assert.equal(calls.length, 1);
   assert.equal(cache.puts.length, 1);
-  assert.equal(cache.puts[0].v, 2);
+  assert.equal(cache.puts[0].v, VERSION);
   assert.equal(roads.featsNear([106.7, 10.771], 5).length, 1);
 });
 
-test('bộ đệm v2 còn hạn thì không tải lại, quá 7 ngày thì tải lại', async () => {
+test('bản ghi bộ đệm phiên bản 2 (chưa có chiều một chiều riêng của xe máy) được dùng tạm nhưng vẫn tải lại', async () => {
   const data = parseOverpass(sampleResponse());
-  const rec = (t) => ({ key: CENTER_KEY, v: 2, t, base: data.base, ...data });
+  const cache = fakeCache([{ key: CENTER_KEY, v: 2, t: Date.now(), base: data.base, ...data }]);
+  let hadDataWhileFetching = null;
+  const roads = new RoadData({ cache });
+  const { calls, impl } = fakeFetch([{ json: sampleResponse() }], () => {
+    hadDataWhileFetching = roads.hasData(CENTER);
+  });
+  roads.fetch = impl;
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(hadDataWhileFetching, true, 'bản ghi cũ vẫn dùng được trong lúc tải lại');
+  assert.equal(calls.length, 1, 'bản ghi v2 phải được tải lại để đọc oneway:motorcycle');
+  assert.equal(cache.puts.at(-1).v, VERSION);
+});
+
+test('bộ đệm đúng phiên bản còn hạn thì không tải lại, quá 7 ngày thì tải lại', async () => {
+  const data = parseOverpass(sampleResponse());
+  const rec = (t) => ({ key: CENTER_KEY, v: VERSION, t, base: data.base, ...data });
 
   const fresh = fakeFetch([]);
   const roads = new RoadData({ fetchImpl: fresh.impl, cache: fakeCache([rec(Date.now() - 3600e3)]) });
@@ -356,7 +376,7 @@ test('ô có dữ liệu cũ: lần tải lại hỏng thì 60 giây sau thử l
   await settle(roads);
   assert.equal(calls.length, 4, 'mạng có lại: tải lại được');
   assert.equal(roads.featsNear(SIGNAL, 5).length, 1);
-  assert.equal(cache.puts.at(-1).v, 2);
+  assert.equal(cache.puts.at(-1).v, VERSION);
 
   now += 3600e3;
   roads.ensureAround(CENTER);
@@ -374,7 +394,7 @@ test('lượt tải mạng đang treo không chặn việc đọc ô có sẵn t
   const data = parseOverpass(sampleResponse());
   const v1 = (x, y) => ({ key: cellKey(x, y), t: Date.now(), ways: [], points: [] });
   const cache = fakeCache([
-    { key: CENTER_KEY, v: 2, t: Date.now(), ...data }, // C: bản ghi mới
+    { key: CENTER_KEY, v: VERSION, t: Date.now(), ...data }, // C: bản ghi mới
     v1(cx, cy - 1), // A: bản ghi kiểu cũ
     v1(cx + 1, cy - 1), // B: bản ghi kiểu cũ
   ]);
@@ -556,4 +576,83 @@ test('matchWay: đường một chiều ngược chiều vẽ chỉ khớp khi �
   assert.equal(roads.matchWay({ coord: at, heading: 0, speed: 10, accuracy: 8 }), null);
   const oneway = singleWay({ o: 1 });
   assert.equal(oneway.matchWay({ coord: at, heading: 5, speed: 10, accuracy: 8 }).dir, 1);
+});
+
+test('parseOverpass: phố một chiều với ô tô nhưng xe máy đi hai chiều (oneway:motorcycle, rồi oneway:moped)', () => {
+  const w = (id, tags) => ({ type: 'way', id, geometry: [N1, N2, N3], tags: { highway: 'residential', ...tags } });
+  const data = parseOverpass({
+    elements: [
+      w(1, { oneway: 'yes', 'oneway:motorcycle': 'no', 'oneway:moped': 'no', 'oneway:bicycle': 'no' }),
+      w(2, { oneway: 'yes', 'oneway:moped': 'no' }),
+      w(3, { oneway: '-1', 'oneway:motorcycle': 'no' }),
+      w(4, { oneway: 'yes', 'oneway:motorcycle': 'yes' }), // giống o: không ghi om
+      w(5, { 'oneway:motorcycle': '-1' }), // hai chiều với ô tô, một chiều với xe máy
+      w(6, { oneway: 'yes', 'oneway:motorcycle': 'constructor', 'oneway:moped': 'no' }), // giá trị lạ: đọc oneway:moped
+      w(7, { oneway: 'yes', 'oneway:bicycle': 'no' }), // chỉ xe đạp được đi hai chiều
+    ],
+  });
+  assert.deepEqual(
+    data.ways.map((x) => [x.id, x.o, x.om ?? null]),
+    [[1, 1, 0], [2, 1, 0], [3, -1, 0], [4, 1, null], [5, 0, -1], [6, 1, 0], [7, 1, null]],
+  );
+  assert.deepEqual(data.ways[0].t, { 'oneway:motorcycle': 'no', 'oneway:moped': 'no' });
+  assert.equal('t' in data.ways[6], false, 'oneway:bicycle không cần giữ');
+});
+
+test('matchWay theo loại xe: xe máy đi ngược chiều vẽ trên phố chỉ một chiều với ô tô vẫn khớp; ô tô và mặc định thì không', () => {
+  const roads = singleWay({ o: 1, om: 0 });
+  const south = { coord: destination(START, 0, 300), heading: 180, speed: 10, accuracy: 8 };
+  assert.equal(roads.matchWay(south), null, 'mặc định là ô tô');
+  assert.equal(roads.matchWay(south, '', { vehicle: 'car' }), null);
+  const m = roads.matchWay(south, '', { vehicle: 'moto' });
+  assert.equal(m.way.id, 10);
+  assert.equal(m.dir, -1);
+  assert.equal(onewayFor(m.way, 'moto'), 0);
+  assert.equal(onewayFor(m.way, 'car'), 1);
+  // Đường không có thẻ riêng cho xe máy: xe máy theo chiều chung.
+  const plain = singleWay({ o: -1 });
+  assert.equal(plain.matchWay({ ...south, heading: 0 }, '', { vehicle: 'moto' }), null);
+  assert.equal(onewayFor({ o: -1 }, 'moto'), -1);
+  assert.equal(onewayFor({ o: 1, om: 0 }, undefined), 1, 'không rõ loại xe: như ô tô');
+});
+
+test('matchWay: đường được ưu tiên (prefer) thắng đường gần hơn vài mét, không thắng đường gần hơn hẳn; only chỉ xét các đường cho trước', () => {
+  const g1 = [START, destination(START, 0, 500), destination(START, 0, 1000)];
+  const g2 = g1.map((p) => destination(p, 90, 12)); // đường song song cách 12 m
+  const roads = new RoadData();
+  roads.setCell(cellKey(...cellOf(g1[1])), { ways: [way(1, g1), way(2, g2)], points: [] });
+  const off = (m) => ({ coord: destination(destination(START, 0, 500), 90, m), heading: 0, speed: 10, accuracy: 5 });
+  const prefer = new Set([1]);
+  assert.equal(roads.matchWay(off(7)).way.id, 2);
+  assert.equal(roads.matchWay(off(7), '', { prefer }).way.id, 1);
+  assert.equal(roads.matchWay(off(12), '', { prefer }).way.id, 2);
+  assert.equal(roads.matchWay(off(12), '', { only: prefer }).way.id, 1);
+  assert.equal(roads.matchWay(off(50), '', { only: prefer }), null);
+});
+
+test('matchWay đi chậm: heading/within bỏ các đường lệch hướng (theo chiều được đi), among chỉ lọc các đường cho trước, không suy ra chiều đi', () => {
+  // Ngã tư: đường 1 hai chiều chạy Nam–Bắc qua J, đường 2 từ J sang Đông, đường 3 một chiều vẽ lên Bắc, cách 20 m về phía Tây.
+  const J = destination(START, 0, 500);
+  const roads = new RoadData();
+  const ns = [START, J, destination(J, 0, 500)];
+  roads.setCell(cellKey(...cellOf(J)), {
+    ways: [way(1, ns), way(2, [J, destination(J, 90, 250), destination(J, 90, 500)]), way(3, ns.map((p) => destination(p, 270, 20)), { o: 1, om: 0 })],
+    points: [],
+  });
+  const fix = { coord: destination(destination(J, 0, 4), 90, 3), speed: 2, heading: 90, accuracy: 5 };
+  assert.equal(roads.matchWay(fix).way.id, 1, 'không lọc: đường gần nhất');
+  const turned = roads.matchWay(fix, '', { heading: 90, within: 60 });
+  assert.equal(turned.way.id, 2, 'đường Nam–Bắc lệch 90° bị bỏ');
+  assert.equal(turned.dir, 0, 'đi chậm: không suy ra chiều đi');
+  assert.equal(roads.matchWay(fix, '', { heading: 90, within: 60, among: new Set([2]) }).way.id, 1, 'chỉ lọc đường 2');
+  assert.equal(roads.matchWay(fix, '', { heading: 90, within: 60, among: new Set([1]) }).way.id, 2);
+  assert.equal(roads.matchWay(fix, '', { heading: 170, within: 60 }).way.id, 1, 'đường hai chiều hợp cả hướng ngược lại');
+  assert.equal(roads.matchWay(fix, '', { heading: 45, within: 60 }).way.id, 1, 'lệch 45° vẫn giữ');
+  // Đường một chiều: ô tô đi ngược chiều thì bị bỏ, xe máy được đi hai chiều (om = 0) thì không.
+  const west = { coord: destination(destination(START, 0, 300), 270, 18), speed: 2, heading: 180, accuracy: 5 };
+  assert.equal(roads.matchWay(west, '', { heading: 180, within: 60 }).way.id, 1);
+  assert.equal(roads.matchWay(west, '', { heading: 180, within: 60, vehicle: 'moto' }).way.id, 3);
+  // Đang chạy (trên 2,5 m/s): matchWay tự lọc theo hướng của lần định vị, bỏ qua heading truyền vào.
+  const moving = roads.matchWay({ ...fix, speed: 10, heading: 0 }, '', { heading: 90, within: 60 });
+  assert.deepEqual([moving.way.id, moving.dir], [1, 1]);
 });

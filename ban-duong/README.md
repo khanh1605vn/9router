@@ -27,7 +27,7 @@ Cần Node.js 22 trở lên.
 ```bash
 cd ban-duong
 npm start          # mở http://localhost:5173
-npm test           # 186 bài kiểm thử logic (không cần mạng)
+npm test           # 228 bài kiểm thử logic (không cần mạng)
 ```
 
 Trên máy tính không có GPS, ứng dụng lấy tâm bản đồ làm điểm xuất phát; dùng nút **Chạy thử** để xem dẫn đường hoạt động.
@@ -60,12 +60,14 @@ Khi dẫn đường hoặc ở chế độ lái, ứng dụng xét khoảng 320 
 - **Báo lúc nào**: khoảng cách báo bằng quãng đường xe chạy trong 8 giây, giữ trong khoảng 100–200 m (chạy càng nhanh báo càng sớm). Các biển cách nhau dưới 40 m được đọc chung một câu, ví dụ “Phía trước 150 mét, đèn tín hiệu giao thông, cấm rẽ trái”. Tối đa một câu mỗi 3 giây; xe đứng yên thì không đọc câu mới.
 - **Trên màn hình**: khi tới khoảng cách báo (khoảng 100–200 m), biển hiện trên thanh vàng, cùng chỗ với cảnh báo camera; nếu cùng lúc có camera thì cái nào gần hơn hiện, cái kia vẫn được đọc. Các biển xa hơn hiện ở dải nhỏ phía trên đồng hồ tốc độ (tối đa 2 biển). Điện thoại xoay ngang thường đủ rộng (từ 800 px bề ngang) để giao diện màn hình ô tô tự bật, khi đó dải vẫn hiện; màn hình hẹp hơn thì dải ẩn đi để khỏi che bản đồ.
 - **Nguồn**: biển báo được nhập vào OpenStreetMap, cộng với thông tin tương đương biển: đèn tín hiệu, biển dừng và nhường đường, vạch người đi bộ qua đường, gờ giảm tốc, đường ngang đường sắt, vòng xuyến, cấm rẽ, đường một chiều, cấm xe, hạn chế chiều cao, tải trọng, chiều ngang, cấm vượt, chỗ đổi giới hạn tốc độ, hầm, và chỗ ngoặt tính từ hình dạng đường (chỉ báo khi chạy từ 30 km/h).
+- **Xe máy**: khi chọn phương tiện là xe máy, đường một chiều có ghi ngoại lệ cho xe máy trên OpenStreetMap (`oneway:motorcycle=no`, hoặc `oneway:moped=no`) được coi là đi được cả hai chiều: không báo “cấm đi ngược chiều”, và khi đi theo chiều ngược lại vẫn có giới hạn tốc độ và các cảnh báo phía trước của đường đó (trừ biển cắm riêng không ghi hướng, vốn quay về phía dòng xe đi theo chiều một chiều). Ô tô vẫn được báo như thường.
 - **Bật/tắt từng nhóm** trong **Cài đặt → Biển báo phía trước**. Vạch người đi bộ qua đường tắt sẵn vì ở đô thị quá dày.
 
 Giới hạn cần biết:
 
 - Ở Việt Nam, biển báo được nhập vào OpenStreetMap còn **rất ít** (một lần đếm năm 2026 chỉ thấy 119 đối tượng có thẻ biển báo trên cả nước). Phần lớn cảnh báo vì thế đến từ thông tin tương đương ở trên, không phải từ biển thật. Không có cảnh báo **không** có nghĩa là không có biển.
-- Chỗ ngoặt được tính từ hình dạng đường trên bản đồ, nên đôi khi báo cả khúc cua trong ngõ hẻm hoặc chỗ đường rẽ góc vuông. Khi lái tự do, nếu bạn rẽ ở nút giao thì những gì vừa được báo là của đường đi thẳng.
+- Chỗ ngoặt được tính từ hình dạng đường trên bản đồ, nên đôi khi báo cả khúc cua trong ngõ hẻm hoặc chỗ đường rẽ góc vuông. Khi lái tự do, nếu bạn rẽ ở nút giao thì những gì vừa được báo là của đường đi thẳng, và thanh vàng có thể còn hiện biển đó thêm vài giây sau khi rẽ.
+- Khi đang dẫn đường, ứng dụng không báo “cấm đi ngược chiều” cho chính tuyến đang đi; cảnh báo này chỉ có khi lái tự do.
 - Tên biển theo QCVN 41:2024/BGTVT lấy từ nguồn thứ cấp; hình biển trong ứng dụng là hình vẽ giản lược, không phải bản sao hình gốc.
 - **Luôn tuân theo biển báo và hiệu lệnh thực tế trên đường.**
 
@@ -89,7 +91,7 @@ Mỗi lần mở lại trang thường phải bấm kết nối lại, vì trìn
 2. Dùng Chrome 138 trở lên: **Cài đặt → Kết nối với ô tô → Bộ OBD Bluetooth thường (đã ghép đôi)** → chọn bộ đọc.
 3. Lần sau mở ứng dụng, bộ đọc này được tự kết nối lại cho tới khi bạn bấm **Ngắt kết nối**.
 
-Khi đã kết nối: đồng hồ tốc độ và cảnh báo quá tốc độ dùng tốc độ của xe (tắt được bằng **Dùng tốc độ từ xe**) và vẫn cập nhật khi mất GPS trong hầm; bảng dưới hiện vòng tua, nhiệt độ nước làm mát, điện áp; ứng dụng nhắc khi nước làm mát từ 110 °C trong 10 giây, hoặc điện áp dưới 12 V trong 30 giây lúc máy đang chạy. Nút **Đọc mã lỗi** chỉ bấm được khi xe đứng yên; ứng dụng chỉ đọc, không bao giờ xoá mã lỗi.
+Khi đã kết nối: đồng hồ tốc độ và cảnh báo quá tốc độ dùng tốc độ của xe (tắt được bằng **Dùng tốc độ từ xe**) và vẫn cập nhật khi mất GPS trong hầm; bảng dưới hiện vòng tua, nhiệt độ nước làm mát, điện áp; ứng dụng nhắc khi nước làm mát từ 110 °C ở hai lần đọc liên tiếp cách nhau ít nhất 10 giây (nhiệt độ được đọc mỗi 15 giây, nên thường là khoảng 15 giây sau lần đọc nóng đầu tiên), hoặc khi điện áp dưới 12 V lúc máy đang chạy (vòng tua từ 500 vòng/phút) ở các lần đọc liên tiếp kéo dài ít nhất 30 giây (điện áp được đọc mỗi 20 giây, nên thường là ở lần đọc thứ ba, khoảng 40 giây); lần đọc điện áp lúc bộ đọc lỡ mất số vòng tua không được tính. Nếu xe báo lỗi đường truyền (CAN ERROR…), ứng dụng ẩn số liệu cũ và tự dò lại giao thức của xe. Nút **Đọc mã lỗi** chỉ bấm được khi xe đứng yên; ứng dụng chỉ đọc, không bao giờ xoá mã lỗi.
 
 Không dùng được trên iPhone, iPad (Safari, Chrome và các trình duyệt thông thường trên iOS đều không cho trang web dùng Bluetooth), trên Firefox, hoặc khi mở trang ngay trong Zalo, Facebook (hãy mở bằng Chrome). Phần kết nối mới được kiểm thử với bộ ELM327 giả lập, chưa thử với bộ đọc và xe thật.
 

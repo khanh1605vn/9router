@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildCorridor, detectCurves, SignEngine, timeRangesActive } from '../js/signengine.js';
-import { cellKey, cellOf, RoadData } from '../js/roaddata.js';
+import { cellKey, cellOf, parseOverpass, RoadData } from '../js/roaddata.js';
 import { cumulativeDistances, destination, pointAtDistance } from '../js/geo.js';
 
 // Dữ liệu dựng bằng hình học (không phải đường thật). Gốc toạ độ nằm giữa một ô dữ liệu 0,03° để mọi
@@ -857,4 +857,400 @@ test('mất khớp đường một lúc: giữ thanh cảnh báo vài giây rồ
   assert.equal(Math.round(r2.active.distance), 80);
   assert.equal(r2.say, null);
   assert.equal(engine.update({ ...lost, time: 7000 }, roads, {}, { now: NOON }).active, null);
+});
+
+// ------------------------------------------------------------------------------------------
+// Xe máy trên phố một chiều với ô tô nhưng xe máy được đi hai chiều (oneway:motorcycle=no)
+// ------------------------------------------------------------------------------------------
+
+/** Phản hồi theo cấu trúc Overpass: phố 1 (hai chiều) chạy lên phía Bắc tới K = 500 m, nối vào phố 2 vẽ từ Bắc
+ * xuống K, một chiều với ô tô (vẽ ngược hướng xe đi lên), xe máy và xe gắn máy được đi hai chiều. */
+function motoContraflow() {
+  const geom = (pts) => pts.map(([lon, lat]) => ({ lon, lat }));
+  const data = parseOverpass({
+    elements: [
+      { type: 'way', id: 1, geometry: geom(NORTH.slice(0, 51)), tags: { highway: 'residential' } },
+      {
+        type: 'way',
+        id: 2,
+        geometry: geom([...NORTH.slice(50)].reverse()),
+        tags: { highway: 'residential', maxspeed: '30', oneway: 'yes', 'oneway:motorcycle': 'no', 'oneway:moped': 'no' },
+      },
+    ],
+  });
+  return roadsOf(data.ways, [feat(1, at(700), { highway: 'traffic_signals' })]); // đèn 200 m bên trong phố 2
+}
+
+test('phố một chiều với ô tô, xe máy đi hai chiều (oneway:motorcycle=no): xe máy không nghe "cấm đi ngược chiều", vẫn được báo tốc độ và đèn trong phố', () => {
+  const roads = motoContraflow();
+  const car = spoken(drive(roads, { end: 480 }));
+  assert.deepEqual(car.map((r) => r.fired.map((f) => f.code)), [['P.102']], 'ô tô vẫn được báo cấm đi ngược chiều');
+
+  const moto = spoken(drive(roads, { end: 900, vehicle: 'moto' }));
+  const says = moto.map((r) => r.say);
+  assert.ok(!says.some((x) => /ngược chiều/.test(x)), JSON.stringify(says));
+  assert.deepEqual(moto.map((r) => r.fired.map((f) => f.code)), [['P.127'], ['W.209']], JSON.stringify(says));
+  assert.match(says[0], /tốc độ tối đa 30 ki lô mét trên giờ$/);
+  assert.match(says[1], /^Phía trước .+, đèn tín hiệu giao thông$/);
+  const d = moto[1].fired[0].distance;
+  assert.ok(d >= 100 && d <= 200, `đọc ở ${d} m`);
+
+  const fix = { coord: at(300), speed: 15, heading: N, accuracy: 5 };
+  const pieces = (vehicle) => buildCorridor(fix, roads, null, { vehicle }).pieces.map((p) => [p.way.id, p.dir, p.against]);
+  assert.deepEqual(pieces('moto'), [[1, 1, false], [2, -1, false]]);
+  assert.deepEqual(pieces('car'), [[1, 1, false], [2, -1, true]]);
+});
+
+test('dẫn đường cho xe máy qua phố ngược chiều được phép: hành lang khớp đúng phố đó, không báo cấm đi ngược chiều', () => {
+  const roads = motoContraflow();
+  const steps = [{ index: 0, type: 'depart' }, { index: NORTH.length - 1, type: 'arrive' }];
+  const route = { coords: NORTH, cum: cumulativeDistances(NORTH), steps };
+  const fix = { coord: at(400), speed: 10, heading: N, accuracy: 5, time: 0 };
+  const corr = buildCorridor(fix, roads, { route, seg: 40, s: 400 }, { vehicle: 'moto' });
+  assert.deepEqual(corr.pieces.map((p) => [p.way?.id ?? null, p.dir, p.against]), [[1, 1, false], [2, -1, false]]);
+  const said = spoken(driveLine(roads, NORTH, { speed: 10, vehicle: 'moto', withNav: true, steps, from: 300 }));
+  assert.deepEqual(said.map((r) => r.fired.map((f) => f.code)), [['P.127'], ['W.209']], JSON.stringify(said.map((r) => r.say)));
+});
+
+test('biển đứng riêng không ghi hướng trên phố một chiều: xe đi theo chiều chính nhận cả biển bên trái; xe máy đi ngược chiều được phép không nhận biển của dòng xe kia', () => {
+  const left = straight([feat(1, destination(at(400), W, 6), { traffic_sign: 'VN:W.225' }, false)], { o: 1, om: 0 });
+  assert.equal(spoken(drive(left, { end: 600, vehicle: 'moto' })).length, 1, 'xe máy đi theo chiều chính');
+  assert.equal(spoken(drive(left, { ...SOUTHBOUND, end: 900, vehicle: 'moto' })).length, 0);
+  const right = straight([feat(1, destination(at(400), E, 6), { traffic_sign: 'VN:W.225' }, false)], { o: 1, om: 0 });
+  assert.equal(spoken(drive(right, { ...SOUTHBOUND, end: 900, vehicle: 'moto' })).length, 0);
+  // Nút nằm trên đường (gờ giảm tốc) thì áp dụng cho mọi chiều được đi.
+  const hump = straight([feat(1, at(400), { traffic_calming: 'hump' })], { o: 1, om: 0 });
+  const said = spoken(drive(hump, { ...SOUTHBOUND, end: 900, vehicle: 'moto' }));
+  assert.equal(said.length, 1);
+  assert.match(said[0].say, /gờ giảm tốc$/);
+});
+
+// ------------------------------------------------------------------------------------------
+// Hành lang tự do: không nhảy sang đường song song vì một lần định vị lệch
+// ------------------------------------------------------------------------------------------
+
+/** Đường trên cao (1, một chiều, không có đèn) và đường bên dưới cách 12 m về phía Đông (2, có đèn ở 800 m). */
+function elevated(signalAt = 800) {
+  const elev = line(O, N, 1500);
+  const surf = line(destination(O, E, 12), N, 1500);
+  return roadsOf(
+    [way(1, elev, { o: 1, h: 'trunk' }), way(2, surf, { o: 1 })],
+    [feat(1, surf[signalAt / 10], { highway: 'traffic_signals' })],
+  );
+}
+
+/** Chạy lên phía Bắc mỗi 20 m; lateral(x) là độ lệch về phía Đông (m) của lần định vị ở x. */
+function driveLateral(roads, lateral, { end = 900, engine = new SignEngine(), start = 0 } = {}) {
+  const log = [];
+  let time = 1_000_000;
+  for (let x = start; x <= end; x += 20) {
+    const coord = destination(destination(O, N, x), E, lateral(x));
+    log.push({ x, ...engine.update({ coord, speed: 20, heading: N, accuracy: 5, time: (time += 1000) }, roads, {}, { now: NOON }) });
+  }
+  return log;
+}
+
+test('không dẫn đường: một lần định vị lệch về phía đường song song (đường trên cao, đường bên dưới) không làm báo biển của đường đó', () => {
+  const roads = elevated();
+  for (const bad of [600, 680]) {
+    for (const off of [7, 11]) {
+      const log = driveLateral(roads, (x) => (x === bad ? off : 0));
+      assert.equal(spoken(log).length, 0, `lệch ${off} m ở ${bad} m: ${JSON.stringify(spoken(log).map((r) => r.say))}`);
+      assert.ok(log.every((r) => !r.active && r.upcoming.length === 0), `lệch ${off} m ở ${bad} m`);
+    }
+  }
+});
+
+test('xe thật sự sang đường song song (dữ liệu không có đường nối): hành lang theo đường mới từ lần định vị thứ hai', () => {
+  const roads = elevated(1200);
+  const log = driveLateral(roads, (x) => (x >= 1000 ? 12 : 0), { end: 1100 });
+  const row = (x) => log.find((r) => r.x === x);
+  assert.equal(row(1000).upcoming.length, 0, 'lần đầu khớp đường kia: chưa chuyển');
+  assert.deepEqual(row(1020).upcoming.map((u) => u.key), ['n1:signals'], 'lần thứ hai: đã chuyển');
+  assert.equal(spoken(log).length, 1);
+  assert.match(spoken(log)[0].say, /đèn tín hiệu giao thông$/);
+});
+
+test('rẽ sang đường nối với đường cũ (ngã ba chếch 25°, rẽ phải ở ngã tư): hành lang chuyển ngay, như khi không nhớ đường cũ', () => {
+  const J = at(500);
+  const fork = line(J, 25, 500);
+  const east = line(J, E, 500);
+  const roads = roadsOf(
+    [way(1, NORTH.slice(0, 51)), way(2, line(J, N, 500)), way(3, fork), way(4, east), way(5, line(J, W, 300))],
+    [
+      feat(1, fork[15], { highway: 'traffic_signals' }),
+      feat(2, at(650), { traffic_calming: 'hump' }),
+      feat(3, east[15], { traffic_calming: 'bump' }),
+    ],
+  );
+  for (const [branch, brg] of [[fork, 25], [east, E]]) {
+    const path = [...NORTH.slice(0, 50).map((p) => [p, N]), ...branch.map((p) => [p, brg])];
+    const engine = new SignEngine();
+    let time = 1_000_000;
+    for (let k = 30; k < path.length; k += 2) {
+      const fix = { coord: path[k][0], speed: 15, heading: path[k][1], accuracy: 5, time: (time += 1000) };
+      const keys = (r) => r.upcoming.map((u) => u.key);
+      const fresh = new SignEngine().update(fix, roads, {}, { now: NOON });
+      assert.deepEqual(keys(engine.update(fix, roads, {}, { now: NOON })), keys(fresh), `hướng ${brg}°, điểm ${k}`);
+    }
+  }
+});
+
+test('reset(): quên đường và chiều đi đã nhớ của chuyến trước', () => {
+  const roads = elevated();
+  const engine = new SignEngine();
+  driveLateral(roads, () => 0, { end: 600, engine });
+  const onSurface = { coord: destination(destination(O, N, 640), E, 11), speed: 20, heading: N, accuracy: 5, time: 2_000_000 };
+  engine.reset();
+  assert.deepEqual(engine.update(onSurface, roads, {}, { now: NOON }).upcoming.map((u) => u.key), ['n1:signals']);
+
+  const stopped = { coord: at(300), speed: 0, heading: null, accuracy: 5 };
+  const straightRoad = straight([feat(1, at(480), { highway: 'traffic_signals' })]);
+  const eng = new SignEngine();
+  drive(straightRoad, { end: 300, speed: 10, engine: eng });
+  assert.equal(eng.update({ ...stopped, time: 1_100_000 }, straightRoad, {}, { now: NOON }).upcoming.length, 1, 'dừng: vẫn nhớ chiều đi');
+  eng.reset();
+  const r = eng.update({ ...stopped, time: 1_101_000 }, straightRoad, {}, { now: NOON });
+  assert.deepEqual([r.active, r.upcoming.length], [null, 0]);
+});
+
+// ------------------------------------------------------------------------------------------
+// Đi chậm, dừng đèn đỏ: giữ chiều đi qua chỗ nối đoạn đường
+// ------------------------------------------------------------------------------------------
+
+test('đi chậm (dưới 9 km/h) qua chỗ nối hai đoạn đường: vẫn báo đèn phía trước', () => {
+  const roads = roadsOf([way(1, NORTH.slice(0, 31), { n: 'X' }), way(2, NORTH.slice(30), { n: 'X' })], [feat(1, at(480), { highway: 'traffic_signals' })]);
+  const engine = new SignEngine();
+  const log = [];
+  let time = 1_000_000;
+  for (let x = 0; x <= 470; ) {
+    const speed = x < 250 ? 8 : 2.2;
+    log.push({ x, ...engine.update({ coord: destination(O, N, x), speed, heading: N, accuracy: 5, time }, roads, {}, { now: NOON }) });
+    time += 1000;
+    x += speed;
+  }
+  const said = spoken(log);
+  assert.equal(said.length, 1, JSON.stringify(said.map((r) => r.say)));
+  assert.ok(said[0].x > 300, 'đọc khi đã sang đoạn đường thứ hai');
+  assert.equal(said[0].say, 'Phía trước 100 mét, đèn tín hiệu giao thông');
+  assert.ok(log.filter((r) => r.x > 380).every((r) => r.active?.item.key === 'n1:signals'), 'thanh cảnh báo còn tới đèn');
+});
+
+test('dừng đèn đỏ ngay sau chỗ nối đoạn đường (làn rẽ bắt đầu trước nút giao): thanh cảnh báo còn suốt lúc chờ', () => {
+  const J = at(500);
+  const roads = roadsOf(
+    [way(1, NORTH.slice(0, 46), { n: 'X' }), way(2, NORTH.slice(45), { n: 'X' }), way(3, [destination(J, W, 300), J, destination(J, E, 300)])],
+    [feat(1, J, { highway: 'traffic_signals' })],
+  );
+  const engine = new SignEngine();
+  let time = 1_000_000;
+  const step = (x, v) => engine.update({ coord: destination(O, N, x), speed: v, heading: v > 0.5 ? N : null, accuracy: 5, time: (time += 1000) }, roads, {}, { now: NOON });
+  for (let x = 200; x < 420; x += 10) step(x, 10);
+  for (const [x, v] of [[428, 7], [436, 5], [442, 3.5], [446, 2.6], [449, 2], [452, 1.5], [455, 1], [457, 0.4]]) step(x, v);
+  for (let k = 0; k < 60; k++) {
+    const r = step(458, 0);
+    assert.equal(r.active?.item.key, 'n1:signals', `giây thứ ${k + 1} chờ đèn`);
+    assert.equal(Math.round(r.active.distance), 42);
+  }
+});
+
+test('chiều đi đã nhớ không còn dùng khi xe quay đầu lúc đi chậm hoặc đã dừng quá lâu', () => {
+  // Đèn ở 480 m (phía Bắc), gờ ở 150 m (phía Nam); xe chạy lên tới 300 m rồi đi chậm hoặc dừng.
+  const roads = straight([
+    feat(1, at(480), { highway: 'traffic_signals' }),
+    feat(2, at(150), { traffic_calming: 'hump' }),
+    feat(3, at(800), { traffic_calming: 'bump' }),
+  ]);
+  const north = (r) => r.upcoming.some((u) => u.key === 'n1:signals');
+  const run = (moves) => {
+    const engine = new SignEngine();
+    drive(roads, { end: 300, speed: 10, engine });
+    let time = 1_031_000;
+    return moves.map(([x, speed, heading, dt = 1000]) =>
+      engine.update({ coord: destination(O, N, x), speed, heading, accuracy: 5, time: (time += dt) }, roads, {}, { now: NOON }),
+    );
+  };
+  // Dừng chờ một chỗ: vẫn nhớ chiều đi dù đã quá 5 phút. Quá 5 phút chưa xác nhận lại mà xe đã dịch đi (vị trí lùi
+  // 40 m, không có hướng) thì thôi.
+  const wait = run([[300, 0, null, 60e3], [300, 0, null, 200e3], [300, 0, null, 50e3], [260, 0, null, 10e3]]);
+  assert.deepEqual(wait.map(north), [true, true, true, false]);
+  // Vị trí nhảy ra ngoài hành lang dựng lúc xác nhận chiều đi lần cuối (mất tín hiệu GPS): không dùng chiều cũ.
+  const bump = (r) => r.upcoming.some((u) => u.key === 'n3:calming');
+  assert.deepEqual(run([[600, 0, null, 6000]]).map(bump), [true]);
+  assert.deepEqual(run([[650, 0, null, 6000]]).map(bump), [false]);
+  // Quay đầu đi chậm về phía Nam (hướng GPS 180°): không dựng hành lang theo chiều cũ.
+  const back = run([...Array(10)].map((_, k) => [298 - 2 * k, 2, S]));
+  assert.ok(back.slice(-4).every((r) => !north(r) && !r.active), JSON.stringify(back.map(north)));
+  // Không có hướng GPS nhưng xe đã lùi hơn 10 m (từ 290 m): cũng không dùng chiều cũ (sau 5 giây giữ thanh cảnh báo).
+  const drift = run([...Array(14)].map((_, k) => [298 - 2 * k, 2, null]));
+  assert.ok(drift.slice(-4).every((r) => !north(r)), JSON.stringify(drift.map(north)));
+});
+
+// ------------------------------------------------------------------------------------------
+// Đi chậm qua nút giao rồi rẽ, dừng: không giữ hành lang trên đường xe không đi
+// ------------------------------------------------------------------------------------------
+
+/** Ngã tư J ở 500 m: A (lên tới J), B (đi thẳng tiếp), C (rẽ, hướng brgC), nhánh phía Tây. Biển trên B là n1, n2. */
+function crossroads(brgC = E, featsB = [[1, 6, { highway: 'traffic_signals' }]], featsC = []) {
+  const J = at(500);
+  const B = line(J, N, 600);
+  const C = line(J, brgC, 600);
+  const roads = roadsOf(
+    [way(1, NORTH.slice(0, 51)), way(2, B), way(3, C, { h: 'residential' }), way(4, line(J, W, 300).reverse(), { h: 'residential' })],
+    [...featsB.map(([id, k, tags]) => feat(id, B[k], tags)), ...featsC.map(([id, k, tags]) => feat(id, C[k], tags))],
+  );
+  return { J, B, C, roads };
+}
+
+const showsB = (r) => [r.active?.item, ...r.upcoming].some((it) => it && /^n[12]:/.test(it.key));
+
+test('rẽ phải lúc đi chậm (1,2–2,4 m/s): sau vài giây giữ thanh cảnh báo, không còn hiện biển của đường đi thẳng', () => {
+  const { C, roads } = crossroads(E, [[1, 6, { highway: 'traffic_signals' }], [2, 15, { highway: 'speed_camera' }]], [[3, 25, { highway: 'traffic_signals' }]]);
+  const path = [...NORTH.slice(0, 50), ...C];
+  const cum = cumulativeDistances(path);
+  for (const v of [1.2, 2, 2.4]) {
+    const engine = new SignEngine();
+    const log = [];
+    let time = 1_000_000;
+    for (let s = 250; s < 700; ) {
+      const speed = s < 450 ? 10 : s < 560 ? v : 8;
+      const p = pointAtDistance(path, cum, s);
+      log.push({ s, time, ...engine.update({ coord: p.point, speed, heading: p.bearing, accuracy: 5, time }, roads, {}, { now: NOON }) });
+      time += 1000;
+      s += speed;
+    }
+    const turned = log.find((r) => r.s > 503).time;
+    const late = log.filter((r) => r.s > 503 && r.time > turned + 5000);
+    assert.ok(late.every((r) => !showsB(r)), `${v} m/s: ${JSON.stringify(late.filter(showsB).map((r) => Math.round(r.s)))}`);
+    // Chỉ đèn trên C được đọc khi đã rẽ.
+    const onC = spoken(log).filter((r) => r.s > 500);
+    assert.deepEqual(onC.map((r) => r.fired.map((f) => f.key)), [['n3:signals']], `${v} m/s`);
+  }
+});
+
+test('rẽ chậm rồi dừng ngay trên đường rẽ (5–20 m) suốt 1 phút: không hiện đèn của đường đi thẳng', () => {
+  const { J, roads } = crossroads();
+  for (const stopAt of [5, 8, 12, 20]) {
+    const engine = new SignEngine();
+    let time = 1_000_000;
+    const step = (coord, speed, heading) => engine.update({ coord, speed, heading, accuracy: 5, time: (time += 1000) }, roads, {}, { now: NOON });
+    for (let s = 300; s < 470; s += 10) step(at(s), 10, N);
+    for (let s = 470; s < 500; s += 2) step(destination(O, N, s), 2, N);
+    const turned = time + 1000;
+    for (let d = 2; d <= stopAt; d += 2) step(destination(J, E, d), 2, E);
+    for (let k = 0; k < 60; k++) {
+      const r = step(destination(J, E, stopAt), 0, E);
+      if (time > turned + 5000) assert.ok(!showsB(r), `dừng cách J ${stopAt} m, giây thứ ${k + 1}`);
+    }
+  }
+});
+
+test('rẽ chậm vào nhánh chếch 30°, 45°, 60°: không đọc đèn của đường đi thẳng', () => {
+  for (const theta of [30, 45, 60]) {
+    const { J, roads } = crossroads(theta, [[1, 11, { highway: 'traffic_signals' }]]); // đèn 110 m sau J trên B
+    for (const v of [1.6, 2, 2.4]) {
+      const engine = new SignEngine();
+      const log = [];
+      let time = 1_000_000;
+      const step = (coord, speed, heading) => log.push(engine.update({ coord, speed, heading, accuracy: 5, time: (time += 1000) }, roads, {}, { now: NOON }));
+      for (let s = 300; s < 440; s += 10) step(at(s), 10, N);
+      for (let s = 440; s < 500; s += v) step(destination(O, N, s), v, N);
+      for (let d = v; d <= 60; d += v) step(destination(J, theta, d), v, theta);
+      assert.deepEqual(spoken(log).map((r) => r.say), [], `${theta}°, ${v} m/s`);
+    }
+  }
+});
+
+test('sang đường song song bị cắt thành nhiều đoạn ngắn (20–50 m): hành lang theo đường mới, không đọc đèn của đường cũ', () => {
+  const M = line(O, N, 1200);
+  const P0 = destination(O, E, 12);
+  for (const seg of [20, 50]) {
+    const ways = [way(1, M, { o: 1, h: 'trunk' })];
+    for (let a = 0, id = 100; a < 1200; a += seg) ways.push(way(id++, line(destination(P0, N, a), N, Math.min(seg, 1200 - a)), { o: 1, h: 'tertiary' }));
+    const roads = roadsOf(ways, [feat(1, M[60], { highway: 'traffic_signals' }), feat(2, destination(P0, N, 700), { highway: 'traffic_signals' })]);
+    for (const v of [10, 20]) {
+      const engine = new SignEngine();
+      const log = [];
+      let time = 1_000_000;
+      for (let s = 0; s <= 900; s += v) {
+        const lateral = s < 200 ? 0 : s < 220 ? (12 * (s - 200)) / 20 : 12;
+        const coord = destination(destination(O, N, s), E, lateral);
+        log.push({ s, ...engine.update({ coord, speed: v, heading: N, accuracy: 5, time: (time += 1000) }, roads, {}, { now: NOON }) });
+      }
+      const msg = `đoạn ${seg} m, ${v} m/s`;
+      assert.ok(log.filter((r) => r.s >= 260).every((r) => !r.upcoming.some((u) => u.key === 'n1:signals')), msg);
+      assert.deepEqual(spoken(log).map((r) => r.fired.map((f) => f.key)), [['n2:signals']], msg);
+    }
+  }
+});
+
+test('quay đầu chậm qua dải phân cách (đường đôi 8 m, 15 m): hết vài giây giữ thanh cảnh báo thì không còn hiện đèn phía sau', async () => {
+  const { LocationService } = await import('../js/location.js');
+  const U = at(600);
+  for (const gap of [8, 15]) {
+    const ways = [way(1, line(O, N, 1500), { o: 1 }), way(2, line(destination(O, E, gap), N, 1500).reverse(), { o: 1 })];
+    const roads = roadsOf(ways, [
+      feat(1, destination(U, N, 80), { highway: 'traffic_signals' }),
+      feat(2, destination(at(450), E, gap), { highway: 'traffic_signals' }),
+    ]);
+    for (const deviceHeading of [true, false]) {
+      for (const vt of [1.5, 2.2]) {
+        const loc = new LocationService();
+        const engine = new SignEngine();
+        let time = 1_000_000;
+        const rows = [];
+        const feed = (coord, speed, heading) => {
+          const fix = loc.ingest({ coord, accuracy: 8, speed, heading: deviceHeading ? heading : null, time: (time += 1000), simulated: false });
+          rows.push({ heading, time, ...engine.update(fix, roads, {}, { now: NOON }) });
+        };
+        for (let s = 300; s < 590; s += 10) feed(destination(O, N, s), 10, N);
+        for (const [d, v] of [[594, 6], [598, 3], [600, 1]]) feed(destination(O, N, d), v, N);
+        for (let k = 0; k < 10; k++) feed(U, 0, null);
+        const centre = destination(U, E, gap / 2);
+        const steps = Math.round((Math.PI * gap) / 2 / vt);
+        for (let k = 1; k <= steps; k++) {
+          const a = 270 + (180 * k) / steps;
+          feed(destination(centre, a % 360, gap / 2), vt, (a + 90) % 360);
+        }
+        const back = destination(U, E, gap);
+        for (let d = vt; d <= 60; d += vt) feed(destination(back, S, d), vt, S);
+        for (let d = 60; d <= 200; d += 8) feed(destination(back, S, d), 8, S);
+        const mid = rows.find((r) => r.heading >= 90 && r.heading <= 270).time; // nửa vòng quay đầu
+        const behind = (r) => [r.active?.item, ...r.upcoming].some((it) => it && it.key === 'n1:signals');
+        const late = rows.filter((r) => r.time >= mid + 5000 && behind(r));
+        assert.deepEqual(late.map((r) => (r.time - mid) / 1000), [], `dải phân cách ${gap} m, ${deviceHeading ? 'có' : 'không có'} hướng từ máy, ${vt} m/s`);
+        assert.ok(spoken(rows).some((r) => r.fired.some((f) => f.key === 'n2:signals')), 'đèn phía trước sau khi quay đầu vẫn được đọc');
+      }
+    }
+  }
+});
+
+test('dừng đèn đỏ, vị trí trôi lệch về phía sau 15–20 m (sai số GPS lúc đứng yên): thanh cảnh báo vẫn còn', async () => {
+  const { LocationService } = await import('../js/location.js');
+  const roads = roadsOf([way(1, line(O, N, 1500))], [feat(1, destination(O, N, 480), { highway: 'traffic_signals' })]);
+  for (const [off, brg] of [[15, 150], [20, 200], [12, 180]]) {
+    const loc = new LocationService();
+    const engine = new SignEngine();
+    let time = 1_000_000;
+    const feed = (coord, speed, heading) =>
+      engine.update(loc.ingest({ coord, accuracy: 15, speed, heading, time: (time += 1000), simulated: false }), roads, {}, { now: NOON });
+    let s = 200;
+    for (; s < 440; s += 10) feed(destination(O, N, s), 10, N);
+    for (const v of [7, 4, 2, 0.5]) feed(destination(O, N, (s += v)), v, v >= 1 ? N : null);
+    const stop = destination(O, N, s);
+    for (let k = 0; k < 60; k++) {
+      const r = feed(destination(stop, brg, Math.min(off, (off * k) / 8)), 0, null);
+      assert.equal(r.active?.item.key, 'n1:signals', `lệch ${off} m hướng ${brg}°, giây thứ ${k + 1}`);
+    }
+  }
+});
+
+test('dừng lâu hơn 5 phút (kẹt xe) trên đoạn đường không bị cắt: thanh cảnh báo vẫn còn, đi tiếp chậm vẫn đúng chiều', () => {
+  const roads = roadsOf([way(1, line(O, N, 1500))], [feat(1, destination(O, N, 480), { highway: 'traffic_signals' })]);
+  const engine = new SignEngine();
+  let time = 1_000_000;
+  const step = (x, speed) => engine.update({ coord: destination(O, N, x), speed, heading: N, accuracy: 5, time: (time += 1000) }, roads, {}, { now: NOON });
+  for (let x = 200; x <= 440; x += 10) step(x, 10);
+  for (let k = 1; k <= 400; k++) assert.equal(step(440, 0).active?.item.key, 'n1:signals', `giây thứ ${k} đứng yên`);
+  for (let x = 442; x <= 460; x += 2) assert.equal(step(x, 2).active?.item.key, 'n1:signals', `đi tiếp ở ${x} m`);
 });

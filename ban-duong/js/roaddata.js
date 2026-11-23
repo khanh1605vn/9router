@@ -18,7 +18,12 @@ const TTL = 7 * 24 * 3600e3;
 const RETRY_AFTER = 60e3;
 const REQUEST_TIMEOUT = 70e3; // máy chủ được chạy 60 giây, cộng thêm thời gian truyền dữ liệu
 const MAX_CELLS = 16;
-const CACHE_VERSION = 2; // bản ghi cũ hơn vẫn dùng tạm được nhưng sẽ được tải lại
+// Bản ghi cũ hơn vẫn dùng tạm được nhưng sẽ được tải lại. 3: đường có thêm chiều một chiều riêng của xe máy (om).
+const CACHE_VERSION = 3;
+// matchWay: đường thuộc hành lang vừa dựng được cộng chừng này (m) vào điểm, để một lần định vị lệch không làm
+// nhảy sang đường song song. Phải nhỏ hơn khoảng cách thường gặp giữa hai đường song song (đường trên cao và
+// đường bên dưới, đường song hành), nếu không xe đã thật sự sang đường kia mà vẫn bị giữ ở đường cũ.
+const PREFER_BONUS = 8;
 
 const DRIVABLE =
   'motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street|' +
@@ -27,6 +32,7 @@ const DRIVABLE =
 // Thẻ của đường cần giữ lại để suy ra biển báo (vòng xuyến, hầm, cấm xe, hạn chế kích thước, cấm vượt…).
 const WAY_KEYS = new Set([
   'junction', 'tunnel', 'access', 'vehicle', 'motor_vehicle', 'motorcar', 'motorcycle',
+  'oneway:motorcycle', 'oneway:moped',
   'maxheight', 'maxheight:physical', 'maxheight:forward', 'maxheight:backward',
   'maxweight', 'maxweight:forward', 'maxweight:backward',
   'maxwidth', 'maxwidth:forward', 'maxwidth:backward',
@@ -151,6 +157,14 @@ function isFeatureNode(tags) {
   );
 }
 
+/** Giá trị thẻ oneway:<loại xe> → 1 (một chiều theo chiều vẽ), −1 (ngược chiều vẽ), 0 (hai chiều), null nếu không đọc được. */
+function onewayValue(v) {
+  if (v === 'yes') return 1;
+  if (v === '-1') return -1;
+  if (v === 'no') return 0;
+  return null;
+}
+
 function parseWay(el) {
   const tags = el.tags || {};
   if (!tags.highway || !Array.isArray(el.geometry) || el.geometry.length < 2) return null;
@@ -158,19 +172,31 @@ function parseWay(el) {
   const g = [];
   for (const pt of el.geometry) if (pt) g.push(pt.lon, pt.lat);
   if (g.length < 4) return null;
+  const o = tags.oneway === 'yes' || tags.junction === 'roundabout' ? 1 : tags.oneway === '-1' ? -1 : 0;
   const way = {
     id: el.id,
     n: tags.name || tags.ref || '',
     h: tags.highway,
     c: parseMaxspeed(tags['maxspeed:motorcar']) ?? general,
     m: parseMaxspeed(tags['maxspeed:motorcycle']) ?? general,
-    o: tags.oneway === 'yes' || tags.junction === 'roundabout' ? 1 : tags.oneway === '-1' ? -1 : 0,
+    o,
     g,
   };
+  // Phố một chiều với ô tô nhưng xe máy được đi hai chiều (oneway=yes + oneway:motorcycle=no, rất hay gặp ở
+  // nội thành Hà Nội và TP.HCM). Đọc oneway:motorcycle trước, rồi tới oneway:moped (xe gắn máy). Chỉ ghi om khi
+  // khác o, để bản ghi gọn.
+  const om = onewayValue(tags['oneway:motorcycle']) ?? onewayValue(tags['oneway:moped']);
+  if (om != null && om !== o) way.om = om;
   const t = pickTags(tags, keepWayTag, MAX_TAG_LEN);
   if (t) way.t = t;
   return way;
 }
+
+/**
+ * Chiều một chiều của đường với loại xe này ('car' | 'moto'): 1 chỉ được đi theo chiều vẽ, −1 chỉ được đi ngược
+ * chiều vẽ, 0 đi được hai chiều. Xe máy dùng om khi đường có thẻ riêng cho xe máy.
+ */
+export const onewayFor = (way, vehicle) => (vehicle === 'moto' && way.om != null ? way.om : way.o);
 
 /**
  * Quan hệ cấm rẽ: chỉ nhận loại có đúng một đường "from", một đường "to" và một NÚT "via" biết toạ độ.
@@ -711,10 +737,17 @@ export class RoadData {
    * Trả về { way, dist, seg, t, point, dir } hoặc null khi không có đoạn nào đủ gần:
    * seg = chỉ số điểm đầu của đoạn khớp, t = vị trí 0..1 trên đoạn, point = điểm chiếu lên đường,
    * dir = +1 đi xuôi chiều vẽ đường, −1 đi ngược chiều vẽ, 0 khi không di chuyển hoặc không có hướng.
+   * @param hintName  tên đường đang đi theo chỉ dẫn (được ưu tiên)
+   * @param opts      { vehicle: 'car'|'moto' (chiều một chiều theo loại xe, mặc định ô tô),
+   *                    prefer: tập id đường được ưu tiên (có .has), only: chỉ xét các id đường này (có .has),
+   *                    heading, within, among: khi xe đi quá chậm để tự lọc theo hướng, bỏ các đoạn của các đường
+   *                    among (có .has; mặc định mọi đường) lệch quá within độ so với hướng heading (theo chiều
+   *                    được đi). Chỉ để loại đường, không suy ra dir. }
    */
-  matchWay(fix, hintName = '') {
+  matchWay(fix, hintName = '', { vehicle = 'car', prefer = null, only = null, heading = null, within = 180, among = null } = {}) {
     const { coord } = fix;
     const moving = fix.heading != null && (fix.speed || 0) > 2.5;
+    const loose = !moving && Number.isFinite(heading);
     const maxDist = Math.max(30, Math.min(60, fix.accuracy || 0));
     const gx = Math.floor(coord[0] / GRID);
     const gy = Math.floor(coord[1] / GRID);
@@ -727,6 +760,7 @@ export class RoadData {
           if (!bucket) continue;
           for (let b = 0; b < bucket.length; b += 2) {
             const way = cell.ways[bucket[b]];
+            if (only && !only.has(way.id)) continue;
             const i = bucket[b + 1];
             const a = [way.g[i], way.g[i + 1]];
             const c = [way.g[i + 2], way.g[i + 3]];
@@ -736,14 +770,21 @@ export class RoadData {
             let dir = 0;
             if (moving) {
               const raw = Math.abs(angleDiff(bearing(a, c), fix.heading));
+              const o = onewayFor(way, vehicle);
               let diff = raw;
-              if (way.o === -1) diff = 180 - raw;
-              else if (way.o === 0) diff = Math.min(raw, 180 - raw);
+              if (o === -1) diff = 180 - raw;
+              else if (o === 0) diff = Math.min(raw, 180 - raw);
               if (diff > 50) continue; // đường cắt ngang hoặc ngược chiều
               score += diff * 0.6;
               dir = raw <= 90 ? 1 : -1;
+            } else if (loose && (!among || among.has(way.id))) {
+              const raw = Math.abs(angleDiff(bearing(a, c), heading));
+              const o = onewayFor(way, vehicle);
+              const diff = o === -1 ? 180 - raw : o === 0 ? Math.min(raw, 180 - raw) : raw;
+              if (diff > within) continue;
             }
             if (hintName && way.n === hintName) score -= 15;
+            if (prefer && prefer.has(way.id)) score -= PREFER_BONUS;
             if (!best || score < best.score) {
               best = { way, dist: pr.dist, score, seg: i / 2, t: pr.t, point: pr.point, dir };
             }

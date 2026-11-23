@@ -186,6 +186,7 @@ async function writeBle(ch, text) {
 /**
  * Transport BLE cho ObdClient. Kết nối lại bằng device.gatt.connect(), không cần mở lại hộp chọn
  * trong cùng phiên trang. Không bao giờ ghi descriptor: bật nhận dữ liệu bằng startNotifications().
+ * Tên chung (khi thiết bị không có tên) viết thường vì luôn đứng giữa câu: "Đang kết nối với bộ OBD Bluetooth…".
  */
 export function createBleTransport(device) {
   let handlers = null;
@@ -205,7 +206,7 @@ export function createBleTransport(device) {
   return {
     kind: 'ble',
     get name() {
-      return device?.name || 'Bộ OBD Bluetooth';
+      return device?.name || 'bộ OBD Bluetooth';
     },
     async connect(h) {
       handlers = h;
@@ -240,7 +241,9 @@ export function createBleTransport(device) {
       rx?.removeEventListener?.('characteristicvaluechanged', onValue);
       device.removeEventListener?.('gattserverdisconnected', onDisconnected);
       try {
-        if (device.gatt?.connected) device.gatt.disconnect();
+        // Gọi cả khi chưa nối xong: theo chuẩn Web Bluetooth, disconnect() huỷ lần gatt.connect() đang chờ
+        // (lần đó báo AbortError); khi đã ngắt rồi thì không làm gì.
+        device.gatt?.disconnect?.();
       } catch {
         /* bỏ qua */
       }
@@ -285,7 +288,10 @@ export async function reopenSerial(nav = globalThis.navigator) {
   return port ? createSerialTransport(port) : null;
 }
 
-/** Transport Web Serial. Mất kết nối được nhận ra qua lỗi của vòng đọc, không dựa vào sự kiện. */
+/**
+ * Transport Web Serial. Mất kết nối được nhận ra qua lỗi của vòng đọc, không dựa vào sự kiện.
+ * Tên viết thường vì luôn đứng giữa câu: "Đang kết nối với bộ OBD Bluetooth thường…".
+ */
 export function createSerialTransport(port) {
   let handlers = null;
   let reader = null;
@@ -314,7 +320,7 @@ export function createSerialTransport(port) {
 
   return {
     kind: 'serial',
-    name: 'Bộ OBD Bluetooth thường',
+    name: 'bộ OBD Bluetooth thường',
     async connect(h) {
       handlers = h;
       closing = false;
@@ -377,6 +383,38 @@ export function describeConnectError(err) {
   }
 }
 
+/**
+ * Câu trạng thái kết nối (phần "Kết nối với ô tô" trong cài đặt) cho trạng thái và info mà ObdClient.onState báo.
+ * @param name tên bộ đọc (ObdClient.name); tên chung ('Bộ OBD…') đứng giữa câu nên viết thường, tên riêng giữ nguyên
+ * @param adapter tên chip đọc được từ bộ đọc (snapshot.adapter), dùng khi info không có
+ */
+export function describeCarState(state, info, { name = null, adapter = null } = {}) {
+  const who = (name || 'bộ OBD').replace(/^Bộ OBD\b/, 'bộ OBD');
+  switch (state) {
+    case 'connecting':
+      return info?.attempt ? `Đang kết nối lại (lần ${info.attempt})…` : `Đang kết nối với ${who}…`;
+    case 'init':
+      return 'Đang khởi động bộ OBD…';
+    case 'searching':
+      return 'Đang dò giao thức của xe, có thể mất tới 20 giây…';
+    case 'ready':
+      return `Đã kết nối với xe qua ${info?.adapter || adapter || who}.`;
+    case 'nocar':
+      // Lỗi đường truyền (CAN ERROR, BUS ERROR…): có thể do chưa bật khoá điện, nhưng cũng gặp khi máy đang chạy,
+      // nên không chỉ bảo người dùng bật khoá điện. Ứng dụng tự gửi lại ATSP0 rồi 0100 định kỳ.
+      if (info?.reason === 'error') {
+        return 'Đã kết nối bộ OBD nhưng xe báo lỗi đường truyền, đang thử lại… Nếu chưa bật khoá điện, hãy bật khoá điện hoặc nổ máy.';
+      }
+      return 'Đã kết nối bộ OBD nhưng xe chưa trả lời. Hãy bật khoá điện hoặc nổ máy.';
+    case 'lost':
+      return `Mất kết nối với bộ OBD, thử lại sau ${Math.round((info?.delay || 0) / 1000)} giây…`;
+    case 'error':
+      return info?.message || 'Không kết nối được với bộ OBD.';
+    default:
+      return 'Chưa kết nối.';
+  }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Bộ điều khiển phiên OBD
 
@@ -426,6 +464,21 @@ const POLL_PLAN = [
 const MAX_NODATA = 3;
 const MAX_RESETS = 5;
 
+/** Trường thời điểm đọc của từng số liệu trong snapshot. */
+const TIME_KEY = Object.freeze({
+  speed: 'speedTime',
+  rpm: 'rpmTime',
+  coolant: 'coolantTime',
+  fuel: 'fuelTime',
+  voltage: 'voltageTime',
+});
+
+/**
+ * Số liệu không được đọc lại sau ba chu kỳ (ít nhất 5 giây) thì bị xoá khỏi snapshot, để màn hình và CarWatch
+ * không dùng số cũ khi một PID thôi trả lời hoặc trang vừa bị ẩn một lúc.
+ */
+const STALE_AFTER = new Map(POLL_PLAN.map((p) => [p.key, Math.max(3 * p.every, 5000)]));
+
 const MSG = {
   notElm: 'Thiết bị này không phải bộ đọc OBD (ELM327).',
   noAnswer: 'Bộ OBD không trả lời. Hãy rút bộ OBD ra, cắm lại rồi thử lại.',
@@ -436,7 +489,9 @@ const MSG = {
 const noop = () => {};
 
 function emptySnapshot() {
-  return { speed: null, rpm: null, coolant: null, fuel: null, voltage: null, time: null, speedTime: null, adapter: null };
+  const snap = { speed: null, rpm: null, coolant: null, fuel: null, voltage: null, time: null, adapter: null };
+  for (const k of Object.values(TIME_KEY)) snap[k] = null;
+  return snap;
 }
 
 /**
@@ -444,7 +499,10 @@ function emptySnapshot() {
  * Mỗi lúc chỉ có một lệnh đang chờ; lệnh kế tiếp chỉ gửi sau khi nhận dấu nhắc '>'.
  *
  * Trạng thái: idle | connecting | init | searching | ready | nocar | lost | error.
- * Dữ liệu: { speed (km/h), rpm, coolant (°C), fuel (%), voltage (V), time, speedTime, adapter }.
+ * Dữ liệu: { speed (km/h), rpm, coolant (°C), fuel (%), voltage (V), time, adapter } và thời điểm đọc của
+ * từng số liệu: speedTime, rpmTime, coolantTime, fuelTime, voltageTime (ms, theo now()). Rời trạng thái
+ * 'ready' thì mọi số liệu của xe bị xoá; số liệu quá cũ (xem STALE_AFTER) cũng bị xoá, nên null nghĩa là
+ * "không có số mới". Khi đường truyền báo lỗi và bộ đọc đang dò lại giao thức, tốc độ và vòng tua bị xoá ngay.
  *
  * @param transport { kind, name, connect({ onData, onClose }), write(text), disconnect() }
  * @param options   { timers: { setTimeout, clearTimeout }, now: () => ms, onState, onData }
@@ -471,6 +529,7 @@ export class ObdClient {
   #validated = false;
   #lastSend = -Infinity;
   #silent = 0;
+  #busRetried = false;
   #snap = emptySnapshot();
 
   constructor(transport, { timers, now, onState, onData } = {}) {
@@ -574,6 +633,7 @@ export class ObdClient {
   async #session(gen) {
     let tries = 0;
     while (this.#alive(gen)) {
+      let opened = false;
       try {
         this.#fault = null;
         this.#asm.reset();
@@ -586,13 +646,24 @@ export class ObdClient {
             if (gen === this.#gen) this.#failAll(new LinkLost());
           },
         });
-        if (!this.#alive(gen)) return;
+        opened = true;
+        if (!this.#alive(gen)) {
+          // stop() đến lúc đang mở kết nối: việc mở vừa xong thì đóng lại ngay, không để cổng nối tiếp bị khoá
+          // hay Bluetooth còn nối. Nếu đã có phiên mới (start() lại) thì transport là của phiên đó, không đóng.
+          if (!this.#running) await this.#safeDisconnect();
+          return;
+        }
         await this.#runLink(() => {
           this.#validated = true;
           tries = 0;
         });
       } catch (err) {
-        if (!this.#alive(gen)) return;
+        if (!this.#alive(gen)) {
+          // Bị dừng trong lúc đang mở và việc mở hỏng/bị huỷ: dọn phần có thể đã nối được. (Lỗi sau khi đã mở
+          // xong thì stop() đã tự ngắt kết nối.)
+          if (!opened && !this.#running) await this.#safeDisconnect();
+          return;
+        }
         if (err instanceof NotElm) return this.#giveUp(gen, MSG.notElm);
         if (!this.#validated) {
           return this.#giveUp(gen, err instanceof ObdError ? err.message : err instanceof LinkLost ? MSG.noAnswer : MSG.firstConnect);
@@ -696,10 +767,18 @@ export class ObdClient {
     for (const cmd of INIT_COMMANDS.slice(1)) this.#checkReset(await this.#command(cmd, TIMING.at));
   }
 
-  /** Gửi 0100 cho tới khi xe trả lời (bật khoá điện), đọc bảng PID hỗ trợ và điện áp. */
+  /**
+   * Gửi 0100 cho tới khi xe trả lời (bật khoá điện), đọc bảng PID hỗ trợ và điện áp.
+   * reason 'error' (lỗi đường truyền khi đang đọc): #busRecover đã gửi lại ATSP0 và 0100 ngay mà không được (hoặc
+   * được rồi nhưng lỗi lại ngay), nên ở đây chờ 8 giây rồi mới thử lại, mỗi lần đều gửi ATSP0 trước 0100.
+   */
   async #findCar(reason) {
     let first = true;
-    let resendProtocol = false;
+    // Lỗi đường truyền (CAN ERROR, BUS ERROR…): gửi lại ATSP0 rồi 0100, cho bộ đọc dò lại giao thức.
+    let resendProtocol = reason === 'error';
+    // Sau lỗi đường truyền, 0100 trả lời thôi chưa đủ: phải đọc được một PID số liệu thì mới coi là xe trả lời lại.
+    // Không thì khi 0100 chạy mà mọi PID khác báo lỗi, trạng thái cứ đổi 'ready' ↔ 'nocar' mãi.
+    let busFault = reason === 'error';
     // 'UNABLE TO CONNECT' cũng có thể do chip đã tự khởi động lại mà ứng dụng không nhận được "LV RESET":
     // khi đó việc dò CAN có thể bị chặn tới khi có AT FE. Gửi ATFE (vô hại) trước mỗi lần thử lại để không kẹt mãi.
     let forgetEvents = reason === 'unable';
@@ -720,19 +799,23 @@ export class ObdClient {
       if (first && !reason) this.#setState('searching');
       first = false;
       reason = null;
+      await this.#pace();
       const r = await this.#command('0100', TIMING.search);
       this.#checkReset(r);
       const masks = r.kind === 'data' ? pidBytesAll(r.lines, 0x00) : [];
       if (masks.length) {
         for (const m of masks) for (const p of parseSupported(m, 0x00)) this.#supported.add(p);
-        break;
+        if (!busFault || (await this.#probe())) break;
+        resendProtocol = true;
+      } else {
+        if (r.kind === 'error') resendProtocol = busFault = true;
+        if (r.kind === 'unable') forgetEvents = true;
       }
-      if (r.kind === 'error') resendProtocol = true;
-      if (r.kind === 'unable') forgetEvents = true;
-      if (this.#state !== 'nocar') this.#setState('nocar', { reason: r.kind });
+      if (this.#state !== 'nocar') this.#setState('nocar', { reason: masks.length ? 'error' : r.kind });
     }
     for (const base of [0x20, 0x40]) {
       if (!this.#supported.has(base)) break;
+      await this.#pace();
       const r = await this.#command(pidCommand(base), TIMING.pid);
       this.#checkReset(r);
       for (const m of pidBytesAll(r.lines, base)) for (const p of parseSupported(m, base)) this.#supported.add(p);
@@ -742,6 +825,51 @@ export class ObdClient {
     this.#atrv = v.kind !== 'unknown';
     const volts = parseVoltage(v.lines);
     if (volts != null) this.#store('voltage', volts, false);
+  }
+
+  /**
+   * Đọc thử lần lượt các PID số liệu trong lịch đọc mà xe báo là hỗ trợ (có xe báo hỗ trợ một PID mà PID đó luôn
+   * NO DATA), dừng ở PID đầu tiên có dữ liệu, hoặc ngay khi đường truyền vẫn báo lỗi.
+   * @returns true khi xe trả lời có dữ liệu, hoặc xe không hỗ trợ PID nào trong lịch đọc (không có gì để thử)
+   */
+  async #probe() {
+    const pids = POLL_PLAN.filter((x) => x.pid != null && this.#supported.has(x.pid)).map((x) => x.pid);
+    for (const pid of pids) {
+      await this.#pace();
+      const r = await this.#command(pidCommand(pid), TIMING.pid);
+      this.#checkReset(r);
+      if (r.kind === 'data' && decodePid(pid, pidBytes(r.lines, pid)) != null) return true;
+      if (r.kind === 'error' || r.kind === 'unable') return false;
+    }
+    return !pids.length;
+  }
+
+  /**
+   * Lỗi đường truyền 3 lần liên tiếp khi đang đọc. Theo khuyến nghị cho các lỗi này: gửi lại ATSP0 rồi 0100 ngay,
+   * vẫn ở 'ready', để một lúc nhiễu ngắn không làm mất số liệu và không báo "xe chưa trả lời". Nếu 0100 không trả
+   * lời, hoặc lỗi lại trước khi có số liệu mới từ xe, thì quay lại dò xe ('nocar').
+   */
+  async #busRecover() {
+    if (this.#busRetried) throw new CarGone('error');
+    this.#busRetried = true;
+    this.#silent = 0;
+    // Việc dò lại giao thức có thể mất tới 20 giây, trong lúc đó không có lần đọc nào: xoá ngay tốc độ và vòng tua
+    // (hai số đổi nhanh, bình thường chỉ giữ 5 giây) để màn hình không hiện số cũ trong lúc chờ.
+    this.#clearValues(['speed', 'rpm']);
+    this.#emitData();
+    this.#checkReset(await this.#command('ATSP0', TIMING.at));
+    await this.#pace(); // ATSP0 không lên bus của xe, 0100 thì có
+    const r = await this.#command('0100', TIMING.search);
+    this.#checkReset(r);
+    if (r.kind === 'unable') throw new CarGone('unable');
+    if (r.kind !== 'data' || !pidBytesAll(r.lines, 0x00).length) throw new CarGone('error');
+  }
+
+  /** Chờ cho đủ khoảng cách tối thiểu kể từ yêu cầu trước lên bus của xe (tối đa 6 yêu cầu mỗi giây). */
+  async #pace() {
+    const gap = this.#lastSend + TIMING.minGap - this.#now();
+    if (gap > 0) await this.#wait(gap);
+    this.#lastSend = this.#now();
   }
 
   #checkReset(r) {
@@ -766,13 +894,24 @@ export class ObdClient {
   }
 
   async #poll(onGood) {
+    try {
+      await this.#pollLoop(onGood);
+    } finally {
+      // Rời 'ready' (xe im, khởi tạo lại, mất kết nối, dừng): số liệu cũ không còn đúng với xe nữa.
+      this.#clearValues();
+    }
+  }
+
+  async #pollLoop(onGood) {
     const plan = this.#buildPlan();
     this.#silent = 0;
+    this.#busRetried = false;
     this.#setState('ready', { adapter: this.#snap.adapter, supported: [...this.#supported].sort((a, b) => a - b) });
     this.#emitData();
     for (;;) {
       if (this.#reinitPending) throw new Reinit(true);
       await this.#whilePaused();
+      if (this.#expire()) this.#emitData();
       const active = plan.filter((i) => !i.dropped);
       if (!active.length) {
         await this.#wait(1000);
@@ -791,6 +930,7 @@ export class ObdClient {
       this.#checkReset(r);
       if (r.kind === 'unable') throw new CarGone('unable');
       if (this.#handleItem(item, r)) onGood();
+      else if (r.kind === 'error' && this.#silent >= MAX_NODATA) await this.#busRecover();
     }
   }
 
@@ -817,6 +957,13 @@ export class ObdClient {
       if (item.ok && ++this.#silent >= MAX_NODATA) throw new CarGone('nodata');
       return false;
     }
+    if (r.kind === 'error') {
+      // CAN ERROR, BUS ERROR, <RX ERROR, FB ERROR, BUS INIT: …ERROR là lỗi bus hoặc sai tốc độ, không riêng PID
+      // nào. Đếm chung với NO DATA: 3 câu trả lời liên tiếp không có dữ liệu thì #pollLoop gọi #busRecover (gửi
+      // lại ATSP0 rồi 0100). Không bỏ PID vì lỗi này. (ERR94 đã được xử lý ở #checkReset: ATFE rồi khởi tạo lại.)
+      this.#silent++;
+      return false;
+    }
     if (r.kind === 'timeout' || r.kind === 'stopped') {
       item.next = Math.max(item.next, this.#now() + TIMING.cooldown);
       return false;
@@ -827,6 +974,7 @@ export class ObdClient {
     item.miss = 0;
     item.ok = true;
     this.#silent = 0;
+    this.#busRetried = false;
     this.#store(item.key, v);
     return true;
   }
@@ -834,12 +982,37 @@ export class ObdClient {
   #store(key, value, emit = true) {
     const t = this.#now();
     this.#snap[key] = value;
+    this.#snap[TIME_KEY[key]] = t;
     this.#snap.time = t;
-    if (key === 'speed') this.#snap.speedTime = t;
     if (emit) this.#emitData();
   }
 
+  /** Xoá số liệu của xe (mặc định là tất cả; giữ tên bộ đọc). */
+  #clearValues(keys = Object.keys(TIME_KEY)) {
+    for (const key of keys) {
+      this.#snap[key] = null;
+      this.#snap[TIME_KEY[key]] = null;
+    }
+  }
+
+  /** Xoá số liệu đã quá cũ. @returns true khi có số liệu bị xoá */
+  #expire() {
+    const t = this.#now();
+    let changed = false;
+    for (const [key, maxAge] of STALE_AFTER) {
+      const time = TIME_KEY[key];
+      const at = this.#snap[time];
+      if (this.#snap[key] != null && at != null && t - at > maxAge) {
+        this.#snap[key] = null;
+        this.#snap[time] = null;
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
   #emitData() {
+    this.#expire();
     const snap = this.snapshot;
     for (const fn of this.#dataFns) {
       try {
@@ -1004,7 +1177,64 @@ export const CAR_MESSAGES = {
   battery: 'Điện áp ắc quy thấp, hệ thống sạc có thể có vấn đề.',
 };
 
-/** Nhắc bằng lời khi nước làm mát quá nóng hoặc điện áp thấp lúc máy đang chạy; mỗi chuyến nhắc một lần. */
+const COOLANT_HOT = 110; // °C
+const COOLANT_FOR = 10000; // ms
+const VOLTAGE_LOW = 12; // V
+const VOLTAGE_FOR = 30000; // ms
+const ENGINE_RUNNING_RPM = 500;
+const MIN_SAMPLES = 2;
+// Hai lần đọc điện áp liền nhau cách nhau quá thời gian số điện áp được giữ trong snapshot (ATRV đọc mỗi 20 giây,
+// giữ 60 giây) thì không còn tính là liên tiếp, ví dụ khi giữa hai lần là một lúc xe im ('nocar') hay trang bị ẩn.
+const VOLTAGE_GAP = STALE_AFTER.get('voltage');
+
+const newRule = () => ({ since: null, at: null, last: null, count: 0, said: false });
+
+/**
+ * Một bước của một quy tắc nhắc, tính theo lần đọc chứ không theo số lần snapshot được gửi: snapshot gửi lại số
+ * cũ (cùng thời điểm đọc) không đếm thêm. Lần đọc "xấu" phải liên tiếp: một lần đọc tốt thì đếm lại từ đầu, và
+ * lần đọc cũ không được tính lại.
+ * @param bad true: lần đọc xấu; false: lần đọc tốt; null: chưa biết (ví dụ vòng tua tạm mất vì bộ đọc lỡ một câu
+ *   trả lời): giữ nguyên số lần đã đếm, nhưng lần đọc này không được tính, kể cả khi sau đó mới biết
+ * @param maxGap lần đọc này cách lần đọc trước (bất kể loại nào) quá khoảng này thì dãy bị đứt: đếm lại từ đầu
+ * @returns true khi đã có ít nhất MIN_SAMPLES lần đọc xấu liên tiếp, lần đầu và lần cuối cách nhau ít nhất span
+ */
+function stepRule(rule, bad, at, span, maxGap = Infinity) {
+  const prev = rule.last;
+  const fresh = at !== prev;
+  rule.last = at;
+  if (bad === false || (fresh && prev != null && at - prev > maxGap)) {
+    rule.since = null;
+    rule.count = 0;
+  }
+  if (bad && fresh) {
+    if (rule.since == null) rule.since = at;
+    rule.at = at;
+    rule.count++;
+  }
+  return Boolean(bad) && !rule.said && rule.count >= MIN_SAMPLES && rule.at - rule.since >= span;
+}
+
+/** Thời điểm đọc trong snapshot; snapshot không có thời điểm thì coi mỗi lần gọi là một lần đọc mới. */
+const sampleTime = (t, now) => (Number.isFinite(t) ? t : now);
+
+/**
+ * Điện áp thấp lúc máy đang chạy? false khi không có số điện áp, điện áp từ 12 V, hoặc vòng tua dưới 500 (máy
+ * không chạy); null khi điện áp thấp mà vòng tua tạm mất (số đã bị xoá vì cũ), tức chưa biết máy có chạy không.
+ */
+function lowWhileRunning(s) {
+  if (!Number.isFinite(s.voltage) || s.voltage >= VOLTAGE_LOW) return false;
+  if (!Number.isFinite(s.rpm)) return null;
+  return s.rpm >= ENGINE_RUNNING_RPM;
+}
+
+/**
+ * Nhắc bằng lời khi nước làm mát quá nóng hoặc điện áp thấp lúc máy đang chạy; mỗi chuyến nhắc một lần.
+ * Nước làm mát: ít nhất hai lần đọc liên tiếp từ 110 °C, cách nhau ít nhất 10 giây (PID 0105 được đọc mỗi
+ * 15 giây, nên trên thực tế là lúc có lần đọc nóng thứ hai). Điện áp: các lần đọc liên tiếp dưới 12 V trải dài
+ * ít nhất 30 giây (ATRV đọc mỗi 20 giây, nên thường là lần đọc thứ ba), mỗi lần đều có vòng tua từ 500 vòng/phút.
+ * Lần đọc điện áp thấp lúc vòng tua tạm mất (bộ đọc lỡ vài câu trả lời) không được tính nhưng cũng không làm đếm
+ * lại. Đếm lại khi có lần đọc từ 12 V, vòng tua dưới 500, mất số điện áp, hoặc hai lần đọc cách nhau quá 60 giây.
+ */
 export class CarWatch {
   constructor() {
     this.reset();
@@ -1012,28 +1242,25 @@ export class CarWatch {
 
   /** Gọi khi bắt đầu chuyến mới. */
   reset() {
-    this.hotSince = null;
-    this.hotSaid = false;
-    this.lowSince = null;
-    this.lowSaid = false;
+    this.hot = newRule();
+    this.low = newRule();
   }
 
-  /** @returns { say: string | null } */
+  /**
+   * @param snapshot snapshot của ObdClient (dùng coolantTime / voltageTime để nhận ra lần đọc mới)
+   * @returns { say: string | null }
+   */
   update(snapshot, now) {
     const s = snapshot || {};
-    const hot = Number.isFinite(s.coolant) && s.coolant >= 110;
-    if (!hot) this.hotSince = null;
-    else if (this.hotSince == null) this.hotSince = now;
-    const low = Number.isFinite(s.voltage) && s.voltage < 12 && Number.isFinite(s.rpm) && s.rpm >= 500;
-    if (!low) this.lowSince = null;
-    else if (this.lowSince == null) this.lowSince = now;
-
-    if (hot && !this.hotSaid && now - this.hotSince >= 10000) {
-      this.hotSaid = true;
+    const hot = Number.isFinite(s.coolant) && s.coolant >= COOLANT_HOT;
+    const hotDue = stepRule(this.hot, hot, sampleTime(s.coolantTime, now), COOLANT_FOR);
+    const lowDue = stepRule(this.low, lowWhileRunning(s), sampleTime(s.voltageTime, now), VOLTAGE_FOR, VOLTAGE_GAP);
+    if (hotDue) {
+      this.hot.said = true;
       return { say: CAR_MESSAGES.coolant };
     }
-    if (low && !this.lowSaid && now - this.lowSince >= 30000) {
-      this.lowSaid = true;
+    if (lowDue) {
+      this.low.said = true;
       return { say: CAR_MESSAGES.battery };
     }
     return { say: null };

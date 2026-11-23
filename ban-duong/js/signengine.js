@@ -6,7 +6,7 @@
 // 3. Quyết định khi nào đọc, gộp các mục gần nhau vào một câu, chọn mục hiện trên thanh cảnh báo.
 
 import { angleDiff, bearing, distance, nearestOnLine, pointAtDistance } from './geo.js';
-import { vertexKey } from './roaddata.js';
+import { onewayFor, vertexKey } from './roaddata.js';
 import { categoryEnabled, classifyNode, classifyWay, derived, parseDirection } from './signs.js';
 import { spokenDistance } from './tracker.js';
 
@@ -37,6 +37,22 @@ const MEMO_REFRESH = 60e3; // tính lại kết quả tra cứu phụ thuộc ô
 const JUNCTION_NEAR = 40; // mục cách nút giao không quá chừng này (m) được coi là thuộc nút giao đó
 const REVERSED = 120; // hướng đi tại mục lệch hơn chừng này (độ) so với lúc báo: đi theo chiều ngược lại
 const AGAINST_STUB = 1; // nhánh cấm đi ngược chiều: chỉ giữ chừng này (m) qua chỗ vào
+
+// Nhớ hành lang vừa dựng (không dẫn đường):
+const PREFER_KEEP = 10e3; // không dựng được hành lang lâu hơn chừng này (ms) thì thôi ưu tiên các đường cũ
+const SWITCH_FIXES = 2; // số lần định vị liên tiếp cần để chuyển sang một đường không nối với các đường cũ
+const SWITCH_NEAR = 50; // đường mới có đỉnh chung với một đường cũ trong khoảng này (m) quanh xe: chuyển ngay
+const LINK_HOPS = 6; // một con đường bị cắt thành nhiều đoạn ngắn: đi qua tối đa chừng này đoạn để nhận ra vẫn là nó
+const MOVING_SPEED = 2.5; // trên tốc độ này (m/s) hướng GPS đủ tin để biết chiều đi (như RoadData.matchWay)
+// Chiều đi đã nhớ mà không được xác nhận lại lâu hơn chừng này (ms) thì thôi dùng, nhưng chỉ khi xe đã dịch đi;
+// dừng yên một chỗ (kẹt xe, chờ đèn lâu) thì vẫn dùng.
+const DIR_KEEP = 300e3;
+// Từ tốc độ này (m/s) xe đang lăn bánh: hướng GPS và hướng dịch chuyển được dùng để kiểm tra chiều đi đã nhớ và
+// để loại đường lệch hướng. Chậm hơn là đang đứng: vị trí chỉ trôi theo sai số, không nói gì về chiều đi.
+const DIR_CHECK_SPEED = 1;
+const DIR_CHECK_MOVE = 10; // xe dịch ít nhất chừng này (m, và 1,5 lần sai số) thì so hướng dịch chuyển với chiều đi đã nhớ
+const DIR_AGREE = 60; // lệch không quá chừng này (độ): xe vẫn đi theo chiều đã nhớ, đường vẫn hợp hướng đi
+const DIR_FAR = LENGTH; // xe đã ra ngoài hành lang dựng lúc xác nhận chiều đi lần cuối (vị trí nhảy xa): không dùng nữa
 
 // Cong: lấy mẫu mỗi 10 m, tổng góc đổi hướng ≥ 55°, bán kính ≤ 120 m. Cửa sổ phải đủ dài để cung bán kính
 // 120 m quay đủ 55° (14 mẫu, cung đo được tối đa 130 m); cửa sổ ngắn hơn bỏ sót các cua rộng khi chạy nhanh.
@@ -73,6 +89,20 @@ const vertexCount = (way) => way.g.length >> 1;
 const vertexAt = (way, i) => [way.g[2 * i], way.g[2 * i + 1]];
 const lengthOf = (corr) => (corr.cum.length ? corr.cum[corr.cum.length - 1] : 0);
 const emptyCorridor = () => ({ coords: [], cum: [], pieces: [] });
+
+/** Đi trên đường theo chiều dir (+1/−1) là đi ngược chiều đường một chiều với loại xe này. */
+function isAgainst(way, dir, vehicle) {
+  const o = onewayFor(way, vehicle);
+  return o !== 0 && dir !== o;
+}
+
+/** Hướng (độ) của đoạn khớp m (kết quả RoadData.matchWay) khi đi theo chiều dir (+1/−1). */
+function segmentBearing(m, dir) {
+  const i = Math.min(m.seg, vertexCount(m.way) - 2);
+  const a = vertexAt(m.way, i);
+  const b = vertexAt(m.way, i + 1);
+  return dir > 0 ? bearing(a, b) : bearing(b, a);
+}
 
 /** Toạ độ phẳng (m) của p quanh gốc o: x hướng Đông, y hướng Bắc. */
 function toLocal(p, o) {
@@ -177,7 +207,7 @@ function extend(corr, p) {
  * Ở cuối một đường: chọn nhánh đi thẳng tiếp. Chỉ chọn khi nhánh đó lệch ≤ 35° và thẳng hơn hẳn
  * nhánh kế tiếp (≥ 10°); hai nhánh gần như nhau thì chỉ chọn khi đúng một nhánh cùng tên đường.
  */
-function continuation(roads, way, endIdx, dir, visited) {
+function continuation(roads, way, endIdx, dir, visited, vehicle) {
   const end = vertexAt(way, endIdx);
   const incoming = bearing(pointAlongWay(way, endIdx, -dir, 20), end);
   const cands = [];
@@ -193,7 +223,7 @@ function continuation(roads, way, endIdx, dir, visited) {
   cands.sort((a, b) => a.diff - b.diff);
   // Chỗ tách thành hai làn đường một chiều: nếu có nhánh đi đúng chiều gần thẳng như nhánh ngược chiều
   // thì người lái sẽ vào nhánh đúng chiều, không báo "cấm đi ngược chiều".
-  const against = (c) => c.way.o !== 0 && c.dir !== c.way.o;
+  const against = (c) => isAgainst(c.way, c.dir, vehicle);
   const legal = cands.filter((c) => !against(c));
   const pool =
     cands.length && against(cands[0]) && legal.length && legal[0].diff <= CONT_ANGLE && legal[0].diff - cands[0].diff <= DUAL_SPLIT
@@ -206,13 +236,210 @@ function continuation(roads, way, endIdx, dir, visited) {
   return named.length === 1 ? named[0] : null;
 }
 
+/**
+ * Trí nhớ của hành lang tự do giữa các lần định vị: các đường của hành lang vừa dựng và chiều đi trên từng
+ * đường. Dùng để (1) không nhảy sang đường song song, đường trên cao hay đường bên dưới chỉ vì một lần định vị
+ * lệch, (2) giữ chiều đi khi xe chạy chậm hoặc dừng (đèn đỏ), kể cả khi đã qua chỗ nối sang đoạn đường kế tiếp.
+ */
+class Track {
+  constructor() {
+    this.clear();
+  }
+
+  clear() {
+    this.dirs = new Map(); // id đường → chiều đi (+1/−1) trên hành lang vừa dựng
+    this.builtAt = -Infinity; // lần cuối dựng được hành lang (ms)
+    this.seenAt = -Infinity; // lần cuối chiều đi được xác nhận bằng chuyển động (ms)
+    this.seenCoord = null; // vị trí lúc đó
+    // { ids, coord, count }: một con đường không nối với hành lang cũ (các đoạn ids) đang thắng mấy lần liên tiếp
+    this.pending = null;
+  }
+
+  /** Các đường được ưu tiên khi khớp vị trí (Map có .has), hoặc null. */
+  preferred(time) {
+    const age = time - this.builtAt;
+    return this.dirs.size && age >= 0 && age <= PREFER_KEEP ? this.dirs : null;
+  }
+
+  /**
+   * Đã quyết định xe sang đường khác: thôi ưu tiên các đường cũ, để các lần định vị sau (nhất là khi hành lang
+   * trên đường mới chưa dựng được vì đi chậm) không bị kéo về đường cũ. Chiều đi đã nhớ vẫn giữ nhưng chỉ dùng
+   * được khi xe lại khớp gần nhất với một đường cũ.
+   */
+  leave() {
+    this.builtAt = -Infinity;
+    this.pending = null;
+  }
+
+  /** Ghi nhớ hành lang vừa dựng. moving: lần định vị này có hướng đáng tin (chiều đi vừa được xác nhận). */
+  remember(corr, fix, time, moving) {
+    const dirs = new Map();
+    for (const p of corr.pieces) {
+      // Nhánh cấm đi ngược chiều chỉ là chỗ để báo, xe không đi vào đó.
+      if (p.way && p.dir && !p.against && !dirs.has(p.way.id)) dirs.set(p.way.id, p.dir);
+    }
+    this.dirs = dirs;
+    this.builtAt = time;
+    if (moving) {
+      this.seenAt = time;
+      this.seenCoord = fix.coord;
+    }
+  }
+
+  /**
+   * Chiều đi đã nhớ trên đường vừa khớp m (xe đi chậm nên không đọc được hướng), hoặc 0. Không dùng khi vị trí
+   * đã nhảy xa chỗ xác nhận chiều đi lần cuối, khi xe đang lăn bánh mà hướng GPS hay hướng dịch chuyển lệch quá
+   * DIR_AGREE so với chiều đã nhớ (xe đã rẽ hoặc quay đầu), hay khi đã lâu không xác nhận được mà xe đã dịch đi.
+   * Lúc đứng yên, vị trí trôi theo sai số GPS không làm mất chiều đi.
+   */
+  dirFor(m, fix, time, roads, vehicle) {
+    const dir = this.dirs.get(m.way.id) || carriedDir(this.dirs, m, roads, vehicle);
+    if (!dir || !this.seenCoord) return 0;
+    const age = time - this.seenAt;
+    if (!(age >= 0)) return 0;
+    const away = distance(this.seenCoord, fix.coord);
+    if (away > DIR_FAR) return 0;
+    const brg = segmentBearing(m, dir);
+    const off = (h) => Math.abs(angleDiff(brg, h));
+    // Chỉ tin hướng dịch chuyển khi quãng dịch vượt hẳn sai số định vị.
+    const slack = Math.max(DIR_CHECK_MOVE, 1.5 * (fix.accuracy || 0));
+    const moved = away >= slack ? off(bearing(this.seenCoord, fix.coord)) : null;
+    let agreed = false;
+    if ((fix.speed || 0) >= DIR_CHECK_SPEED) {
+      if (Number.isFinite(fix.heading)) {
+        if (off(fix.heading) > DIR_AGREE) return 0;
+        agreed = true;
+      }
+      if (moved != null) {
+        if (moved > DIR_AGREE) return 0;
+        agreed = true;
+      }
+    } else if (moved != null && moved <= DIR_AGREE) {
+      agreed = true; // nhích dần lên phía trước dưới DIR_CHECK_SPEED (kẹt xe)
+    }
+    if (agreed) {
+      this.seenAt = time;
+      if (moved != null) this.seenCoord = fix.coord; // điểm mốc đi theo xe, để đường cong không bị coi là quay đầu
+    } else if (age > DIR_KEEP && moved != null) {
+      return 0;
+    }
+    return dir;
+  }
+}
+
+/**
+ * Chiều đi trên m.way khi đường đó là nhánh đi thẳng tiếp (như continuation chọn) ở cuối một đường có chiều đi đã
+ * nhớ trong dirs và xe đã qua chỗ nối, hoặc 0. Gặp khi xe đi chậm thẳng qua chỗ hành lang đã nhớ rẽ đi (bỏ lỡ chỗ
+ * rẽ của tuyến dẫn đường).
+ */
+function carriedDir(dirs, m, roads, vehicle) {
+  if (!dirs.size || !roads) return 0;
+  const n = vertexCount(m.way);
+  for (const along of [1, -1]) {
+    let prev = m.point;
+    let acc = 0;
+    for (let k = along > 0 ? m.seg + 1 : m.seg; k >= 0 && k < n; k += along) {
+      const v = vertexAt(m.way, k);
+      acc += distance(prev, v);
+      if (acc > SWITCH_NEAR) break;
+      prev = v;
+      for (const e of roads.waysAtVertex(v)) {
+        const d = dirs.get(e.way.id);
+        if (!d || e.way.id === m.way.id || e.i !== (d > 0 ? vertexCount(e.way) - 1 : 0)) continue;
+        const next = continuation(roads, e.way, e.i, d, new Set(), vehicle);
+        if (next && next.way.id === m.way.id && next.i === k && (next.dir > 0 ? m.seg >= k : m.seg < k)) return next.dir;
+      }
+    }
+  }
+  return 0;
+}
+
+/**
+ * Từ vị trí khớp m đi dọc mạng đường qua các đỉnh chung, không quá radius (m), tối đa hops lần sang đường khác và
+ * không đi xuyên qua các đường avoid: có gặp một đường trong ids không (hai đường nối liền nhau quanh xe).
+ */
+function linked(roads, m, ids, radius, hops = 1, avoid = null) {
+  const queue = [{ way: m.way, from: m.point, seg: m.seg, acc: 0, hop: 0 }];
+  const queued = new Set([m.way.id]);
+  for (let q = 0; q < queue.length; q++) {
+    const { way, from, seg, acc, hop } = queue[q];
+    const n = vertexCount(way);
+    for (const dir of [1, -1]) {
+      let prev = from;
+      let d = acc;
+      for (let k = dir > 0 ? seg + 1 : seg; k >= 0 && k < n; k += dir) {
+        const v = vertexAt(way, k);
+        d += distance(prev, v);
+        if (d > radius) break;
+        prev = v;
+        for (const e of roads.waysAtVertex(v)) {
+          const id = e.way.id;
+          if (id === way.id) continue;
+          if (ids.has(id)) return true;
+          if (hop + 1 < hops && !queued.has(id) && !(avoid && avoid.has(id))) {
+            queued.add(id);
+            queue.push({ way: e.way, from: v, seg: e.i, acc: d, hop: hop + 1 });
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Đoạn đường xe đang đi (không dẫn đường). Ưu tiên các đường của hành lang vừa dựng; chỉ chuyển sang một
+ * đường không nối với chúng khi cùng một con đường (các đoạn nối liền nhau) thắng SWITCH_FIXES lần liên tiếp,
+ * hoặc khi không còn đường cũ nào đủ gần và đúng hướng. Đang chạy mà sang đường nối với đường cũ thì chuyển ngay.
+ * Đứng yên thì không chuyển: vị trí trôi sang đường bên cạnh không có nghĩa là xe đã sang đó.
+ * Đi chậm (DIR_CHECK_SPEED…MOVING_SPEED) mà có hướng GPS thì khác: hướng chưa đủ tin để biết chiều đi trên đường
+ * mới, nhưng đủ để bỏ các đường cũ lệch hướng quá DIR_AGREE (xe đã rẽ, quay đầu). Lấy đường gần nhất, không cộng
+ * điểm cho đường cũ: sang nhầm đường mới ở tốc độ này chỉ làm hành lang trống (chưa biết chiều đi, thanh cảnh báo
+ * còn giữ vài giây), còn giữ nhầm đường cũ thì báo biển của đường xe không đi.
+ * Đã chuyển sang đường mới thì thôi ưu tiên các đường cũ (Track.leave).
+ */
+function startMatch(fix, roads, track, vehicle, time) {
+  if (!track) return roads.matchWay(fix, '', { vehicle });
+  const speed = fix.speed || 0;
+  const prefer = track.preferred(time);
+  if (prefer && Number.isFinite(fix.heading) && speed >= DIR_CHECK_SPEED && speed <= MOVING_SPEED) {
+    track.pending = null;
+    const m = roads.matchWay(fix, '', { vehicle, heading: fix.heading, within: DIR_AGREE, among: prefer });
+    if (m && !prefer.has(m.way.id)) track.leave();
+    return m;
+  }
+  const m = roads.matchWay(fix, '', { vehicle, prefer });
+  if (!m || !prefer || prefer.has(m.way.id)) {
+    track.pending = null;
+    return m;
+  }
+  const leave = (w) => {
+    track.leave();
+    return w;
+  };
+  const old = roads.matchWay(fix, '', { vehicle, only: prefer });
+  if (!old) return leave(m); // đã ra xa các đường cũ, hoặc không đường cũ nào đúng hướng
+  if (speed < DIR_CHECK_SPEED) {
+    track.pending = null;
+    return old;
+  }
+  if (m.dir !== 0 && linked(roads, m, prefer, SWITCH_NEAR)) return leave(m);
+  const p = track.pending;
+  const radius = p ? Math.max(SWITCH_NEAR, 1.5 * distance(p.coord, fix.coord)) : 0;
+  const same = Boolean(p) && (p.ids.has(m.way.id) || linked(roads, m, p.ids, radius, LINK_HOPS, prefer));
+  const count = same ? p.count + 1 : 1;
+  if (count >= SWITCH_FIXES) return leave(m);
+  track.pending = { ids: new Set(same ? [...p.ids, m.way.id] : [m.way.id]), coord: fix.coord, count };
+  return old;
+}
+
 /** Không dẫn đường: đi theo đường đang khớp tới hết đường, rồi đoán nhánh đi thẳng qua các nút giao. */
-function freeCorridor(fix, roads, hint) {
-  const m = roads.matchWay(fix);
+function freeCorridor(fix, roads, track, vehicle, time) {
+  const m = startMatch(fix, roads, track, vehicle, time);
   if (!m) return emptyCorridor();
   let dir = m.dir;
-  // Đi chậm hoặc dừng (đèn đỏ): giữ chiều đi đã biết trên cùng đường đó.
-  if (!dir && hint && hint.wayId === m.way.id) dir = hint.dir;
+  // Đi chậm hoặc dừng (đèn đỏ): giữ chiều đi đã biết trên đường đó (một trong các đường của hành lang trước).
+  if (!dir && track) dir = track.dirFor(m, fix, time, roads, vehicle);
   if (!dir) return emptyCorridor();
 
   const corr = { coords: [m.point], cum: [0], pieces: [], start: { wayId: m.way.id, dir } };
@@ -222,7 +449,7 @@ function freeCorridor(fix, roads, hint) {
   let assumed = false;
   for (;;) {
     visited.add(way.id);
-    const against = way.o !== 0 && dir !== way.o;
+    const against = isAgainst(way, dir, vehicle);
     const n = vertexCount(way);
     const s0 = lengthOf(corr);
     let open = true;
@@ -238,7 +465,7 @@ function freeCorridor(fix, roads, hint) {
     // Nhánh ngược chiều: không đoán tiếp.
     if (!open || against || corr.pieces.length >= MAX_PIECES) break;
     const endIdx = dir > 0 ? n - 1 : 0;
-    const next = continuation(roads, way, endIdx, dir, visited);
+    const next = continuation(roads, way, endIdx, dir, visited, vehicle);
     if (!next) {
       // Dừng ở nút giao chưa rõ hướng: giữ lại các đường gặp nhau ở đó (để báo vòng xuyến phía trước).
       corr.end = { coord: vertexAt(way, endIdx), ways: roads.waysAtVertex(vertexAt(way, endIdx)).map((e) => e.way) };
@@ -270,7 +497,7 @@ function boundary(corr, a, b, sa, sb) {
 }
 
 /** Đang dẫn đường: hành lang là đoạn tuyến phía trước; khớp từng mẫu 20 m với đoạn đường OSM. */
-function navCorridor(nav, roads) {
+function navCorridor(nav, roads, vehicle) {
   const { route, s } = nav;
   const rc = route.coords;
   const rcum = route.cum;
@@ -292,7 +519,7 @@ function navCorridor(nav, roads) {
   // Mẫu đặt theo bội số 20 m tính từ đầu tuyến để ranh giới ổn định giữa các lần định vị.
   const match = (a) => {
     const p = pointAtDistance(rc, rcum, a);
-    const m = roads.matchWay({ coord: p.point, heading: p.bearing, speed: 10, accuracy: 10 });
+    const m = roads.matchWay({ coord: p.point, heading: p.bearing, speed: 10, accuracy: 10 }, '', { vehicle });
     return { s: a - s, way: m ? m.way : null, dir: m ? m.dir : 0 };
   };
   const idOf = (sm) => (sm.way ? sm.way.id : null);
@@ -337,7 +564,7 @@ function navCorridor(nav, roads) {
       s0 = boundary(corr, cur.way, sm.way, samples[k - 1].s, sm.s);
       cur.s1 = s0;
     }
-    const against = Boolean(sm.way && sm.way.o !== 0 && sm.dir !== sm.way.o);
+    const against = Boolean(sm.way && isAgainst(sm.way, sm.dir, vehicle));
     pieces.push({ way: sm.way, dir: sm.dir, s0, s1: sm.s, assumed: false, against });
   }
   if (pieces.length) pieces[pieces.length - 1].s1 = lengthOf(corr);
@@ -349,11 +576,12 @@ function navCorridor(nav, roads) {
  * Hành lang ~320 m phía trước xe → { coords, cum, pieces }; cum tính từ xe (0 tại xe).
  * pieces: [{ way|null, dir (+1 xuôi chiều vẽ đường, −1 ngược), s0, s1, assumed, against }].
  * @param nav   { route, seg, s } khi đang dẫn đường và đang ở trên tuyến, ngược lại null
- * @param hint  { wayId, dir } chiều đi đã biết (để giữ hành lang khi xe đi chậm hoặc dừng)
+ * @param opts  { vehicle: 'car'|'moto', track: trí nhớ hành lang của SignEngine (không bắt buộc),
+ *                time: thời điểm định vị (ms) }
  */
-export function buildCorridor(fix, roads, nav = null, hint = null) {
-  if (nav && nav.route && Number.isFinite(nav.s)) return navCorridor(nav, roads);
-  return freeCorridor(fix, roads, hint);
+export function buildCorridor(fix, roads, nav = null, { vehicle = 'car', track = null, time = fix.time } = {}) {
+  if (nav && nav.route && Number.isFinite(nav.s)) return navCorridor(nav, roads, vehicle);
+  return freeCorridor(fix, roads, track, vehicle, Number.isFinite(time) ? time : Date.now());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -566,8 +794,17 @@ function guardsJunctionAhead(feat, piece, roads, ctx) {
   });
 }
 
-/** Biển đứng riêng không ghi hướng: nằm bên phải chiều đi, sát tim đường, hoặc đường một chiều. */
-const sideOk = (loc, piece) => loc.right || loc.d < 3 || Boolean(piece && piece.way && piece.way.o !== 0);
+/**
+ * Biển đứng riêng không ghi hướng: nằm sát tim đường, hoặc nằm bên phải chiều đi. Trên đường một chiều (với
+ * dòng xe chung, way.o) biển đặt bên nào cũng là biển của chiều chính: áp dụng cho xe đi theo chiều đó, còn xe
+ * máy được phép đi ngược chiều (oneway:motorcycle=no) thì không nhận, vì biển quay mặt về phía dòng xe kia.
+ */
+function sideOk(loc, piece) {
+  if (loc.d < 3) return true;
+  const way = piece && piece.way;
+  if (way && way.o !== 0) return piece.dir === way.o;
+  return loc.right;
+}
 
 /** Một biển của nút có áp dụng cho chiều đi trên hành lang không. */
 function applies(f, feat, loc, featWays, corr, roads, ctx) {
@@ -1029,7 +1266,7 @@ export class SignEngine {
     this.seen = new Map(); // khoá → { coord, time, reach, spoken, dup, brg, junction, anchors? }
     this.lastSpeak = -Infinity;
     this.lastFix = null; // thời điểm lần định vị trước (ms)
-    this.hint = null; // { wayId, dir }: chiều đi gần nhất, giữ hành lang khi xe dừng
+    this.track = new Track(); // các đường và chiều đi của hành lang vừa dựng
     this.last = null; // kết quả gần nhất, giữ tạm khi mất khớp đường
     this.memo = new Memo();
     this.memoTime = -Infinity;
@@ -1040,7 +1277,7 @@ export class SignEngine {
     this.seen.clear();
     this.lastSpeak = -Infinity;
     this.lastFix = null;
-    this.hint = null;
+    this.track.clear();
     this.last = null;
   }
 
@@ -1068,11 +1305,10 @@ export class SignEngine {
       this.memoTime = time;
     }
 
-    const corr = buildCorridor(fix, roads, nav, nav ? null : this.hint);
+    const corr = buildCorridor(fix, roads, nav, { vehicle, track: this.track, time });
     if (corr.coords.length < 2) return this.#hold(time, speed);
-    const first = corr.pieces.find((p) => p.way);
-    if (corr.start) this.hint = corr.start;
-    else if (first && first.s0 === 0) this.hint = { wayId: first.way.id, dir: first.dir };
+    // Hành lang theo tuyến cũng được nhớ: rời tuyến khi đang đi chậm thì vẫn biết chiều đi.
+    this.track.remember(corr, fix, time, fix.heading != null && speed > MOVING_SPEED);
 
     const ctx = {
       settings,
