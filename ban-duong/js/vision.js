@@ -482,9 +482,11 @@ export class Vision {
    * hints: khung dự đoán của các vệt đang theo dõi, được phân loại trước.
    * Mỗi lúc chỉ một khung: đang bận thì đóng bitmap và trả null. Kết quả { t, ms, lum, boxes } (xem VisionProto).
    * Gợi ý hỏng hay nằm ngoài khung không làm hỏng khung (xem clipHints); tham số khác sai → VisionError('args').
+   * evalCrops: true (chỉ khi người dùng bật camEval) thì kết quả có thêm crops: [{ i, blob (PNG), w, h }], ảnh cắt sát
+   * của từng khung đã phân loại boxes[i] (xem VisionProto.evalCropRect). Không bật thì kết quả không có trường này.
    * Bitmap luôn được đóng (ở worker, hoặc ở đây nếu không gửi đi được).
    */
-  process(frame, { passes = DEFAULT_PASSES, foe = null, hints = null } = {}) {
+  process(frame, { passes = DEFAULT_PASSES, foe = null, hints = null, evalCrops = false } = {}) {
     const wrapped = frame && typeof frame === 'object' && 'bitmap' in frame;
     const bitmap = wrapped ? frame.bitmap : frame;
     if (this._inflight) {
@@ -509,13 +511,14 @@ export class Vision {
       const kept = clipHints(hints, W, H);
       if (kept.length) msg.hints = kept;
     }
+    if (evalCrops === true) msg.evalCrops = true;
     const v = P.checkFrame(msg);
     if (!v.ok) {
       closeQuietly(bitmap);
       return Promise.reject(new VisionError('args', `bad frame: ${v.reason}`));
     }
     return new Promise((resolve, reject) => {
-      const job = { id: msg.id, resolve, reject, sent: this._now(), key: msg.passes.join('') };
+      const job = { id: msg.id, resolve, reject, sent: this._now(), key: msg.passes.join(''), evalCrops: msg.evalCrops === true };
       job.timer = setTimeout(() => this._stuck(job), this._frameTimeout);
       this._inflight = job;
       try {
@@ -658,6 +661,9 @@ export class Vision {
     // result
     const at = this._now();
     this._stats.add(m.ms.total, at - job.sent, at, job.key);
-    this._finish({ t: m.t, ms: m.ms, lum: m.lum, boxes: m.boxes });
+    const out = { t: m.t, ms: m.ms, lum: m.lum, boxes: m.boxes };
+    // Ảnh cắt chỉ đi tiếp khi chính khung này yêu cầu (camEval bật); không thì bỏ, không giữ lại.
+    if (job.evalCrops && Array.isArray(m.crops)) out.crops = m.crops;
+    this._finish(out);
   }
 }

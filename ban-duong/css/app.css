@@ -481,6 +481,7 @@ h2, h3, p { margin: 0; }
 }
 .switch:checked { background: var(--sign-green); }
 .switch:checked::after { transform: translateX(20px); }
+.switch:disabled { opacity: 0.45; cursor: default; }
 
 .trip-list { display: flex; flex-direction: column; }
 .trip { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
@@ -531,6 +532,7 @@ h2, h3, p { margin: 0; }
   left: 50%;
   bottom: calc(var(--sheet-h) + 16px);
   transform: translate(-50%, 12px);
+  width: max-content;
   max-width: min(92vw, 460px);
   padding: 10px 16px;
   border-radius: 14px;
@@ -555,6 +557,81 @@ h2, h3, p { margin: 0; }
 .dest-pin svg { filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4)); overflow: visible; }
 .dest-pin path { fill: var(--sign-red); stroke: #fff; stroke-width: 2; }
 .dest-pin circle { fill: #fff; }
+
+/* ---------- Camera nhận diện biển (thử nghiệm) ---------- */
+
+/* Nút camera nhỏ cạnh các nút bản đồ: xanh lục khi camera đang mở, xám khi tạm dừng, gạch chéo khi cần bật lại. */
+.fab.cam-chip.cam-on { background: var(--sign-green); color: #fff; }
+.fab.cam-chip.cam-paused { color: var(--ink-3); }
+.fab.cam-chip.cam-off { color: var(--ink-2); }
+
+/* Biển do camera ghi nhận trên thanh vàng, dải biển và hộp chi tiết. Biển chưa xác nhận: viền nét đứt và chú thích. */
+.alert.quiet { outline: 2.5px dashed rgba(0, 0, 0, 0.62); outline-offset: -6px; }
+.alert-cap { display: block; margin-top: 1px; font-size: 12.5px; font-weight: 600; line-height: 1.25; opacity: 0.78; }
+.alert-icon, .strip-art { position: relative; }
+.strip-art { display: block; }
+.cam-badge {
+  position: absolute;
+  right: -4px;
+  bottom: -3px;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #14212e;
+  color: #fff;
+  box-shadow: 0 0 0 2px #fff;
+  pointer-events: none;
+}
+.strip-item.quiet { outline: 2px dashed var(--ink-2); outline-offset: -3px; }
+.learned-cap { display: inline-block; align-self: flex-start; padding: 2px 10px; border-radius: 10px; border: 1.5px dashed var(--ink-2); color: var(--ink); font-weight: 600; }
+.limit.camera { grid-auto-flow: row; align-content: center; gap: 0; }
+.limit-src { font: 600 9px/1 var(--ui); letter-spacing: 0.01em; }
+
+/* Mục trong Cài đặt */
+.cam-count { color: var(--ink); font-weight: 600; font-size: 14px; }
+.cam-actions { margin: 4px 0; }
+.obd-status.warn { color: var(--sign-red); }
+:root[data-theme="dark"] .obd-status.warn { color: #ff8a8f; }
+.cam-intro .note { margin: 0; color: var(--ink); font-size: 14px; }
+.cam-intro .note b { font-weight: 700; }
+.cam-sub { margin: 8px 0 0; color: var(--ink-2); font-size: 13px; font-weight: 700; }
+
+/* "Kiểm tra camera": hình xem trước đúng tỉ lệ khung, đường chân trời kéo được. */
+.cam-preview { position: relative; width: 100%; aspect-ratio: 16 / 9; max-height: 52vh; margin: 0 auto; border-radius: 14px; overflow: hidden; background: #0b1016; }
+.cam-preview video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; }
+.cam-preview-msg { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; color: #fff; font-size: 14px; text-align: center; }
+.cam-aim { position: absolute; inset: 0; cursor: grab; touch-action: none; }
+.cam-aim:active { cursor: grabbing; }
+.cam-horizon { position: absolute; left: 0; right: 0; height: 0; border-top: 2px dashed var(--sign-yellow); box-shadow: 0 1px 0 rgba(0, 0, 0, 0.55); }
+.cam-foe { position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px; border: 3px solid var(--sign-yellow); border-radius: 50%; box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.5); }
+.cam-pick { display: flex; flex-direction: column; gap: 6px; font-weight: 500; }
+.cam-pick select { width: 100%; height: 44px; padding: 0 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+html.car-ui .cam-pick select { height: 56px; }
+.cam-stats .stat b { font-size: 24px; font-variant-numeric: tabular-nums; }
+.cam-extra .note { margin: 4px 0; }
+
+/* Danh sách "Biển camera ghi nhận" */
+.cam-review { gap: 0; }
+.lrow { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.lrow-main { display: flex; align-items: center; gap: 12px; }
+.lrow-art { flex: none; width: 44px; height: 44px; display: grid; place-items: center; }
+.lrow.quiet .lrow-art { opacity: 0.85; }
+.lrow-text { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.lrow-name { font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+.lrow-meta { color: var(--ink-2); font-size: 12.5px; overflow-wrap: anywhere; }
+.lrow-dist { flex: none; color: var(--ink-2); font: 600 18px/1 var(--num); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lstatus { padding: 1px 8px; border-radius: 8px; font-size: 12px; font-weight: 600; line-height: 1.5; }
+.lstatus.ok { background: var(--sign-green); color: #fff; }
+.lstatus.quiet { border: 1.5px dashed var(--ink-2); color: var(--ink); }
+.lrow-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+@media (min-width: 440px) { .lrow-actions { padding-left: 56px; } }
+.btn.small { min-height: 40px; padding: 0 11px; gap: 5px; border-radius: 20px; font-size: 13.5px; }
+
+/* Lớp biển camera ghi nhận đang hiện trên bản đồ */
+.layer-pill { align-self: flex-start; display: flex; align-items: center; border-radius: 24px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm); }
+.layer-pill-main { min-height: 44px; padding: 0 4px 0 14px; display: inline-flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; }
 
 /* Màn hình hẹp (360 px): thu gọn hàng nút ở bảng dưới để không tràn mép. */
 @media (max-width: 380px) {
@@ -633,6 +710,10 @@ html.car-ui .opt { min-height: 60px; }
 html.car-ui .opt select { height: 56px; }
 html.car-ui .chips,
 html.car-ui .row.actions { flex-wrap: wrap; }
+html.car-ui .btn.small { min-height: 56px; border-radius: 28px; padding: 0 16px; }
+html.car-ui .layer-pill-main { min-height: 56px; }
+html.car-ui .lrow-actions { gap: 8px; }
+html.car-ui .cam-badge { width: 22px; height: 22px; }
 
 @media (prefers-reduced-motion: reduce) {
   .speed.over, .alert { animation: none; }

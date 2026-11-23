@@ -29,6 +29,8 @@ import {
   Learner,
   LOST_MS,
   MIN_WINDOW_FRAMES,
+  NEAR_MISS_REASONS,
+  nearMiss,
   NOMINAL_W,
   NOMINAL_W_OCTAGON,
   OSM_DUP_RADIUS,
@@ -49,7 +51,7 @@ import {
   WAY_SLACK,
   WIN_NEAR,
 } from '../js/signlearn.js';
-import { focalPx } from '../js/signtrack.js';
+import { acceptTrack, focalPx } from '../js/signtrack.js';
 
 // Cờ learn lấy từ danh sách học cố định (như models/labels.json chưa huấn luyện), không đọc tệp đã cài: một lần
 // huấn luyện đầy đủ có thể gỡ nhãn khỏi danh sách học (BD_PRUNE) mà phép thử logic học không được phụ thuộc vào đó.
@@ -148,11 +150,13 @@ const NOON_HANOI = Date.UTC(2026, 10, 23, 5, 0); // 12:00 giờ Việt Nam
  * Một lượt chạy: GPS 1 Hz (nhiễu σ 4 m, nhận sau 200 ms), camera 5 khung/giây (lệch nhịp ±40 ms), qua SignEngine thật.
  * stop: { x, s } dừng s giây ở x. slow: { x0, x1, v } đi chậm v (m/s) từ x0 tới x1. accuracy(x), mapCorridor(corr, x):
  * thay đổi đầu vào để thử từng điều kiện. cameraOn(x, speed): khung ở vị trí x có được xử lý không (camera tạm dừng).
+ * evalCrops: kết quả mang crops (như Vision.process(…, { evalCrops: true })), mỗi khung đã phân loại một "ảnh" giả
+ * { label, w, n } ghi vào sent; onEvalCrop: hàm cho Learner.
  */
 function drive({
   seed, kmh = 50, day = 0, store, world = WORLD, signs = SIGNS, east = true, camera = true, start = 100, end = 1100, sigma = 4,
   wallStart = NOON_HANOI, p = 0.92, lum = { mean: 120, std: 40 }, stop = null, slow = null, accuracy = () => 5, mapCorridor = null,
-  simulated = false, cameraOn = null,
+  simulated = false, cameraOn = null, evalCrops = false, onEvalCrop = null, sent = [],
 }) {
   const r = rng(seed);
   const g = gaussOf(r);
@@ -160,7 +164,7 @@ function drive({
   const wall0 = wallStart + day * 864e5;
   const MONO0 = 5e6 + seed * 1000;
   let simT = 0;
-  const learner = new Learner({ store, roads: world.roads, labels, now: () => wall0 + simT * 1000, mono: () => MONO0 + simT * 1000 });
+  const learner = new Learner({ store, roads: world.roads, labels, now: () => wall0 + simT * 1000, mono: () => MONO0 + simT * 1000, onEvalCrop });
   const engine = new SignEngine();
   const passed = [];
   learner.onPassed((e) => passed.push(e));
@@ -210,7 +214,18 @@ function drive({
       const { d, speed } = pos(ev.frame);
       const x = xOf(d);
       if (cameraOn && !cameraOn(x, speed)) continue;
-      const res = learner.onVision({ t: MONO0 + ev.frame * 1000, ms: { total: 30 }, lum, boxes: boxesAt(x, east, signs, g, r, p) });
+      const boxes = boxesAt(x, east, signs, g, r, p);
+      const result = { t: MONO0 + ev.frame * 1000, ms: { total: 30 }, lum, boxes };
+      if (evalCrops) {
+        result.crops = [];
+        boxes.forEach((b, i) => {
+          if (!b.cls) return;
+          const blob = { label: b.cls[0][0], w: b.w, n: sent.length };
+          sent.push(blob);
+          result.crops.push({ i, blob, w: 40, h: 40 });
+        });
+      }
+      const res = learner.onVision(result);
       results.push(...res.results);
     }
   }
@@ -908,4 +923,147 @@ test('xe nhanh (90–120 km/h): biển đã bị dỡ vẫn được xét dù ha
       assert.equal(outcomes(r, id), 'miss:null', `${kmh} km/h (seed ${seed})`);
     }
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Ảnh biển để kiểm tra độ chính xác (camEval, PLAN §6.5): onEvalCrop và "suýt được nhận"
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Một lượt bám dựng tay của một biển 0,70 m lệch phải lat m (mặc định 5), xe 50 km/h, 5 khung/giây từ 45 m: qua mọi bước lọc khi p
+ * cao. cls(k, p) đổi phân loại của khung k; pt(k, point) đổi cả điểm.
+ */
+function synthTrack({ label = 'P.127[50]', family = 'ring', p = 0.95, n = 12, lat = 5, cls = null, pt = null } = {}) {
+  const v = 50 / 3.6;
+  const points = [];
+  for (let k = 0; k < n; k++) {
+    const t = 1e5 + k * 200;
+    const D = (v * k * 200) / 1000;
+    const Z = 45 - D;
+    const w = (F * 0.7) / Z;
+    const cx = FOE.x + (F * lat) / Z;
+    const cy = FOE.y - (F * 1.2) / Z;
+    const c = cls ? cls(k, p) : [[label, p], ['other-sign', (1 - p) * 0.6], ['background', (1 - p) * 0.4]];
+    const point = { t, D, x: cx - w / 2, y: cy - w / 2, w, h: w, s: 0.8, pass: 'A', cls: c, lum: { mean: 120, std: 40 },
+      pose: { D, speed: v, accuracy: 5, simulated: false, corridor: true } };
+    points.push(pt ? pt(k, point) : point);
+  }
+  return { id: 1, family, points, plate: null, reason: 'lost' };
+}
+const CTX = { labels, focal: F, foe: FOE };
+
+test('suýt được nhận (near-miss): chỉ trượt bước đồng thuận hay độ tin, mọi bước khác đều qua', () => {
+  assert.deepEqual(NEAR_MISS_REASONS, ['agreement', 'confidence']);
+  // Đối chứng: lượt bám tốt được nhận, nên không phải "suýt".
+  assert.equal(acceptTrack(synthTrack(), CTX).ok, true);
+  assert.equal(nearMiss(synthTrack(), CTX), false);
+  // Độ tin thấp (p 0,7 < 0,85) mà hình học, định vị, độ sáng đều tốt.
+  const low = synthTrack({ p: 0.7 });
+  assert.equal(acceptTrack(low, CTX).reason, 'confidence');
+  assert.equal(nearMiss(low, CTX), true);
+  // Đồng thuận thấp: 7/12 khung một nhãn, 5/12 nhãn khác.
+  const split = synthTrack({ cls: (k, p) => [[k % 12 < 7 ? 'P.127[50]' : 'P.127[60]', p], ['other-sign', 0.02]] });
+  assert.equal(acceptTrack(split, CTX).reason, 'agreement');
+  assert.equal(nearMiss(split, CTX), true);
+  // Truyền sẵn kết quả acceptTrack cũng được (Learner không tính lại).
+  assert.equal(nearMiss(low, CTX, acceptTrack(low, CTX)), true);
+  // Trượt thêm bước khác thì không phải "suýt": độ sáng (bước 11), định vị (10), lệch ngang (9), độ dài (5), số khung đã
+  // phân loại (1), nhãn không được học (4).
+  const darkFrame = synthTrack({ p: 0.7, pt: (k, q) => (k === 5 ? { ...q, lum: { mean: 120, std: 3 } } : q) });
+  assert.equal(acceptTrack(darkFrame, CTX).reason, 'confidence');
+  assert.equal(nearMiss(darkFrame, CTX), false);
+  const sim = synthTrack({ p: 0.7, pt: (k, q) => ({ ...q, pose: { ...q.pose, simulated: true } }) });
+  assert.equal(nearMiss(sim, CTX), false);
+  const far = synthTrack({ p: 0.7, lat: 18 });
+  assert.equal(acceptTrack({ ...far, points: far.points.map((q) => ({ ...q, cls: [['P.127[50]', 0.99]] })) }, CTX).reason, 'lateral');
+  assert.equal(nearMiss(far, CTX), false);
+  const short = synthTrack({ p: 0.7, n: 4 });
+  assert.equal(nearMiss(short, CTX), false);
+  const few = synthTrack({ p: 0.7, cls: (k, p) => (k < 3 ? [['P.127[50]', p]] : null) });
+  assert.equal(acceptTrack(few, CTX).reason, 'cls-frames');
+  assert.equal(nearMiss(few, CTX), false);
+  const notLearned = labels.labels.find((l) => l.learn === false && l.family === 'ring');
+  assert.ok(notLearned, 'có nhãn hình tròn không được học');
+  const nl = synthTrack({ label: notLearned.label, p: 0.7 });
+  assert.equal(acceptTrack(nl, CTX).reason, 'confidence');
+  assert.equal(nearMiss(nl, CTX), false);
+  assert.equal(nearMiss({ id: 2, points: [] }, CTX), false);
+});
+
+test('onEvalCrop: lượt bám được nhận gửi ảnh lớn nhất có nhãn đứng đầu đúng nhãn; việc học không đổi; không có hàm thì không giữ gì', async () => {
+  const got = [];
+  const sent = [];
+  const storeA = newStore();
+  const a = drive({ seed: 10, store: storeA, evalCrops: true, sent, onEvalCrop: (c) => got.push(c) });
+  assert.ok(sent.length > 0);
+  const accepted = got.filter((c) => c.outcome === 'accepted');
+  assert.deepEqual(accepted.map((c) => c.label).sort(), ['P.127[50]', 'R.122']);
+  for (const c of accepted) {
+    assert.equal(c.reason, 'new');
+    assert.deepEqual(Object.keys(c).sort(), ['blob', 'label', 'night', 'outcome', 'p', 'pred', 'reason', 'w']);
+    assert.equal(c.blob.label, c.label, 'ảnh có nhãn đứng đầu đúng nhãn của lần thấy');
+    assert.equal(c.blob.w, c.w);
+    const maxW = Math.max(...sent.filter((s) => s.label === c.label).map((s) => s.w));
+    assert.equal(c.w, maxW, 'ảnh của khung lớn nhất');
+    assert.equal(c.p, 0.92);
+    assert.equal(c.pred[0][0], c.label);
+    assert.equal(c.night, false, 'buổi trưa');
+  }
+  assert.equal(a.learner.evalBest.size, 0, 'lượt bám đã kết thúc thì không giữ ảnh');
+  // Cùng lượt chạy không có hàm (dù kết quả vẫn mang crops): kho học y hệt, bộ học không giữ ảnh nào.
+  const storeB = newStore();
+  const b = drive({ seed: 10, store: storeB, evalCrops: true });
+  const strip = (st) => st.list().map(({ id, distance: dd, ...r }) => (void id, void dd, r));
+  assert.deepEqual(strip(storeB), strip(storeA));
+  assert.equal(b.learner.evalBest.size, 0);
+  // Hàm có, nhưng Vision không gửi crops (camEval tắt): không gọi.
+  const none = [];
+  drive({ seed: 10, store: newStore(), onEvalCrop: (c) => none.push(c) });
+  assert.equal(none.length, 0);
+  // Hàm ném lỗi hay trả promise bị từ chối: việc học vẫn y hệt.
+  const storeC = newStore();
+  drive({ seed: 10, store: storeC, evalCrops: true, onEvalCrop: () => { throw new Error('x'); } });
+  const storeD = newStore();
+  drive({ seed: 10, store: storeD, evalCrops: true, onEvalCrop: () => Promise.reject(new Error('y')) });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(strip(storeC), strip(storeA));
+  assert.deepEqual(strip(storeD), strip(storeA));
+});
+
+test('onEvalCrop: lượt bám chỉ trượt độ tin → "near-miss" (không học gì); trượt thêm độ sáng → không gọi', () => {
+  const got = [];
+  const store = newStore();
+  drive({ seed: 11, store, p: 0.7, evalCrops: true, onEvalCrop: (c) => got.push(c) });
+  assert.equal(store.size, 0, 'không học biển nào');
+  assert.ok(got.length >= 2, JSON.stringify(got.map((c) => c.outcome)));
+  assert.ok(got.every((c) => c.outcome === 'near-miss' && c.reason === 'confidence'));
+  assert.deepEqual([...new Set(got.map((c) => c.label))].sort(), ['P.127[50]', 'R.122']);
+  assert.ok(got.every((c) => c.p === 0.7 && c.night === false && c.blob.label === c.label));
+  const dark = [];
+  drive({ seed: 11, store: newStore(), p: 0.7, lum: { mean: 120, std: 3 }, evalCrops: true, onEvalCrop: (c) => dark.push(c) });
+  assert.equal(dark.length, 0);
+});
+
+test('setEvalCrop: bật/tắt lúc chạy; tắt thì quên ngay các ảnh đang giữ; reset() cũng quên', () => {
+  const { learner, step } = bareLearner();
+  const got = [];
+  learner.setEvalCrop((c) => got.push(c));
+  const box = { x: 900, y: 400, w: 30, h: 30, family: 'ring', s: 0.8, pass: 'A', cls: [['P.127[50]', 0.9]] };
+  const frameAt = (t) => ({ t, ms: { total: 30 }, lum: { mean: 120, std: 40 }, boxes: [{ ...box }], crops: [{ i: 0, blob: { t }, w: 39, h: 39 }] });
+  learner.onVision(frameAt(learner.mono()));
+  assert.equal(learner.evalBest.size, 1, 'giữ ảnh của lượt bám đang mở');
+  learner.setEvalCrop(null);
+  assert.equal(learner.evalBest.size, 0);
+  step(200);
+  learner.onVision(frameAt(learner.mono()));
+  assert.equal(learner.evalBest.size, 0, 'tắt thì không giữ');
+  learner.setEvalCrop((c) => got.push(c));
+  step(200);
+  learner.onVision(frameAt(learner.mono()));
+  assert.equal(learner.evalBest.size, 1);
+  learner.reset();
+  assert.equal(learner.evalBest.size, 0);
+  learner.setEvalCrop('không phải hàm');
+  assert.equal(learner.onEvalCrop, null);
+  assert.equal(got.length, 0, 'không có lượt bám nào đủ điều kiện');
 });

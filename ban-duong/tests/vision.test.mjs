@@ -1035,3 +1035,26 @@ test('VisionError mang mã lỗi', () => {
   assert.equal(e.name, 'VisionError');
   assert.match(e.message, /integrity: models\/x/);
 });
+
+test('process: evalCrops chỉ khi được yêu cầu; ảnh cắt của worker đi kèm kết quả, không yêu cầu thì bị bỏ', async () => {
+  const png = () => new Blob([Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10, 0])], { type: 'image/png' });
+  // Worker giả luôn gửi crops (cả khi không được yêu cầu) để thử rằng trang không chuyển tiếp chúng.
+  const { v, w } = await loaded({ frame(m) { this.reply(resultFor(m, { crops: [{ i: 0, blob: png(), w: 39, h: 39 }] })); } });
+  const r1 = await v.process(bitmap());
+  assert.equal(w.sent[1].msg.evalCrops, undefined, 'mặc định không gửi cờ');
+  assert.deepEqual(Object.keys(r1).sort(), ['boxes', 'lum', 'ms', 't'], 'kết quả như cũ');
+  const r2 = await v.process(bitmap(), { evalCrops: true });
+  assert.equal(w.sent[2].msg.evalCrops, true);
+  assert.equal(P.checkFrame(w.sent[2].msg).ok, true);
+  assert.equal(r2.crops.length, 1);
+  assert.equal(r2.crops[0].i, 0);
+  assert.equal(r2.crops[0].blob.type, 'image/png');
+  const r3 = await v.process(bitmap(), { evalCrops: 'yes' });
+  assert.equal(w.sent[3].msg.evalCrops, undefined, 'chỉ đúng true mới bật');
+  assert.equal(r3.crops, undefined);
+});
+
+test('process: ảnh cắt sai dạng từ worker → worker hỏng (như mọi phản hồi sai)', async () => {
+  const { v } = await loaded({ frame(m) { this.reply(resultFor(m, { crops: [{ i: 0, blob: 'x', w: 39, h: 39 }] })); } });
+  await assert.rejects(v.process(bitmap(), { evalCrops: true }), { code: 'worker' });
+});

@@ -18,6 +18,7 @@ Thư mục này là một ứng dụng tĩnh độc lập: không cần build, k
 - **Điểm tự đánh dấu**: camera phạt nguội, cổng trường học, điểm nguy hiểm, công trường, ngập nước, kẹt xe, tai nạn; xuất và nhập tệp để chia sẻ với người khác.
 - **Chế độ lái tự do**: không cần đặt điểm đến, vẫn theo dõi tốc độ và cảnh báo; tự bật khi phát hiện đang di chuyển.
 - **Chạy thử**: mô phỏng chuyến đi dọc tuyến đã chọn để xem trước chỉ dẫn và cảnh báo.
+- **Camera nhận diện biển (thử nghiệm, tắt sẵn)**: điện thoại kẹp trên xe ghi nhận biển báo khi đi qua và báo trước ở những lần đi sau. Xem [cách hoạt động và giới hạn](#camera-nhận-diện-biển-thử-nghiệm).
 - **Khác**: giao diện sáng/tối (tự chuyển từ 18 giờ đến 6 giờ), giữ màn hình sáng khi lái, nhật ký chuyến đi, mở lại được khi mất mạng.
 
 ## Chạy thử trên máy tính
@@ -27,7 +28,7 @@ Cần Node.js 22 trở lên.
 ```bash
 cd ban-duong
 npm start          # mở http://localhost:5173
-npm test           # 250 bài kiểm thử logic (không cần mạng)
+npm test           # 625 bài kiểm thử logic (không cần mạng)
 ```
 
 Trên máy tính không có GPS, ứng dụng lấy tâm bản đồ làm điểm xuất phát; dùng nút **Chạy thử** để xem dẫn đường hoạt động.
@@ -112,10 +113,35 @@ Không dùng được trên iPhone, iPad (Safari, Chrome và các trình duyệt
 
 Khi xe đang ở nguồn FM/radio hoặc USB thì giọng đọc của điện thoại không phát qua loa xe. Chrome trên Android không giành quyền phát âm thanh khi đọc, nên nhạc đang mở có thể đè lên giọng đọc. Nếu chạy ứng dụng ngay trên màn hình Android của xe thì giọng đọc thường phát ra loa xe như các âm thanh khác của màn hình.
 
-## Vì sao không có Android Auto, CarPlay và nhận diện biển bằng camera
+## Vì sao không có Android Auto, CarPlay
 
-- **Android Auto, CarPlay** chỉ hiển thị ứng dụng gốc (native) thuộc những loại được cho phép, và phải qua kiểm duyệt của Google hoặc Apple (CarPlay còn cần Apple cấp quyền riêng cho ứng dụng dẫn đường). Một ứng dụng web không đưa lên được hai nền tảng này. Cách thay thế: chạy trên màn hình Android của xe như trên, hoặc kẹp điện thoại.
-- **Nhận diện biển bằng camera** không được làm vì không đáp ứng được yêu cầu báo trước 100–200 m: biển tròn cỡ thường khoảng 70 cm, ở 150 m chỉ còn khoảng 7–15 điểm ảnh trên khung hình camera điện thoại (ước tính với góc nhìn khoảng 70°), quá nhỏ để đọc chắc chắn, nhất là khi xe rung, ngược nắng hoặc ban đêm; camera chỉ đọc được khi đã khá gần. Chạy nhận diện liên tục còn làm máy nóng và tốn pin; điện thoại kẹp trên kính dưới nắng dễ quá nhiệt và bị hạ hiệu năng.
+**Android Auto, CarPlay** chỉ hiển thị ứng dụng gốc (native) thuộc những loại được cho phép, và phải qua kiểm duyệt của Google hoặc Apple (CarPlay còn cần Apple cấp quyền riêng cho ứng dụng dẫn đường). Một ứng dụng web không đưa lên được hai nền tảng này. Cách thay thế: chạy trên màn hình Android của xe như trên, hoặc kẹp điện thoại.
+
+## Camera nhận diện biển (thử nghiệm)
+
+Tính năng này **tắt sẵn** và đang thử nghiệm. Bật trong **Cài đặt → Camera nhận diện biển (thử nghiệm)**, chỉ bật được khi xe đã đỗ.
+
+- **Báo lúc nào**: không bao giờ ở lần đi đầu tiên. Camera ghi nhận biển khi xe đi qua; biển được đọc thành tiếng (khoảng 100–200 m trước, như biển lấy từ bản đồ, kèm lời “camera ghi nhận”) ở những lần đi sau, khi đã được thấy vào **2 ngày khác nhau**. Biển mới thấy một lần chỉ hiện trên thanh vàng và dải biển với viền nét đứt và dòng “Camera thấy 1 lần”, không đọc. Biển có trên bản đồ OpenStreetMap thì dùng dữ liệu bản đồ. Biển tốc độ do camera ghi nhận chỉ có thể **hạ** giới hạn trên đồng hồ tốc độ (dòng chữ “Camera” trên biển giới hạn), không bao giờ nâng lên; có công tắc để tắt.
+- **Vì sao không báo được ngay lần đầu**: biển tròn cỡ thường khoảng 70 cm, ở 150 m chỉ còn vài điểm ảnh trên khung hình camera điện thoại, quá nhỏ để đọc chắc chắn. Theo tính toán (chưa đo trên đường), camera đọc được biển cỡ thường từ khoảng **45 m** khi quay 1920×1080 và khoảng **30 m** khi quay 1280×720 trở lại gần; xoay dọc hoặc độ phân giải thấp hơn thì ngắn hơn. Mục **Kiểm tra camera** hiện con số ước tính cho camera của bạn.
+- **Độ chính xác trên đường thật chưa được đo.** Mô hình nhận diện được huấn luyện từ hình biển tự vẽ của ứng dụng ghép lên ảnh đường phố nước ngoài, chưa từng thấy ảnh biển thật ở Việt Nam. Hãy chờ đợi bỏ sót khi trời tối, mưa, ngược nắng, bị xe tải hay xe máy che, biển mờ hoặc cong, và đôi khi nhận nhầm; quy tắc 2 ngày, biển chưa xác nhận không được đọc và nút **Sai** để giảm nhầm lẫn. Kết quả kiểm tra trên dữ liệu tổng hợp nằm trong [thẻ mô hình](models/MODEL_CARD.md) (có sau lần huấn luyện đầy đủ).
+- **Chỉ 47 loại biển** được học: tốc độ tối đa cho phép 20–120 km/h, hết tốc độ tối đa, hết tất cả các lệnh cấm; các biển cấm thường gặp (đường cấm, cấm đi ngược chiều, cấm ô tô, xe máy, xe tải, cấm rẽ, cấm quay đầu, cấm vượt, cấm dừng và đỗ xe, hạn chế trọng tải và chiều cao); dừng lại; các biển giao nhau (đường giao nhau, giao nhau với đường ưu tiên hoặc không ưu tiên, có tín hiệu đèn, vòng xuyến); các biển nguy hiểm thường gặp (chỗ ngoặt, giao nhau với đường sắt, gồ giảm tốc, người đi bộ cắt ngang, trẻ em, công trường, nguy hiểm khác) và hướng phải đi vòng chướng ngại vật. Không đọc biển có chữ, biển phụ, mũi tên chỉ hướng, biển chỉ dẫn, và trị số của biển hạn chế tải trọng, chiều cao, chiều ngang. Biển tốc độ có biển phụ không bao giờ dùng cho đồng hồ tốc độ.
+- **Thiết bị**:
+
+  | Cách lắp | Dùng được không |
+  | --- | --- |
+  | Điện thoại Android kẹp cố định trên kính hoặc taplô, **camera sau**, Chrome hoặc Samsung Internet, địa chỉ HTTPS, ứng dụng mở trên màn hình, màn hình sáng | Có |
+  | Camera USB cắm vào điện thoại hoặc màn hình xe; camera của màn hình xe mở được trong Chrome | Tuỳ máy: chọn camera trong **Kiểm tra camera** khi xe đỗ |
+  | Camera có sẵn của hãng xe (camera hành trình, 360°, hỗ trợ lái), Android Auto, CarPlay | Không: trình duyệt không có cách nào truy cập |
+  | Camera lùi của màn hình xe | Thường không truy cập được, và lại nhìn ra phía sau |
+  | Trình duyệt bên trong Zalo, Facebook; ứng dụng “trình duyệt” dựng sẵn trên màn hình xe | Không |
+  | iPhone | Không hứa hẹn: ứng dụng cài ra màn hình chính không giữ được quyền camera giữa các lần mở |
+  | Ứng dụng bị ẩn, màn hình tắt, ứng dụng khác che lên | Camera không chạy |
+
+  Máy cần hỗ trợ WebAssembly SIMD (Chrome Android 91 trở lên); nếu không, mục cài đặt ghi “Thiết bị này không chạy được tính năng nhận diện biển.”
+- **Máy nóng và pin**: tốc độ xử lý, độ nóng và mức hao pin trên điện thoại thật **chưa được đo**. Ứng dụng tự giảm số khung hình xử lý mỗi giây (2, 3 hoặc 5), tự tạm dừng khi xe chạy dưới khoảng 11 km/h, khi máy chậm đi vì nóng hoặc khi pin dưới 20 % mà không sạc; điện thoại kẹp trên kính dưới nắng vẫn có thể quá nóng. Lần đầu chạy, ứng dụng tải dữ liệu nhận diện một lần (khoảng 12 MB chưa nén, ít hơn nếu máy chủ nén tệp). Bật camera cũng bật **Giữ màn hình sáng khi lái**, vì camera chỉ chạy khi màn hình sáng.
+- **Quyền riêng tư**: mọi xử lý diễn ra trên máy. Hình ảnh từ camera không bao giờ được lưu hay gửi đi. Danh sách biển đã học (mã biển, vị trí, hướng, số ngày thấy) cho thấy những nơi bạn đã đi, nên được coi là dữ liệu vị trí nhạy cảm: nó chỉ nằm trong bộ nhớ trình duyệt của máy, chỉ được xuất ra tệp khi bạn bấm **Xuất tệp** (kèm lời nhắc trước khi lưu; mặc định không kèm ngày), và xoá được bất cứ lúc nào bằng **Xoá các biển đã học**. Ứng dụng không tự đưa biển lên OpenStreetMap. Tuỳ chọn **Lưu ảnh biển để kiểm tra độ chính xác** (tắt sẵn) giữ ảnh nhỏ cắt sát biển trên máy tối đa 30 ngày; ảnh có thể có một phần xe cộ phía sau biển.
+- **Luật**: điện thoại phải được kẹp cố định; không cầm hay bấm điện thoại khi xe đang chạy (Luật Trật tự, an toàn giao thông đường bộ 2024 cấm người lái dùng điện thoại khi xe đang chạy; theo nguồn thứ cấp, mức phạt với người lái ô tô là 4–6 triệu đồng và trừ 4 điểm giấy phép lái xe theo Nghị định 168/2024). Vì vậy bật camera, chọn camera, xem hình, kiểm tra và xem lại danh sách chỉ làm được khi xe đã đỗ; ứng dụng không bao giờ tự hỏi quyền camera. Khi đang chạy chỉ có một nút camera nhỏ cạnh các nút bản đồ (xanh: đang bật, xám: tạm dừng, gạch chéo: cần bật lại khi xe đỗ); chạm một lần là tắt.
+- **Luôn tuân theo biển báo và hiệu lệnh thực tế trên đường.**
 
 ## Cấu trúc mã nguồn
 
@@ -138,6 +164,15 @@ Khi xe đang ở nguồn FM/radio hoặc USB thì giọng đọc của điện t
 | `js/search.js` | Tìm địa điểm |
 | `js/store.js` | Cài đặt, địa điểm, điểm đánh dấu, nhật ký (lưu trên thiết bị) |
 | `js/icons.js` | Bộ biểu tượng tự vẽ |
+| `js/camctl.js` | Camera nhận diện biển: điều phối camera, bộ nhận diện, bộ học, kho biển đã học |
+| `js/camui.js` | Giao diện camera nhận diện biển: mục cài đặt, kiểm tra camera, danh sách biển đã học, xuất và nhập tệp |
+| `js/camera.js`, `js/camsched.js` | Mở camera (không tự hỏi quyền), chọn số khung hình xử lý, tạm dừng khi xe chậm, máy nóng hoặc pin yếu |
+| `js/vision.js`, `js/vision-worker.js`, `js/visionproto.js`, `js/mlmanifest.js` | Chạy mô hình nhận diện trong worker; kiểm SHA-256 của mọi tệp mô hình trước khi dùng |
+| `js/signtrack.js`, `js/signlearn.js`, `js/learnedsigns.js` | Bám biển qua các khung hình, đặt biển lên bản đồ, kho biển đã học (IndexedDB trên máy), xuất và nhập GeoJSON |
+| `js/evalcrops.js` | Ảnh biển để kiểm tra độ chính xác (chỉ khi người dùng bật) |
+| `models/` | Mô hình nhận diện đã huấn luyện, danh sách nhãn, [thẻ mô hình](models/MODEL_CARD.md), ghi công ảnh Open Images (`ATTRIBUTION-openimages.csv`) |
+| `vendor/litert/` | LiteRT.js 2.6.0 (giấy phép Apache-2.0; bản WebAssembly có XNNPACK, giấy phép BSD; kèm `LICENSE` và `NOTICE-XNNPACK` trong thư mục) |
+| `tools/camera/` | Quy trình tạo dữ liệu và huấn luyện mô hình (không chạy trong ứng dụng), xem `tools/camera/README.md` |
 | `sw.js`, `manifest.webmanifest` | Cài đặt như ứng dụng, mở được khi mất mạng |
 | `vendor/maplibre-gl/` | Thư viện bản đồ MapLibre GL JS 5.24.1 (giấy phép BSD 3 điều khoản, kèm trong thư mục) |
 | `tests/` | Kiểm thử bằng `node --test` |
@@ -157,6 +192,8 @@ Mọi dữ liệu đều từ các dịch vụ mở, không cần khoá API:
 
 Toàn bộ là dữ liệu © những người đóng góp cho OpenStreetMap (giấy phép ODbL).
 
+Mô hình nhận diện biển được huấn luyện từ hình biển tự vẽ của ứng dụng ghép lên ảnh nền đường phố của bộ dữ liệu Open Images V7 (Google; ảnh ghi giấy phép CC BY 2.0, chú thích CC BY 4.0). Không ảnh nào được kèm trong ứng dụng; tác giả và giấy phép của từng ảnh đã dùng được ghi trong `models/ATTRIBUTION-openimages.csv`.
+
 Các máy chủ công cộng trên phù hợp để dùng cá nhân và thử nghiệm. Nếu phát hành cho nhiều người dùng, cần tự dựng máy chủ Valhalla, Photon, Overpass hoặc thuê dịch vụ tương đương rồi đổi các địa chỉ trên, vì máy chủ công cộng giới hạn lưu lượng và không cam kết luôn hoạt động.
 
 ## Giới hạn cần biết
@@ -173,5 +210,7 @@ Biển báo và hiệu lệnh thực tế trên đường luôn là căn cứ đ
 ## Quyền riêng tư
 
 Ứng dụng không có máy chủ riêng và không thu thập dữ liệu. Vị trí chỉ được gửi tới các dịch vụ bản đồ ở bảng trên để tìm đường, tìm địa điểm và tải dữ liệu quanh vị trí hiện tại. Cài đặt, địa điểm đã lưu, điểm đánh dấu và nhật ký chuyến đi nằm trong bộ nhớ trình duyệt của thiết bị.
+
+Camera nhận diện biển xử lý hình ảnh ngay trên máy và không lưu hay gửi hình ảnh đi đâu. Biển đã học chỉ nằm trên máy, chỉ được xuất ra tệp khi bạn yêu cầu, và xoá được bất cứ lúc nào (xem [Camera nhận diện biển](#camera-nhận-diện-biển-thử-nghiệm)).
 
 Dữ liệu đọc từ xe qua bộ OBD (tốc độ, vòng tua, nhiệt độ, nhiên liệu, điện áp, mã lỗi) chỉ dùng trên máy, không gửi đi đâu và không được lưu lại. Ứng dụng chỉ gửi tới bộ đọc các lệnh trong một danh sách cố định; không đọc số khung (VIN) và không có lệnh xoá mã lỗi.

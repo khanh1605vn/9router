@@ -35,6 +35,13 @@
   // Khung chồng lên một khung gợi ý (vị trí dự đoán của vệt đang theo dõi) từ mức IoU này thì được phân loại trước.
   const HINT_IOU = 0.05;
   const TOP_K = 3; // số nhãn trả về cho mỗi khung
+  // Ảnh biển để kiểm tra độ chính xác (PLAN §6.5; chỉ khi người dùng bật camEval, mặc định tắt): mỗi khung đã phân loại
+  // cho một ảnh PNG cắt sát: khung + EVAL_CROP_MARGIN mỗi bên, thu nhỏ (giữ tỉ lệ, không phóng to) để cạnh dài không quá
+  // EVAL_CROP_MAX px. Ảnh lớn hơn EVAL_CROP_MAX_BYTES là lỗi (96×96 RGBA chưa nén mới chừng 36 KiB).
+  const EVAL_CROP_MARGIN = CROP_MARGIN;
+  const EVAL_CROP_MAX = 96;
+  const EVAL_CROP_MAX_BYTES = 64 * 1024;
+  const EVAL_CROP_TYPE = 'image/png';
   const T_MIN = 0.05; // nhiệt độ hiệu chỉnh hợp lệ (labels.json "T")
   const T_MAX = 20;
   const LUM_W = 64; // ảnh thu nhỏ để đo độ sáng (px)
@@ -102,6 +109,8 @@
       if (!Array.isArray(m.hints) || m.hints.length > MAX_HINTS) return bad('hints');
       if (!m.hints.every((h) => isRect(h, -MAX_FRAME_SIDE, 2 * MAX_FRAME_SIDE))) return bad('hints');
     }
+    // Tuỳ chọn: true thì worker trả thêm ảnh cắt của từng khung đã phân loại (result.crops). Không có thì như cũ.
+    if (m.evalCrops != null && typeof m.evalCrops !== 'boolean') return bad('evalCrops');
     return OK;
   }
 
@@ -140,6 +149,27 @@
       b.cls.every((c) => Array.isArray(c) && c.length === 2 && typeof c[0] === 'string' && isNum(c[1]) && c[1] >= 0 && c[1] <= 1);
   }
 
+  /** Blob PNG của một ảnh cắt (kiểm theo hình dạng: Blob của worker thuộc ngữ cảnh khác nên không dùng instanceof). */
+  function isPngBlob(b) {
+    return b !== null && typeof b === 'object' && typeof b.arrayBuffer === 'function' && b.type === EVAL_CROP_TYPE &&
+      isInt(b.size, 1, EVAL_CROP_MAX_BYTES);
+  }
+
+  /**
+   * result.crops (tuỳ chọn): [{ i, blob, w, h }], i là chỉ số một khung ĐÃ phân loại (cls khác null) trong boxes, mỗi
+   * khung nhiều nhất một ảnh; blob là PNG; w, h là cỡ ảnh (px, 1…EVAL_CROP_MAX).
+   */
+  function isCrops(crops, boxes) {
+    if (!Array.isArray(crops) || crops.length > CLS_MAX) return false;
+    const seen = new Set();
+    for (const c of crops) {
+      if (!isObj(c) || !isInt(c.i, 0, boxes.length - 1) || seen.has(c.i) || boxes[c.i].cls === null) return false;
+      if (!isInt(c.w, 1, EVAL_CROP_MAX) || !isInt(c.h, 1, EVAL_CROP_MAX) || !isPngBlob(c.blob)) return false;
+      seen.add(c.i);
+    }
+    return true;
+  }
+
   /** Thông điệp worker → trang. Kiểu lạ bị bỏ qua. */
   function checkResponse(m) {
     if (!isObj(m)) return { ok: false, ignore: true, reason: 'type' };
@@ -156,6 +186,7 @@
         const l = m.lum;
         if (!isObj(l) || !isNum(l.mean) || !isNum(l.std) || l.mean < 0 || l.mean > 255 || l.std < 0 || l.std > 255) return bad('lum');
         if (!Array.isArray(m.boxes) || m.boxes.length > MAX_BOXES || !m.boxes.every(isBox)) return bad('boxes');
+        if (m.crops != null && !isCrops(m.crops, m.boxes)) return bad('crops');
         return OK;
       }
       case 'error':
@@ -415,6 +446,25 @@
     };
   }
 
+  /**
+   * Ảnh cắt để kiểm tra độ chính xác: khung + margin mỗi bên, chỉ phần nằm trong khung hình (không độn đen), thu nhỏ
+   * giữ tỉ lệ để cạnh dài không quá max px (không phóng to). Trả { src:[x,y,w,h] trên khung gốc, w, h (px nguyên của
+   * ảnh) } hoặc null nếu vùng cắt nằm hẳn ngoài khung hình.
+   */
+  function evalCropRect(box, W, H, margin, max) {
+    const m = margin != null ? margin : EVAL_CROP_MARGIN;
+    const M = max || EVAL_CROP_MAX;
+    const x0 = Math.max(0, box.x - m * box.w);
+    const y0 = Math.max(0, box.y - m * box.h);
+    const x1 = Math.min(W, box.x + box.w * (1 + m));
+    const y1 = Math.min(H, box.y + box.h * (1 + m));
+    if (!(x1 > x0 && y1 > y0)) return null;
+    const sw = x1 - x0;
+    const sh = y1 - y0;
+    const k = Math.min(1, M / Math.max(sw, sh));
+    return { src: [x0, y0, sw, sh], w: clamp(Math.round(sw * k), 1, M), h: clamp(Math.round(sh * k), 1, M) };
+  }
+
   /** softmax(logits / T), ổn định số học. */
   function softmaxT(logits, T) {
     const t = T > 0 ? T : 1;
@@ -485,10 +535,12 @@
     DET_W, DET_H, STRIDE, GRID_W, GRID_H, FAMILIES, CLS_SIZE,
     SCORE_MIN, NMS_IOU, MAX_BOXES, MAX_CANDIDATES, MAX_BOX_SIDE, CUT_MARGIN, CLS_MIN_W, CLS_MAX_W, CLS_MAX, CROP_MARGIN, HINT_IOU,
     TOP_K, T_MIN, T_MAX, LUM_W, LUM_H, FOE_Y, MAX_FRAME_SIDE, MAX_HINTS, MAX_ID, MAX_FILE_BYTES, MAX_LABELS,
+    EVAL_CROP_MARGIN, EVAL_CROP_MAX, EVAL_CROP_MAX_BYTES, EVAL_CROP_TYPE,
     PASSES, BUILDS, ERROR_CODES, INIT_FILES,
     INPUT_SIZE,
     checkInit, checkFrame, checkRun, checkWorkerMessage, checkResponse, checkLabels, checkModelIO,
-    defaultFoe, passGeometry, toFrame, cutByCrop, decodePeaks, iou, nms, pickForClassifier, cropRect, softmaxT, topK,
+    defaultFoe, passGeometry, toFrame, cutByCrop, decodePeaks, iou, nms, pickForClassifier, cropRect, evalCropRect, softmaxT,
+    topK,
     rgbaToRgb, lumStats,
   });
 })(typeof self !== 'undefined' ? self : globalThis);

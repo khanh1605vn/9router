@@ -3,6 +3,7 @@
 /* global maplibregl */
 import { angleDiff, circlePolygon, distance } from './geo.js';
 import { badgeImage, GLYPHS } from './icons.js';
+import { signDataUrl } from './signart.js';
 
 export const STYLE_URLS = {
   light: 'https://tiles.openfreemap.org/styles/liberty',
@@ -44,6 +45,46 @@ export function localizeLabels(style) {
 }
 
 const EMPTY = { type: 'FeatureCollection', features: [] };
+
+// Lớp biển do camera ghi nhận (chỉ hiện khi người dùng bấm "Xem trên bản đồ" trong danh sách lúc xe đỗ).
+export const LEARNED_ICON_PX = 44; // cỡ hình biển trên bản đồ (px CSS)
+export const LEARNED_QUIET_OPACITY = 0.72; // biển chưa xác nhận vẽ nhạt hơn (cùng với viền nét đứt)
+const LEARNED_RATIO = 2; // vẽ ảnh gấp đôi rồi nạp với pixelRatio 2 cho nét
+
+/** Tên ảnh trên bản đồ cho một biển đã học (cùng hình, trị số, trạng thái thì dùng chung một ảnh). */
+export const learnedImageId = (item) => `bd-l:${JSON.stringify([item.art, item.value ?? null, Boolean(item.quiet)])}`;
+
+/** Vẽ ảnh biển đã học: nền tròn trắng, hình biển, viền liền (đã xác nhận) hoặc nét đứt (chưa xác nhận). */
+function learnedImage(item) {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const px = LEARNED_ICON_PX * LEARNED_RATIO;
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = px;
+      const ctx = canvas.getContext('2d');
+      const c = px / 2;
+      ctx.beginPath();
+      ctx.arc(c, c, c - 6, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff';
+      ctx.shadowColor = 'rgba(0,0,0,.35)';
+      ctx.shadowBlur = 5;
+      ctx.shadowOffsetY = 1.5;
+      ctx.fill();
+      ctx.shadowColor = 'transparent';
+      ctx.lineWidth = 4;
+      ctx.strokeStyle = item.quiet ? '#10202f' : '#0a57a4';
+      if (item.quiet) ctx.setLineDash([10, 7]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const s = px * 0.62;
+      ctx.drawImage(img, c - s / 2, c - s / 2, s, s);
+      resolve(ctx.getImageData(0, 0, px, px));
+    };
+    img.onerror = () => resolve(null);
+    img.src = signDataUrl(item.art, { size: LEARNED_ICON_PX * LEARNED_RATIO, value: item.value });
+  });
+}
 const line = (coords, props = {}) => ({
   type: 'Feature',
   properties: props,
@@ -78,7 +119,9 @@ export class MapView {
     this.nearTurn = false;
     this.pointers = new Set();
     this.wheeling = false;
-    this.data = { route: EMPTY, alts: EMPTY, points: EMPTY, accuracy: EMPTY };
+    this.data = { route: EMPTY, alts: EMPTY, points: EMPTY, accuracy: EMPTY, learned: EMPTY };
+    this.learnedImages = new Map(); // tên ảnh → ImageData của biển đã học (nạp lại khi đổi kiểu bản đồ)
+    this.learnedGen = 0;
     this.progress = 0;
     this.lastCam = '';
   }
@@ -300,6 +343,22 @@ export class MapView {
         'icon-ignore-placement': true,
       },
     });
+
+    for (const [id, data] of this.learnedImages) if (!map.hasImage(id)) map.addImage(id, data, { pixelRatio: LEARNED_RATIO });
+    map.addSource('bd-learned', { type: 'geojson', data: this.data.learned });
+    map.addLayer({
+      id: 'bd-learned',
+      type: 'symbol',
+      source: 'bd-learned',
+      layout: {
+        'icon-image': ['get', 'img'],
+        'icon-size': ['interpolate', ['linear'], ['zoom'], 12, 0.6, 16, 1],
+        'icon-allow-overlap': true,
+        'icon-ignore-placement': true,
+        'symbol-sort-key': ['case', ['get', 'quiet'], 0, 1],
+      },
+      paint: { 'icon-opacity': ['case', ['get', 'quiet'], LEARNED_QUIET_OPACITY, 1] },
+    });
   }
 
   #gradient() {
@@ -455,6 +514,41 @@ export class MapView {
         geometry: { type: 'Point', coordinates: p.coord },
       })),
     });
+  }
+
+  /**
+   * Hiện lớp biển do camera ghi nhận: items = [{ id, coord, quiet, art, value }] (js/camui.js learnedFeatures).
+   * Lớp này mặc định trống; chỉ giao diện "Xem trên bản đồ" gọi hàm này.
+   */
+  async setLearned(items) {
+    const gen = ++this.learnedGen;
+    const list = Array.isArray(items) ? items : [];
+    for (const it of list) {
+      const id = learnedImageId(it);
+      if (this.learnedImages.has(id)) continue;
+      const data = await learnedImage(it);
+      if (gen !== this.learnedGen) return;
+      if (!data) continue;
+      this.learnedImages.set(id, data);
+      if (this.map && !this.map.hasImage(id)) this.map.addImage(id, data, { pixelRatio: LEARNED_RATIO });
+    }
+    // Chỉ đặt dữ liệu khi mọi ảnh đã nạp, để bản đồ không báo thiếu ảnh.
+    this.#setData('learned', {
+      type: 'FeatureCollection',
+      features: list
+        .filter((it) => this.learnedImages.has(learnedImageId(it)))
+        .map((it) => ({
+          type: 'Feature',
+          properties: { id: it.id, img: learnedImageId(it), quiet: Boolean(it.quiet) },
+          geometry: { type: 'Point', coordinates: it.coord },
+        })),
+    });
+  }
+
+  /** Ẩn lớp biển do camera ghi nhận. */
+  clearLearned() {
+    this.learnedGen++;
+    this.#setData('learned', EMPTY);
   }
 
   setDestination(coord) {

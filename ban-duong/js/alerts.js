@@ -1,11 +1,15 @@
-// Bộ máy cảnh báo: điểm cần chú ý phía trước (camera, trạm thu phí, đường sắt, điểm tự đánh dấu)
-// và cảnh báo vượt tốc độ. Thuần logic, không đụng tới DOM.
+// Bộ máy cảnh báo: điểm cần chú ý phía trước (camera, trạm thu phí, đường sắt, điểm tự đánh dấu),
+// cảnh báo vượt tốc độ và giới hạn tốc độ lấy từ biển do camera trên xe ghi nhận. Thuần logic, không đụng tới DOM.
 
 import { angleDiff, bearing, distance, nearestOnLine } from './geo.js';
+import { SPEED_MAX, SPEED_MIN, travelFor } from './learnedsigns.js';
+import { locate, mapItems } from './signengine.js';
+import { APPLY_ANGLE, ARM_CHORD } from './signlearn.js';
 import { REPORT_TYPES } from './store.js';
 import { spokenDistance } from './tracker.js';
 
 const RAD = Math.PI / 180;
+const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
 /** Tên hiển thị, câu đọc và biểu tượng của một điểm cảnh báo. */
 export function describePoint(p) {
@@ -125,6 +129,490 @@ export function signSpeech(result, settings = {}) {
   return says.length ? `Phía trước ${spokenDistance(keep[0].distance)}, ${says.join(', ')}` : null;
 }
 
+// ---------------------------------------------------------------------------------------------
+// Đổi đường (dùng chung cho SpeedMonitor và CameraLimit)
+// ---------------------------------------------------------------------------------------------
+
+export const WAY_CONFIRM_FIXES = 2; // phải khớp đường mới chừng này lần liên tiếp mới đổi đường (tránh nhảy số ở giao lộ)
+export const WAY_LOST_FIXES = 4; // chừng này lần định vị liền không khớp đường nào thì coi như không biết xe ở đường nào
+
+// ---------------------------------------------------------------------------------------------
+// Giới hạn tốc độ từ biển do camera ghi nhận (PLAN §5.9)
+// ---------------------------------------------------------------------------------------------
+
+// Biển tốc độ tối đa hết hiệu lực khi xe đi qua nút giao (khoản 26.8–26.9 QCVN 41:2024). Quy định này mới đọc qua
+// nguồn thứ cấp, chưa đối chiếu bản gốc, nên để sau một cờ: tắt cờ thì đi thẳng qua nút giao vẫn giữ giới hạn.
+export const CAMERA_LIMIT_ENDS_AT_JUNCTION = true;
+// Đường nhập vào nút giao làm hết hiệu lực biển: hạng unclassified trở lên (RANK ≤ 6 của bộ máy biển báo). Các hạng
+// nhỏ hơn (residential, living_street, service…) đứng thay cho "ngõ, ngách, hẻm" và lối vào khu dân cư, không làm hết.
+export const JUNCTION_ROADS = new Set([
+  'motorway', 'motorway_link', 'trunk', 'trunk_link', 'primary', 'primary_link',
+  'secondary', 'secondary_link', 'tertiary', 'tertiary_link', 'unclassified',
+]);
+export const CAMERA_LIMIT_CODE = 'P.127'; // biển tốc độ tối đa: biển đã xác nhận, không biển phụ, thì dùng cho đồng hồ
+// Biển hết hiệu lực: hết tốc độ tối đa, hết tất cả các lệnh cấm. DP.127 chỉ hết P.127b/P.127c (theo làn, theo loại xe):
+// hai biển đó chỉ để xem, không vào đồng hồ, nên DP.127 không làm gì ở đây.
+export const CAMERA_LIMIT_END_CODES = new Set(['DP.134', 'DP.135']);
+export const CAMERA_LIMIT_GAP = 300; // hai lần cập nhật cách nhau quá chừng này (m): không biết xe đã qua đâu, thôi giới hạn
+// Ở nút giao: xe đi tiếp cùng con đường khi đổi hướng không quá chừng này (độ) và đường mới cùng tên đường cũ, hoặc
+// không có nhánh nào của đường từ unclassified trở lên thẳng hơn. Ngược lại là rẽ sang đường khác: thôi giới hạn.
+export const CAMERA_LIMIT_THROUGH_ANGLE = 45;
+export const CAMERA_LIMIT_VERTEX_NEAR = 100; // đỉnh chung của đường cũ và đường mới cách xe không quá chừng này (m)
+export const CAMERA_LIMIT_LATERAL = 25; // biển (và hành lang) cách đường xe đi, theo phương ngang, không quá chừng này (m)
+export const CAMERA_LIMIT_AHEAD = 60; // tin "thấy lại" đến khi biển còn ở phía trước không quá chừng này (m): đợi xe qua biển
+export const CAMERA_LIMIT_BEHIND = 150; // biển đã ở sau lưng xe quá chừng này (m): tin quá cũ, bỏ
+export const CAMERA_LIMIT_PENDING_MAX = 8; // giữ tối đa chừng này tin chờ (biển chưa qua, đường mới chưa chắc)
+export const CAMERA_LIMIT_HEADING_SPEED = 2.5; // xe nhanh hơn chừng này (m/s) thì hướng đi của GPS mới dùng được (như matchWay)
+// Đang dùng giới hạn camera: đọc lại các biển bản đồ phía trước sau mỗi chừng này (m) xe đi, và trước khi xe còn
+// chừng này là hết phần hành lang đã đọc.
+export const CAMERA_LIMIT_OSM_REFRESH = 100;
+export const CAMERA_LIMIT_CORRIDORS = 20; // giữ chừng này hành lang gần nhất để xem bản đồ có biển nào giữa biển camera và xe
+
+const PASSED_OUTCOMES = new Set(['hit', 'miss', 'none']);
+
+const vertexCount = (way) => way.g.length >> 1;
+const vertexOf = (way, i) => [way.g[2 * i], way.g[2 * i + 1]];
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const lengthOf = (corr) => (corr.cum && corr.cum.length ? corr.cum[corr.cum.length - 1] : 0);
+/** Biển bản đồ làm hết giới hạn của camera: một biển tốc độ tối đa khác (thay), DP.134, DP.135. */
+const endsCameraLimit = (code) => code === CAMERA_LIMIT_CODE || CAMERA_LIMIT_END_CODES.has(code);
+
+/** Trị số km/h của biển tốc độ tối đa (chuỗi '50' hay số 50) trong khoảng học được, hoặc null. */
+function limitValue(v) {
+  const n = typeof v === 'number' ? v : /^\d{2,3}$/.test(String(v ?? '')) ? Number(v) : NaN;
+  return Number.isInteger(n) && n >= SPEED_MIN && n <= SPEED_MAX ? n : null;
+}
+
+/** Hướng (độ) của nhánh đường đi ra từ đỉnh i theo chiều step (±1), đo theo dây cung ARM_CHORD m; null nếu hết đường. */
+function armBearing(way, i, step) {
+  const n = vertexCount(way);
+  let k = i + step;
+  if (k < 0 || k >= n) return null;
+  const v = vertexOf(way, i);
+  while (distance(v, vertexOf(way, k)) < ARM_CHORD && k + step >= 0 && k + step < n) k += step;
+  return bearing(v, vertexOf(way, k));
+}
+
+/** Các nhánh đường toả ra từ đỉnh v → [{ way, i, step, brg }] (cách đếm như armsAt của bộ máy biển báo). */
+function armsOf(roads, v) {
+  const out = [];
+  for (const { way, i } of roads.waysAtVertex(v)) {
+    for (const step of [-1, 1]) {
+      const brg = armBearing(way, i, step);
+      if (brg != null) out.push({ way, i, step, brg });
+    }
+  }
+  return out;
+}
+
+/** Nhánh của đường wayId tại đỉnh, theo chiều step; đường khép kín có hai chỉ số thì lấy chỉ số gần i nhất. */
+function armFor(arms, wayId, i, step) {
+  let best = null;
+  for (const a of arms) {
+    if (a.way.id !== wayId || a.step !== step) continue;
+    if (!best || Math.abs(a.i - i) < Math.abs(best.i - i)) best = a;
+  }
+  return best;
+}
+
+/** Có nhánh nào ngoài nhánh xe đi vào và đi ra thuộc một đường hạng unclassified trở lên không. */
+const majorSideArm = (arms, inArm, outArm) =>
+  arms.some((a) => a !== inArm && a !== outArm && JUNCTION_ROADS.has(a.way.h));
+
+/**
+ * Giới hạn tốc độ lấy từ biển do camera trên xe ghi nhận (PLAN §5.9). Chỉ bắt đầu khi bộ học báo xe vừa đi qua một
+ * biển P.127 đã xác nhận, không có biển phụ, nằm trên đường xe đang đi và đúng chiều đi (Learner.onPassed). Hết khi:
+ * - qua biển DP.134 hay DP.135 (do camera ghi nhận hoặc có trên bản đồ);
+ * - qua một biển tốc độ tối đa khác: biển camera đã xác nhận thay trị số, biển có biển phụ hay biển trên bản đồ thì
+ *   thôi giới hạn (bản đồ được ưu tiên);
+ * - đi thẳng qua nút giao có đường từ unclassified trở lên nhập vào (CAMERA_LIMIT_ENDS_AT_JUNCTION), dù đường OSM có
+ *   tách ở đó hay không;
+ * - đổi sang đường khác mà không phải đi tiếp cùng con đường (đường tách đôi ở đỉnh chỉ có 2 nhánh, hay đi thẳng qua
+ *   nút giao): rẽ, nhảy sang đường song song, quay đầu;
+ * - không còn khớp đường (ra khỏi dữ liệu), vị trí nhảy xa, chạy thử, hoặc reset() (rời chế độ lái, chuyến mới).
+ * Biển chưa xác nhận (kể cả lần đầu camera thấy) không bao giờ đổi đồng hồ tốc độ.
+ *
+ * Gọi update() mỗi lần định vị, sau learner.onFix() của cùng lần định vị (gọi trước thì chỉ chậm một lần định vị):
+ * tin của onPassed() được xét ở lần update() kế tiếp, theo vị trí của xe lúc đó.
+ */
+export class CameraLimit {
+  /** @param endsAtJunction  mặc định CAMERA_LIMIT_ENDS_AT_JUNCTION (đổi được khi kiểm thử) */
+  constructor({ endsAtJunction = CAMERA_LIMIT_ENDS_AT_JUNCTION } = {}) {
+    this.endsAtJunction = endsAtJunction;
+    this.reset();
+  }
+
+  /** Giới hạn đang dùng { n (km/h), wayId (đường xe đang đi), since (fix.time lúc bắt đầu) } hoặc null. */
+  get current() {
+    return this.cur;
+  }
+
+  /** Quên hết (rời chế độ lái, chuyến mới, đổi loại xe). */
+  reset() {
+    this.cur = null;
+    this.curAt = 0; // vị trí biển của giới hạn đang dùng trên đồng hồ quãng đường (m)
+    this.pending = []; // tin onPassed chưa xét xong
+    this.D = 0; // đồng hồ quãng đường riêng (m)
+    this.last = null; // { coord } của lần update() trước
+    this.floor = -Infinity; // giới hạn chỉ bắt đầu từ biển nằm sau mốc này (nút giao, đổi đường, biển hết hiệu lực)
+    this.way = null; // id đường xe đang đi (đã chắc)
+    this.wayObj = null;
+    this.ways = new Map(); // id các đường của cùng con đường từ mốc gần nhất → vị trí lần cuối xe ở trên đó (m)
+    this.f = null; // vị trí xe trên đường theo chỉ số đỉnh (seg + t), chỉ tiến theo chiều đi
+    this.dir = 0; // +1/−1: chiều đi so với chiều vẽ đường
+    this.reverse = 0; // số lần liên tiếp khớp ngược chiều trên cùng đường
+    this.lastOn = null; // { D, coord } lần định vị gần nhất trên đường đang đi
+    this.miss = 0;
+    this.candidate = null; // { way, count, firstD, firstCoord, f, dir }: đường mới chưa chắc
+    this.osm = []; // vị trí (m) các biển bản đồ phía trước làm hết giới hạn
+    this.osmUntil = -Infinity; // đọc lại biển bản đồ khi đồng hồ quãng đường tới mốc này
+    this.corridors = []; // [{ corr, ref }] hành lang gần đây; ref = vị trí đầu hành lang trên đồng hồ quãng đường
+  }
+
+  /**
+   * Tin từ Learner.onPassed: { record, outcome: 'hit'|'miss'|'none', reason }. Chỉ biển đã xác nhận được nghe:
+   * P.127 không biển phụ (bắt đầu hay thay giới hạn), P.127 có biển phụ (thôi giới hạn), DP.134/DP.135 (hết).
+   * Mọi kết quả đi qua đều tính, kể cả 'none' ('late', camera tắt…) và 'miss', trừ 'none' lý do 'left' (xe chưa tới
+   * biển) và 'miss' lý do 'value' (camera vừa đọc một trị số khác ở đúng chỗ đó: biển đã đổi, không dùng trị số cũ).
+   * @returns true khi tin được giữ lại để xét
+   */
+  onPassed(evt) {
+    const r = evt?.record;
+    if (!r || typeof r !== 'object' || r.status !== 'confirmed') return false;
+    if (!PASSED_OUTCOMES.has(evt.outcome)) return false;
+    if (evt.outcome === 'none' && evt.reason === 'left') return false;
+    if (evt.outcome === 'miss' && evt.reason === 'value') return false;
+    if (!Array.isArray(r.coord) || !isNum(r.coord[0]) || !isNum(r.coord[1]) || !isNum(r.facing)) return false;
+    let kind;
+    let n = null;
+    if (r.code === CAMERA_LIMIT_CODE) {
+      n = r.plate == null ? limitValue(r.value) : null;
+      kind = n != null ? 'start' : 'end';
+    } else if (CAMERA_LIMIT_END_CODES.has(r.code)) {
+      kind = 'end';
+    } else {
+      return false;
+    }
+    this.pending.push({ kind, n, coord: r.coord, facing: r.facing, wayId: r.wayId ?? null, fresh: true });
+    if (this.pending.length > CAMERA_LIMIT_PENDING_MAX) this.pending.shift();
+    return true;
+  }
+
+  /**
+   * @param fix    { coord, speed (m/s), heading, time, simulated }
+   * @param match  kết quả RoadData.matchWay cho lần định vị này (hoặc null)
+   * @param ctx    { roads: RoadData (nút giao), corridor: signs.lastCorridor (biển bản đồ phía trước), hasData,
+   *                 vehicle, now: Date }
+   * @returns current
+   */
+  update(fix, match, { roads = null, corridor = null, hasData = true, vehicle = 'car', now = null } = {}) {
+    if (!fix || !Array.isArray(fix.coord)) return this.cur;
+    if (fix.simulated) {
+      // Chạy thử: không dùng dữ liệu camera.
+      this.reset();
+      return null;
+    }
+    const step = this.last ? distance(this.last.coord, fix.coord) : 0;
+    this.D += step;
+    this.last = { coord: fix.coord };
+    if (step > CAMERA_LIMIT_GAP) this.#lose();
+
+    this.#track(fix, match, roads, hasData);
+    for (const [id, at] of this.ways) if (id !== this.way && this.D - at > CAMERA_LIMIT_BEHIND) this.ways.delete(id);
+
+    const opts = { roads, vehicle, now: now ?? new Date(isNum(fix.time) ? fix.time : Date.now()) };
+    this.#keep(corridor, fix.coord);
+    // Đường mới chưa chắc: đợi lần sau mới xét tin, để biết xe đã sang đường nào.
+    if (this.candidate == null) this.#judgeAll(fix, opts);
+    if (this.cur && this.#osmPassed(corridor, fix.coord, opts)) this.#end();
+    return this.cur;
+  }
+
+  // ---- Đường xe đi ----
+
+  #track(fix, match, roads, hasData) {
+    if (!match || !match.way) {
+      if (++this.miss >= WAY_LOST_FIXES || !hasData) this.#lose();
+      return;
+    }
+    this.miss = 0;
+    const way = match.way;
+    const f = isNum(match.seg) ? match.seg + (isNum(match.t) ? match.t : 0) : null;
+    const dir = match.dir === 1 || match.dir === -1 ? match.dir : 0;
+    if (this.way == null) {
+      this.way = way.id;
+      this.wayObj = way;
+      this.f = f;
+      this.dir = dir;
+      this.reverse = 0;
+      this.candidate = null;
+    } else if (way.id === this.way) {
+      this.candidate = null;
+      this.wayObj = way;
+      this.#along(fix, way, f, dir, roads);
+    } else {
+      // Xe chậm (không có chiều đi): khớp đường chỉ theo khoảng cách, ở giữa nút giao hay nhảy sang đường ngang. Chỉ
+      // tính đổi đường khi xe đã chạy.
+      if (!dir) return;
+      const c = this.candidate;
+      if (c && c.way.id === way.id) {
+        c.count++;
+        c.f = f;
+        c.dir = dir;
+      } else {
+        this.candidate = { way, count: 1, firstD: this.D, firstCoord: fix.coord, f, dir };
+      }
+      if (this.candidate.count >= WAY_CONFIRM_FIXES) this.#switch(roads);
+    }
+    if (this.candidate == null) {
+      this.lastOn = { D: this.D, coord: fix.coord };
+      this.ways.set(this.way, this.D);
+    }
+  }
+
+  /** Vẫn trên đường cũ: quay đầu (khớp ngược chiều liên tiếp) thì thôi; đi qua nút giao lớn thì thôi (theo cờ). */
+  #along(fix, way, f, dir, roads) {
+    if (!dir) return; // xe chậm, không biết chiều: đợi
+    if (this.dir && dir !== this.dir) {
+      if (++this.reverse >= WAY_CONFIRM_FIXES) {
+        this.#mark(this.D);
+        this.dir = dir;
+        this.f = f;
+        this.reverse = 0;
+      }
+      return;
+    }
+    this.reverse = 0;
+    this.dir = dir;
+    if (f == null) return;
+    if (this.f == null || (f - this.f) * dir <= 0) {
+      // Lần đầu, hoặc vị trí lùi lại vài mét theo nhiễu GPS: giữ vị trí đã tiến xa nhất.
+      if (this.f == null) this.f = f;
+      return;
+    }
+    const v = this.endsAtJunction ? this.#junctionCrossed(roads, way, this.f, f, dir) : null;
+    if (v) this.#mark(this.#atVertex(v, this.D));
+    this.f = f;
+  }
+
+  /** Đỉnh nút giao lớn đầu tiên xe vừa đi qua trên cùng một đường (giữa vị trí f0 và f1), hoặc null. */
+  #junctionCrossed(roads, way, f0, f1, dir) {
+    if (!roads) return null;
+    const n = vertexCount(way);
+    const from = dir > 0 ? Math.floor(f0) + 1 : Math.ceil(f0) - 1;
+    const to = dir > 0 ? Math.floor(f1) : Math.ceil(f1);
+    for (let k = from; dir > 0 ? k <= to : k >= to; k += dir) {
+      if (k <= 0 || k >= n - 1) continue; // đầu mút: đổi đường, xét ở #switch
+      const v = vertexOf(way, k);
+      const arms = armsOf(roads, v);
+      if (arms.length < 3) continue;
+      const inArm = armFor(arms, way.id, k, -dir);
+      const outArm = armFor(arms, way.id, k, dir);
+      if (majorSideArm(arms, inArm, outArm)) return v;
+    }
+    return null;
+  }
+
+  /** Đường mới đã chắc: đi tiếp cùng con đường thì giữ giới hạn, không thì thôi. */
+  #switch(roads) {
+    const c = this.candidate;
+    const tr = this.#transition(roads, this.wayObj, this.f, this.dir, c);
+    const base = this.lastOn ?? { D: c.firstD, coord: c.firstCoord };
+    const at = tr.at ? clamp(base.D + distance(base.coord, tr.at), base.D, c.firstD) : c.firstD;
+    const keep = tr.kind === 'split' || (tr.kind === 'through' && !(this.endsAtJunction && tr.major));
+    this.way = c.way.id;
+    this.wayObj = c.way;
+    this.f = c.f;
+    this.dir = c.dir;
+    this.reverse = 0;
+    this.candidate = null;
+    if (!keep) this.#mark(at);
+    else if (this.cur) this.cur = Object.freeze({ ...this.cur, wayId: this.way });
+  }
+
+  /**
+   * Kiểu chuyển từ đường A sang đường mới (c.way) ở đỉnh chung gần xe nhất:
+   * 'split' (đỉnh chỉ có 2 nhánh: cùng con đường bị tách đôi), 'through' (nút giao, đi thẳng qua; major: có đường
+   * hạng unclassified trở lên nhập vào), 'turn' (rẽ sang đường khác), 'break' (không có đỉnh chung: nhảy sang đường khác).
+   */
+  #transition(roads, A, fA, dirA, c) {
+    const B = c.way;
+    if (!roads || !A || !B || !this.lastOn) return { kind: 'break', at: null, major: false };
+    let best = null;
+    for (let i = 0; i < vertexCount(A); i++) {
+      const v = vertexOf(A, i);
+      const dA = distance(v, this.lastOn.coord);
+      const dB = distance(v, c.firstCoord);
+      const d = dA + dB; // đỉnh nằm giữa lần định vị cuối trên A và lần đầu trên đường mới thì tổng nhỏ nhất
+      if (Math.max(dA, dB) > CAMERA_LIMIT_VERTEX_NEAR || (best && d >= best.d)) continue;
+      const onB = roads.waysAtVertex(v).find((e) => e.way.id === B.id);
+      if (onB) best = { d, v, iA: i, iB: onB.i };
+    }
+    if (!best) return { kind: 'break', at: null, major: false };
+    const arms = armsOf(roads, best.v);
+    if (arms.length <= 2) return { kind: 'split', at: best.v, major: false };
+    // Nhánh xe đi vào: phía xe đến (vị trí trên A trước đỉnh chung); nhánh đi ra: phía xe đang ở trên B.
+    const inStep = fA != null && fA !== best.iA ? Math.sign(fA - best.iA) : -(dirA || 1);
+    const outStep = c.f != null && c.f !== best.iB ? Math.sign(c.f - best.iB) : c.dir || 1;
+    const inArm = armFor(arms, A.id, best.iA, inStep);
+    const outArm = armFor(arms, B.id, best.iB, outStep);
+    if (!inArm || !outArm) return { kind: 'turn', at: best.v, major: false };
+    const travel = (inArm.brg + 180) % 360;
+    const dev = (a) => Math.abs(angleDiff(travel, a.brg));
+    const turn = dev(outArm);
+    // Cùng tên đường (khác rỗng) là đi tiếp cùng con đường. Không thì phải là nhánh thẳng nhất, không tính ngõ
+    // (đường chính ngoặt nhẹ ở chỗ có ngõ đi thẳng vẫn là đi tiếp đường chính).
+    const sameName = Boolean(A.n) && A.n === B.n;
+    const straighter = arms.some((a) => a !== inArm && a !== outArm && JUNCTION_ROADS.has(a.way.h) && dev(a) < turn);
+    const major = majorSideArm(arms, inArm, outArm);
+    const through = turn <= CAMERA_LIMIT_THROUGH_ANGLE && (sameName || !straighter);
+    return { kind: through ? 'through' : 'turn', at: best.v, major };
+  }
+
+  /** Vị trí trên đồng hồ quãng đường của đỉnh v xe vừa đi qua (giữa lần định vị trước trên đường và bây giờ). */
+  #atVertex(v, upTo) {
+    const base = this.lastOn;
+    if (!base) return upTo;
+    return clamp(base.D + distance(base.coord, v), base.D, upTo);
+  }
+
+  /** Một mốc làm hết giới hạn ở vị trí at (m): nút giao, rẽ, quay đầu, hay biển hết hiệu lực. */
+  #mark(at) {
+    if (this.cur && at > this.curAt) this.#end();
+    this.floor = Math.max(this.floor, at);
+    this.ways = new Map(this.way != null ? [[this.way, this.D]] : []);
+  }
+
+  /** Không còn biết xe ở đường nào. */
+  #lose() {
+    this.#end();
+    this.floor = Math.max(this.floor, this.D);
+    this.way = null;
+    this.wayObj = null;
+    this.ways = new Map();
+    this.f = null;
+    this.dir = 0;
+    this.reverse = 0;
+    this.lastOn = null;
+    this.candidate = null;
+  }
+
+  #end() {
+    this.cur = null;
+    this.osm = [];
+    this.osmUntil = -Infinity;
+  }
+
+  // ---- Tin từ bộ học ----
+
+  #judgeAll(fix, opts) {
+    const keep = [];
+    for (const e of this.pending) if (this.#judge(e, fix, opts)) keep.push(e);
+    this.pending = keep;
+  }
+
+  /** Xét một tin theo vị trí xe bây giờ. @returns true khi còn phải đợi */
+  #judge(e, fix, opts) {
+    const travel = travelFor(e.facing);
+    const moving = isNum(fix.heading) && (fix.speed || 0) >= CAMERA_LIMIT_HEADING_SPEED;
+    if (moving && Math.abs(angleDiff(fix.heading, travel)) > APPLY_ANGLE) return false; // ngược chiều, đã rẽ đi
+    const d = distance(fix.coord, e.coord);
+    const rel = d > 0 ? angleDiff(travel, bearing(fix.coord, e.coord)) * RAD : 0;
+    const along = d * Math.cos(rel); // > 0: biển còn ở phía trước
+    if (Math.abs(d * Math.sin(rel)) > CAMERA_LIMIT_LATERAL) return false; // không nằm trên đường xe đi
+    if (along > 0) {
+      // "Thấy lại" được báo khi camera vừa đọc xong biển, trước khi xe tới biển: đợi xe qua.
+      if (e.fresh && along > CAMERA_LIMIT_AHEAD) return false;
+      e.fresh = false;
+      return true;
+    }
+    if (-along > CAMERA_LIMIT_BEHIND) return false;
+    const at = this.D + along;
+    if (at <= this.floor) return false; // đã qua nút giao, đổi đường hay biển hết hiệu lực sau biển này
+    if (e.kind === 'end') {
+      if (this.cur && at > this.curAt) this.#end();
+      this.floor = Math.max(this.floor, at);
+      return false;
+    }
+    if (this.way == null) return false; // không biết xe đang ở đường nào
+    if (e.wayId != null && !this.ways.has(e.wayId)) return false; // biển của đường khác
+    if (this.cur && at <= this.curAt) return false; // biển cũ hơn biển đang dùng
+    if (this.#osmBetween(at, this.D, opts)) return false; // bản đồ có biển khác giữa biển này và xe
+    // Biển nhắc lại cùng trị số (hai bên đường, sau nút giao nhỏ): giữ nguyên giới hạn đang dùng và lúc bắt đầu.
+    if (!this.cur || this.cur.n !== e.n) {
+      this.cur = Object.freeze({ n: e.n, wayId: this.way, since: isNum(fix.time) ? fix.time : null });
+    }
+    this.curAt = at;
+    this.osm = [];
+    this.osmUntil = -Infinity;
+    return false;
+  }
+
+  // ---- Biển trên bản đồ ----
+
+  /** Vị trí đầu hành lang trên đồng hồ quãng đường, hoặc null khi xe không nằm trên hành lang. */
+  #refOf(corr, coord) {
+    if (!corr || !Array.isArray(corr.coords) || corr.coords.length < 2 || !Array.isArray(corr.cum)) return null;
+    const loc = locate(corr, coord);
+    return loc && loc.d <= CAMERA_LIMIT_LATERAL ? this.D - loc.s : null;
+  }
+
+  #keep(corr, coord) {
+    if (!corr || this.corridors.some((k) => k.corr === corr)) return;
+    const ref = this.#refOf(corr, coord);
+    if (ref == null) return;
+    this.corridors.push({ corr, ref });
+    if (this.corridors.length > CAMERA_LIMIT_CORRIDORS) this.corridors.shift();
+  }
+
+  /** Vị trí (m) các biển bản đồ làm hết giới hạn trên hành lang, tính từ ref. */
+  #enders(corr, ref, { roads, vehicle, now }) {
+    if (!roads) return [];
+    try {
+      return mapItems(corr, roads, { vehicle, now })
+        .filter((it) => endsCameraLimit(it.code))
+        .map((it) => ref + it.distance);
+    } catch {
+      return []; // dữ liệu bản đồ lạ: bỏ qua, giữ giới hạn (thấp hơn)
+    }
+  }
+
+  /** Bản đồ có biển làm hết giới hạn nằm trong (lo, hi] không (xem trên hành lang gần nhất dựng trước khi tới lo). */
+  #osmBetween(lo, hi, opts) {
+    for (let k = this.corridors.length - 1; k >= 0; k--) {
+      const { corr, ref } = this.corridors[k];
+      if (ref > lo) continue;
+      return this.#enders(corr, ref, opts).some((p) => p > lo && p <= hi);
+    }
+    return false;
+  }
+
+  /** Đang dùng giới hạn camera: xe vừa qua một biển bản đồ làm hết giới hạn chưa. */
+  #osmPassed(corr, coord, opts) {
+    if (this.D >= this.osmUntil) {
+      const ref = this.#refOf(corr, coord);
+      if (ref != null) {
+        this.osm = this.#enders(corr, ref, opts);
+        const end = ref + lengthOf(corr) - CAMERA_LIMIT_OSM_REFRESH;
+        this.osmUntil = Math.max(this.D, Math.min(this.D + CAMERA_LIMIT_OSM_REFRESH, end));
+      }
+    }
+    return this.osm.some((p) => p > this.curAt && p <= this.D);
+  }
+}
+
+/** Trị số km/h của giới hạn camera truyền vào SpeedMonitor (CameraLimit.current hoặc một số), hoặc null. */
+function cameraValue(camera) {
+  if (camera == null) return null;
+  return limitValue(typeof camera === 'number' ? camera : camera.n);
+}
+
+/** Câu nhắc quá tốc độ; giới hạn lấy từ biển do camera ghi nhận thì nói rõ như vậy. */
+export function overSpeedSay(sp) {
+  const base = `Bạn đang chạy quá tốc độ. Giới hạn ${sp.limit} ki lô mét trên giờ`;
+  return sp.source === 'camera' ? `${base} (camera ghi nhận)` : base;
+}
+
 /** Giữ giới hạn tốc độ ổn định giữa các lần định vị và phát cảnh báo khi chạy quá. */
 export class SpeedMonitor {
   constructor() {
@@ -141,10 +629,16 @@ export class SpeedMonitor {
   }
 
   /**
-   * @param match  kết quả RoadData.matchWay (hoặc null)
-   * @returns { limit, source, level: 'ok'|'near'|'over', sound: null|'voice'|'beep', announce: number|null }
+   * @param match     kết quả RoadData.matchWay (hoặc null)
+   * @param camera    giới hạn từ biển do camera ghi nhận (CameraLimit.current, hoặc một số km/h), hoặc null
+   * @param camSpeed  cài đặt "Dùng biển tốc độ do camera ghi nhận cho đồng hồ tốc độ"; false thì bỏ qua camera
+   * Giới hạn hiện ra là giới hạn thấp hơn giữa bản đồ và camera: camera không bao giờ nâng giới hạn. source là
+   * 'camera' chỉ khi trị số của camera thấp hơn hẳn (hoặc bản đồ không có); tốc độ tối đa tự đặt (customMax) chỉ
+   * dùng khi cả hai đều không có.
+   * @returns { limit, source: 'road'|'camera'|'custom'|null, level: 'ok'|'near'|'over', sound: null|'voice'|'beep',
+   *            announce: number|null }
    */
-  update(fix, match, { vehicle = 'car', tolerance = 3, customMax = 0, hasData = true } = {}) {
+  update(fix, match, { vehicle = 'car', tolerance = 3, customMax = 0, hasData = true, camera = null, camSpeed = true } = {}) {
     if (match) {
       this.missCount = 0;
       if (match.way.id === this.wayId) {
@@ -156,27 +650,38 @@ export class SpeedMonitor {
           this.candidate = match.way.id;
           this.candidateCount = 1;
         }
-        if (this.candidateCount >= 2 || this.wayId == null) {
+        if (this.candidateCount >= WAY_CONFIRM_FIXES || this.wayId == null) {
           this.wayId = match.way.id;
           this.limit = vehicle === 'moto' ? match.way.m : match.way.c;
           this.candidate = null;
         }
       }
-    } else if (++this.missCount >= 4 || !hasData) {
+    } else if (++this.missCount >= WAY_LOST_FIXES || !hasData) {
       this.wayId = null;
       this.limit = null;
     }
 
     const kmh = (fix.speed || 0) * 3.6;
-    const limit = this.limit ?? (customMax > 0 ? customMax : null);
-    const source = this.limit != null ? 'road' : limit != null ? 'custom' : null;
+    const road = this.limit;
+    const cam = camSpeed === false ? null : cameraValue(camera);
+    let limit = road;
+    let source = road != null ? 'road' : null;
+    if (cam != null && (road == null || cam < road)) {
+      limit = cam;
+      source = 'camera';
+    } else if (limit == null && customMax > 0) {
+      limit = customMax;
+      source = 'custom';
+    }
 
+    // Đọc giới hạn của đường khi đổi. Đang hiện giới hạn thấp hơn của camera thì không đọc số của đường (khác số đang
+    // hiện); biển camera đã được bộ máy biển báo đọc trước, kèm lời rào.
     let announce = null;
-    if (this.limit != null && this.limit !== this.announced && kmh > 15) {
-      announce = this.limit;
-      this.announced = this.limit;
-    } else if (this.limit == null) {
+    if (road == null) {
       this.announced = null;
+    } else if (source !== 'camera' && road !== this.announced && kmh > 15) {
+      announce = road;
+      this.announced = road;
     }
 
     let level = 'ok';

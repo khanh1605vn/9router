@@ -7,13 +7,15 @@ import { MapView } from './mapview.js';
 import { fetchRoutes, RouteError } from './routing.js';
 import { RouteTracker } from './tracker.js';
 import { clearRoadCache, RoadData } from './roaddata.js';
-import { AlertEngine, describePoint, signSpeech, SpeedMonitor } from './alerts.js';
+import { AlertEngine, describePoint, overSpeedSay, signSpeech, SpeedMonitor } from './alerts.js';
 import { PRIORITY, voice } from './voice.js';
 import { reverseGeocode, searchPlaces } from './search.js';
 import { GLYPH_COLORS, glyphIcon, lineIcon, maneuverIcon } from './icons.js';
 import { SignEngine } from './signengine.js';
 import { categoryEnabled, formatNumberVi, lookupSign, SIGN_CATEGORIES } from './signs.js';
 import { signSvg } from './signart.js';
+import { CameraController, learnedCaption } from './camctl.js';
+import { camBadge, initCamUi } from './camui.js';
 import {
   CarWatch,
   createBleTransport,
@@ -62,6 +64,7 @@ const state = {
   dark: false,
   wakeLock: null,
   alertKey: null, // mục đang hiện trên thanh cảnh báo: 'p:<id điểm>' hoặc 's:<khoá biển>'
+  alertQuiet: false, // biển đang hiện trên thanh là biển camera chưa xác nhận (viền nét đứt)
   alertSign: null, // { item, distance } khi thanh cảnh báo đang hiện một biển báo
   detail: null, // hộp chi tiết biển đang mở: { key, dist } (dist = dòng "Còn khoảng …")
   stripKey: '',
@@ -95,6 +98,12 @@ const car = {
 };
 
 const isDriving = () => state.mode === 'nav' || state.mode === 'drive';
+
+// Camera nhận diện biển (thử nghiệm): kho biển đã học, bộ học, camera, bộ nhận diện và giới hạn tốc độ từ biển camera
+// đều nằm trong camctl.js. Mọi thao tác với camera chỉ làm được khi xe đã đỗ (camctl.isParked()).
+const camctl = new CameraController({ store, roads, signs, getMode: () => state.mode, carStationary: () => carStationary() });
+/** Xe đã đỗ (không ở chế độ lái, đứng yên ít nhất 5 giây): dùng cho các mục camera trong cài đặt. */
+const isParked = () => camctl.isParked();
 
 const map = new MapView($('map'), {
   onFollowChange: (mode) => $('btnLocate').classList.toggle('active', mode !== 'free'),
@@ -158,6 +167,7 @@ function setMode(mode) {
   }
   updateWakeLock();
   syncLayout();
+  camctl.refresh(); // vào/ra chế độ lái: mở hoặc đóng camera nhận diện biển
 }
 
 // Mỗi bảng/hộp thoại mở ra được ghi một mục vào lịch sử trình duyệt để nút Quay lại của điện thoại
@@ -342,6 +352,15 @@ function renderSpeed(fix, sp) {
   sign.hidden = sp.limit == null;
   if (sp.limit != null) $('limitValue').textContent = String(sp.limit);
   sign.classList.toggle('custom', sp.source === 'custom');
+  // Giới hạn lấy từ biển do camera ghi nhận (thấp hơn bản đồ): ghi rõ "Camera" trên biển giới hạn.
+  const cam = sp.source === 'camera';
+  sign.classList.toggle('camera', cam);
+  let src = $('limitSrc');
+  if (!src && cam) {
+    src = el('small', { id: 'limitSrc', class: 'limit-src' }, 'Camera');
+    sign.append(src);
+  }
+  if (src) src.hidden = !cam;
 }
 
 // Đang lái mà chừng này (ms) không có lần định vị mới, cũng không có tốc độ mới từ xe, thì đồng hồ thôi hiện số cũ.
@@ -368,7 +387,7 @@ function markSpeedStale() {
 function speakSpeed(sp) {
   if (sp.sound === 'voice') {
     voice.chime('over');
-    voice.speak(`Bạn đang chạy quá tốc độ. Giới hạn ${sp.limit} ki lô mét trên giờ`, PRIORITY.alert);
+    voice.speak(overSpeedSay(sp), PRIORITY.alert); // giới hạn từ camera thì câu có "(camera ghi nhận)"
   } else if (sp.sound === 'beep') voice.chime('over');
   else if (sp.announce && store.settings.speakLimit) {
     // Bộ máy biển báo vừa báo trước đúng giới hạn này thì không đọc lại khi xe sang đoạn đường mới.
@@ -388,7 +407,8 @@ let signFault = false;
  */
 function updateSigns(fix, s, nav) {
   try {
-    return signs.update(fix, roads, s, { vehicle: s.vehicle, nav, now: new Date() });
+    // Biển do camera ghi nhận đi cùng biển bản đồ; bộ máy tự bỏ chúng khi tắt "Báo biển do camera ghi nhận".
+    return signs.update(fix, roads, s, { vehicle: s.vehicle, nav, now: new Date(), learned: camctl.learned });
   } catch (err) {
     if (!signFault) {
       signFault = true;
@@ -423,17 +443,26 @@ function renderAlert(pointResult, signResult = null) {
       syncLayout();
     }
     state.alertKey = null;
+    state.alertQuiet = false;
     state.alertSign = null;
     return;
   }
-  if (state.alertKey !== show.key) {
+  const quiet = Boolean(show.sign?.quiet);
+  if (state.alertKey !== show.key || state.alertQuiet !== quiet) {
     state.alertKey = show.key;
+    state.alertQuiet = quiet;
     const icon = $('alertIcon');
     icon.classList.toggle('is-sign', Boolean(show.sign));
+    // Biển do camera ghi nhận (hoặc nhập từ tệp): huy hiệu camera nhỏ; chưa xác nhận thì viền nét đứt và chú thích.
+    const learned = Boolean(show.sign?.src);
+    bar.classList.toggle('learned', learned);
+    bar.classList.toggle('quiet', quiet);
     if (show.sign) {
       // SVG do signart.js sinh từ hằng số nội bộ; trị số trên biển đã được lọc theo mẫu số.
       icon.innerHTML = signSvg(show.sign.art, { size: 50, value: show.sign.value });
-      $('alertTitle').textContent = show.sign.title;
+      if (learned) icon.append(camBadge());
+      const cap = learnedCaption(show.sign);
+      $('alertTitle').replaceChildren(show.sign.title, ...(cap ? [el('small', { class: 'alert-cap' }, cap)] : []));
     } else {
       icon.innerHTML = glyphIcon(show.info.icon, 26);
       $('alertTitle').textContent = show.info.title;
@@ -458,18 +487,16 @@ function renderStrip(signResult) {
   const shown = state.alertSign?.item || null;
   const items =
     isDriving() && signResult ? signResult.upcoming.filter((it) => !shown || !sameSign(it, shown)).slice(0, 2) : [];
-  const key = items.map((it) => it.key).join('|');
+  const key = items.map((it) => `${it.key}${it.quiet ? '~' : ''}`).join('|');
   if (key !== state.stripKey) {
     state.stripKey = key;
     strip.replaceChildren(
-      ...items.map((it) =>
-        el(
-          'div',
-          { class: 'strip-item' },
-          el('span', { class: 'strip-art', html: signSvg(it.art, { size: 40, value: it.value, title: it.title }) }),
-          el('b', { class: 'strip-dist' })
-        )
-      )
+      ...items.map((it) => {
+        const art = el('span', { class: 'strip-art', html: signSvg(it.art, { size: 40, value: it.value, title: it.title }) });
+        if (it.src) art.append(camBadge());
+        const cls = ['strip-item', it.src ? 'learned' : '', it.quiet ? 'quiet' : ''].filter(Boolean).join(' ');
+        return el('div', { class: cls, title: learnedCaption(it) }, art, el('b', { class: 'strip-dist' }));
+      })
     );
   }
   items.forEach((it, i) => {
@@ -481,6 +508,9 @@ function renderStrip(signResult) {
 // Mục lấy từ thẻ mô tả chính đèn tín hiệu, vạch qua đường, gờ giảm tốc, đường ngang hay vòng xuyến (không phải
 // thẻ biển traffic_sign): dữ liệu không cho biết ở đó có biển thật, nên chỉ ghi "tương ứng biển".
 const EQUIVALENT_KIND = /^(signals|crossing|calming|rail|roundabout)(:|$)/;
+
+// Câu phải có ở mọi chỗ giải thích một biển do camera ghi nhận (PLAN §7).
+const OBEY_REAL_SIGNS = 'Luôn tuân theo biển báo và hiệu lệnh thực tế trên đường.';
 
 /** "Còn khoảng 140 m": số và đơn vị luôn nằm cùng một dòng. */
 const detailDistText = (d) => `Còn khoảng ${formatDistance(d).replace(/ (?=\S+$)/, '\u00a0')}`;
@@ -498,6 +528,14 @@ function showSignDetail() {
         : `Biển ${item.code} theo QCVN 41:2024`;
   }
   const dist = el('p', { class: 'sign-detail-dist' }, detailDistText(d));
+  // Biển do camera ghi nhận hoặc nhập từ tệp: ghi chú của bộ máy biển báo đã nói rõ nguồn và độ tin cậy.
+  let source = 'Nguồn: dữ liệu OpenStreetMap. Luôn tuân theo biển báo thực tế trên đường.';
+  let note = item.note;
+  if (item.src) {
+    source = item.src === 'import' ? 'Nguồn: tệp đã nhập.' : 'Nguồn: camera trên xe.';
+    if (!note || !note.includes(OBEY_REAL_SIGNS)) note = [note, OBEY_REAL_SIGNS].filter(Boolean).join(' ');
+  }
+  const cap = learnedCaption(item);
   openModal(
     item.title,
     el(
@@ -509,8 +547,9 @@ function showSignDetail() {
         el('span', { class: 'sign-detail-art', html: signSvg(item.art, { size: 88, value: item.value, title: item.title }) }),
         el('div', { class: 'min0' }, codeLine ? el('p', { class: 'sub' }, codeLine) : null, dist)
       ),
-      item.note ? el('p', { class: 'note' }, item.note) : null,
-      el('p', { class: 'note' }, 'Nguồn: dữ liệu OpenStreetMap. Luôn tuân theo biển báo thực tế trên đường.')
+      cap ? el('p', { class: 'sub learned-cap' }, cap) : null,
+      note ? el('p', { class: 'note' }, note) : null,
+      el('p', { class: 'note' }, source)
     )
   );
   // Khoảng cách được cập nhật theo thanh cảnh báo; biển rời thanh (đã đi qua) thì hộp tự đóng.
@@ -610,6 +649,7 @@ function startNav(simulate) {
   $('btnSimSpeed').textContent = '×1';
   if (simulate) {
     speedMon = new SpeedMonitor();
+    camctl.resetLimit();
     locator.startSimulation(route, 1);
   } else if (state.fix) onFix(state.fix);
   else toast('Chưa có vị trí GPS. Chỉ dẫn sẽ bắt đầu khi có tín hiệu.');
@@ -637,6 +677,7 @@ function endNav(arrived = false) {
     map.hidePuck();
     $('speedo').hidden = true;
     speedMon = new SpeedMonitor();
+    camctl.resetLimit();
     locator.resumeReal();
   }
   if (summary) showSummary(summary, arrived ? 'Bạn đã đến nơi' : 'Kết thúc chuyến đi');
@@ -689,6 +730,7 @@ function startTrip() {
   signs.reset();
   car.watch.reset();
   state.limitSaid.clear();
+  camctl.newTrip(); // bộ học, bộ chọn mức tải và giới hạn tốc độ camera bắt đầu lại
 }
 
 function updateTrip(fix) {
@@ -791,11 +833,17 @@ function onFix(fix) {
   // Có tốc độ do xe báo (bộ OBD) thì đồng hồ và cảnh báo quá tốc độ dùng số đó, chính xác hơn GPS.
   const kmh = fix.simulated ? null : carSpeed(); // chạy thử thì giữ tốc độ mô phỏng
   const speedFix = kmh == null ? fix : { ...fix, speed: kmh / 3.6 };
+  const sr = driving ? updateSigns(fix, s, nav) : null;
+  // Sau updateSigns (cùng hành lang của lần định vị này): bộ học biển, giới hạn tốc độ từ biển camera, bật/tắt camera.
+  // Lần định vị "Chạy thử" không được học và không dùng biển camera.
+  camctl.onFix(fix, { match, carSpeed: kmh });
   const sp = speedMon.update(speedFix, match, {
     vehicle: s.vehicle,
     tolerance: s.overTolerance,
     customMax: s.customMax,
     hasData: roads.hasData(fix.coord),
+    camera: camctl.speedLimit, // chỉ hạ, không bao giờ nâng giới hạn
+    camSpeed: s.camSpeed,
   });
   renderSpeed(speedFix, sp);
 
@@ -803,11 +851,11 @@ function onFix(fix) {
     // Đường ngang đường sắt nay do bộ máy biển báo đọc, nên không đưa vào bộ cảnh báo điểm nữa.
     const near = [...roads.pointsNear(fix.coord, 1300).filter((p) => p.kind !== 'rail'), ...reportPoints()];
     const result = alerts.update(fix, near, s, nav);
-    const sr = updateSigns(fix, s, nav);
     const signSay = signSpeech(sr, s); // tắt "Đọc giới hạn tốc độ khi thay đổi" thì câu này không có biển tốc độ
     if (s.speakLimit !== false) {
       for (const it of sr.fired) {
-        if (it.code === 'P.127' && it.value != null) state.limitSaid.set(it.value, Date.now());
+        // Biển camera đọc kèm lời rào, không thay được câu "Giới hạn tốc độ …" của bản đồ.
+        if (it.code === 'P.127' && it.value != null && !it.src) state.limitSaid.set(it.value, Date.now());
       }
     }
     speakSpeed(sp);
@@ -1298,6 +1346,7 @@ function onCarData(client, snap) {
   if (car.client !== client) return;
   car.snap = snap;
   renderCar();
+  camctl.tick(); // tốc độ của xe: xe đã đỗ chưa
   const now = Date.now();
   const warn = car.watch.update(snap, now).say;
   if (warn) {
@@ -1317,6 +1366,8 @@ function onCarData(client, snap) {
     tolerance: s.overTolerance,
     customMax: s.customMax,
     hasData: true,
+    camera: camctl.speedLimit,
+    camSpeed: s.camSpeed,
   });
   renderSpeed(f, sp);
   speakSpeed(sp);
@@ -1451,6 +1502,7 @@ function bindSettings() {
     store.set('vehicle', v);
     setVehicleButtons();
     speedMon = new SpeedMonitor();
+    camctl.resetLimit();
     if (replan && state.mode === 'routes') planRoute();
   };
   $('setCar').addEventListener('click', () => setVehicle('car', false));
@@ -1634,6 +1686,10 @@ async function boot() {
   store.onChange((what) => {
     if (what === 'reports') refreshPoints();
   });
+  camctl.init(); // không mở camera: chỉ đọc kho biển đã học và labels.json
+  initCamUi(camctl, { store, map, openModal, closeOverlays, toast }); // mục Cài đặt, nút camera, danh sách biển đã học
+  // Bộ chạy thử trên trình duyệt (tests/browser) đặt sẵn globalThis.__BD_TEST__ để đọc bộ điều phối camera.
+  if (globalThis.__BD_TEST__ && typeof globalThis.__BD_TEST__ === 'object') globalThis.__BD_TEST__.controller = camctl;
   locator.on(onFix);
   locator.onError((err) => {
     const status = $('gpsStatus');
@@ -1642,7 +1698,10 @@ async function boot() {
   });
   locator.start();
   reopenCar();
-  setInterval(markSpeedStale, 1000);
+  setInterval(() => {
+    markSpeedStale();
+    camctl.tick();
+  }, 1000);
 
   setInterval(() => {
     applyTheme();

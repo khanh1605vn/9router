@@ -73,6 +73,10 @@ const LINES = {
   star: '<path d="M12 3.5l2.6 5.4 5.9.8-4.3 4.1 1 5.9-5.2-2.8-5.2 2.8 1-5.9-4.3-4.1 5.9-.8L12 3.5z"/>',
   route: '<circle cx="6" cy="18" r="2.5"/><circle cx="18" cy="6" r="2.5"/><path d="M8.5 18H15a3 3 0 0 0 0-6H9a3 3 0 0 1 0-6h6.5"/>',
   bluetooth: '<path d="M6.5 7.5l11 9-5.5 4.5V3l5.5 4.5-11 9"/>',
+  // Máy ảnh (camera nhận diện biển trên xe), khác hình camera giao thông của điểm cảnh báo (GLYPHS.camera).
+  camera: '<path d="M4 8h3.2l1.6-2.5h6.4L16.8 8H20a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13.2" r="3.4"/>',
+  'camera-off':
+    '<path d="M4 8h3.2l1.6-2.5h6.4L16.8 8H20a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13.2" r="3.4"/><path d="M3 3l18 18" stroke-width="2.4"/>',
 };
 
 /** SVG nét mảnh cho nút bấm. */

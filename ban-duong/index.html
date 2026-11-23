@@ -44,9 +44,17 @@
       </div>
       <div id="alertDist" class="alert-dist"></div>
     </div>
+
+    <!-- Chỉ hiện sau khi bấm "Xem trên bản đồ" trong danh sách biển camera ghi nhận (xe đã đỗ). -->
+    <div id="learnedLayer" class="layer-pill" hidden>
+      <button id="btnLearnedList" class="layer-pill-main" type="button"><span data-icon="camera" data-size="18"></span><span>Biển camera ghi nhận</span></button>
+      <button id="btnLearnedHide" class="icon-btn quiet" type="button" aria-label="Ẩn biển camera ghi nhận trên bản đồ"><span data-icon="close" data-size="20"></span></button>
+    </div>
   </header>
 
   <div id="side">
+    <!-- Camera nhận diện biển: chỉ hiện khi đã bật; một lần chạm là tắt (luôn được, kể cả khi đang chạy). -->
+    <button id="btnCamChip" class="fab cam-chip" type="button" aria-label="Camera nhận diện biển. Bấm để tắt." hidden><span data-icon="camera"></span></button>
     <button id="btnSimSpeed" class="fab text" type="button" aria-label="Tốc độ chạy thử" hidden>×1</button>
     <button id="btnMute" class="fab" type="button" aria-label="Bật hoặc tắt âm thanh"><span data-icon="volume"></span></button>
     <button id="btnReport" class="fab" type="button" aria-label="Đánh dấu điểm cảnh báo"><span data-icon="report"></span></button>
@@ -179,6 +187,29 @@
       <h3>Biển báo phía trước</h3>
       <p class="note">Ứng dụng báo trước khoảng 100–200 m, xa hơn khi chạy nhanh. Biển lấy từ dữ liệu OpenStreetMap; ở Việt Nam biển được nhập vào bản đồ còn rất ít, nên ứng dụng dùng thêm thông tin tương đương: đèn tín hiệu, vạch qua đường, cấm rẽ, đường một chiều, giới hạn tốc độ và chỗ ngoặt tính từ hình dạng đường. Luôn tuân theo biển thực tế trên đường.</p>
       <div id="signOpts"></div>
+
+      <h3>Camera nhận diện biển (thử nghiệm)</h3>
+      <!-- Chữ của các ghi chú có id do js/camui.js điền (một chỗ, cùng hằng số với phần chạy). -->
+      <p id="camIntroNote" class="note"></p>
+      <div class="obd-card" hidden>
+        <p id="camStatus" class="obd-status" role="status">Camera đang tắt.</p>
+      </div>
+      <label class="opt"><span>Bật camera nhận diện biển<small id="camEnableHint">Chỉ bật được khi xe đã đỗ.</small></span><input id="optCamEnabled" type="checkbox" class="switch"></label>
+      <p id="camPermNote" class="note"></p>
+      <div class="opt"><span>Lắp đặt camera<small>Chọn camera, xem hình, chỉnh đường chân trời, đo tốc độ xử lý.</small></span><button id="btnCamCheck" class="btn" type="button">Kiểm tra camera</button></div>
+      <label class="opt"><span>Báo biển do camera ghi nhận<small>Biển mới thấy một lần chỉ hiện trên màn hình, không đọc thành tiếng.</small></span><input id="optSignCamera" type="checkbox" class="switch"></label>
+      <label class="opt"><span>Dùng biển tốc độ do camera ghi nhận cho đồng hồ tốc độ<small>Chỉ hạ giới hạn đang hiện, không bao giờ nâng lên.</small></span><input id="optCamSpeed" type="checkbox" class="switch"></label>
+      <p id="camLearnedCount" class="note cam-count"></p>
+      <div class="row wrap cam-actions">
+        <button id="btnCamList" class="btn" type="button"><span data-icon="list" data-size="18"></span><span>Xem danh sách</span></button>
+        <button id="btnCamExport" class="btn" type="button"><span data-icon="share" data-size="18"></span><span>Xuất tệp</span></button>
+        <button id="btnCamImport" class="btn" type="button"><span data-icon="download" data-size="18"></span><span>Nhập tệp</span></button>
+        <input id="camImportFile" type="file" accept=".geojson,.json,application/geo+json,application/json" hidden>
+      </div>
+      <p id="camParkedHint" class="note" hidden>Chỉ dùng khi xe đã đỗ.</p>
+      <div class="row wrap cam-actions"><button id="btnCamClear" class="btn danger" type="button"><span data-icon="trash" data-size="18"></span><span>Xoá các biển đã học</span></button></div>
+      <p id="camRunNote" class="note"></p>
+      <p class="note">Luôn tuân theo biển báo và hiệu lệnh thực tế trên đường.</p>
 
       <h3>Kết nối với ô tô</h3>
       <div class="obd-card">

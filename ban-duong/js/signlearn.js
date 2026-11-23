@@ -14,6 +14,7 @@ import { angleDiff, bearing } from './geo.js';
 import * as SE from './signengine.js';
 import {
   acceptTrack,
+  classified,
   defaultFoe,
   DEFAULT_HEIGHT,
   DEFAULT_HFOV,
@@ -80,6 +81,9 @@ export const PASS_MAX_MS = 120000; // xét một biển quá chừng này (ms) t
 export const CONFLICT_RADIUS = 25; // lượt bám biển khác cùng họ trong chừng này (m) quanh biển: không kết luận
 export const HIT_DEBOUNCE_MS = 60000; // một biển chỉ được tính thấy lại một lần trong chừng này (ms)
 export const HEALTH_WINDOW_MS = 10000; // health() xét các khung trong chừng này (ms)
+// Ảnh biển để kiểm tra độ chính xác (PLAN §6.5, tuỳ chọn onEvalCrop): một lượt bám "suýt được nhận" chỉ trượt các
+// bước lọc phân loại này (bước 2 đồng thuận, bước 3 độ tin), còn mọi bước khác đều qua (xem nearMiss).
+export const NEAR_MISS_REASONS = Object.freeze(['agreement', 'confidence']);
 
 const RAD = Math.PI / 180;
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
@@ -87,6 +91,23 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const lengthOf = (corr) => (corr && corr.cum && corr.cum.length ? corr.cum[corr.cum.length - 1] : 0);
 const usable = (corr) => Boolean(corr && Array.isArray(corr.coords) && corr.coords.length >= 2 && Array.isArray(corr.pieces));
 const defaultMono = () => (globalThis.performance ? globalThis.performance.now() : Date.now());
+
+/**
+ * Lượt bám "suýt được nhận" (near-miss), cho tập ảnh kiểm tra độ chính xác: acceptTrack trượt ở một bước trong
+ * NEAR_MISS_REASONS (đồng thuận hay độ tin của bộ phân loại), VÀ khi coi hai bước đó là qua (mọi khung đã phân loại đổi
+ * thành nhãn đa số với p = 1) thì acceptTrack nhận lượt bám. Tức là mọi bước khác đều qua: đủ khung đã phân loại
+ * (bước 1), nhãn được học (4), độ dài, hồi quy khoảng cách, cự li, cỡ biển, mặt biển, lệch ngang (5–9), định vị (10) và
+ * độ sáng (11). Không đặt biển lên hành lang (không cần bản đồ).
+ * @param res  kết quả acceptTrack(track, ctx) nếu đã có (khỏi tính lại)
+ */
+export function nearMiss(track, ctx = {}, res = acceptTrack(track, ctx)) {
+  if (!res || res.ok || !NEAR_MISS_REASONS.includes(res.reason)) return false;
+  const maj = majorityLabel(track || {});
+  if (!maj) return false;
+  const sure = [[maj.label, 1]];
+  const points = track.points.map((pt) => (classified(pt) ? { ...pt, cls: sure } : pt));
+  return acceptTrack({ ...track, points }, ctx).ok === true;
+}
 
 /** Các hàm của bộ máy cảnh báo mà bộ học dùng (thay được khi kiểm thử). */
 export const ENGINE = Object.freeze({
@@ -154,8 +175,11 @@ export class Learner {
    * @param engine   các hàm hình học của bộ máy cảnh báo (mặc định ENGINE)
    * @param vehicle  'car' | 'moto'
    * @param camera   { width, height, hfov, foe } (thay đổi sau bằng setCamera)
+   * @param onEvalCrop  tuỳ chọn (camEval): fn({ blob, label, p, pred, w, night, outcome: 'accepted'|'near-miss', reason })
+   *                 được gọi khi một lượt bám kết thúc, với ảnh cắt tốt nhất của nó (xem setEvalCrop). Không có thì bộ học
+   *                 không giữ ảnh nào.
    */
-  constructor({ store, roads = null, labels = null, now = () => Date.now(), mono = defaultMono, engine = ENGINE, vehicle = 'car', camera = {} } = {}) {
+  constructor({ store, roads = null, labels = null, now = () => Date.now(), mono = defaultMono, engine = ENGINE, vehicle = 'car', camera = {}, onEvalCrop = null } = {}) {
     this.store = store;
     this.roads = roads;
     this.labels = labels instanceof Map ? labels : labelIndex(labels);
@@ -166,8 +190,26 @@ export class Learner {
     this.tracker = new Tracker();
     this.listeners = new Set();
     this.counters = { frames: 0, tracks: 0, accepted: 0, rejected: {}, events: {} };
+    this.evalBest = new Map(); // id lượt bám đang mở → Map nhãn → ảnh cắt lớn nhất có nhãn đó đứng đầu
+    this.onEvalCrop = null;
+    this.setEvalCrop(onEvalCrop);
     this.setCamera(camera);
     this.reset();
+  }
+
+  /**
+   * Bật/tắt việc giữ ảnh cắt để kiểm tra độ chính xác (PLAN §6.5). fn nhận { blob (PNG), label, p, pred ([[nhãn, p]
+   * ×≤3] của ảnh đó), w (bề rộng khung, px), night (true|false|null), outcome, reason } khi một lượt bám kết thúc:
+   * - outcome 'accepted': lần thấy đã được nhận (qua các bước lọc và đặt được lên hành lang); reason là sự kiện của kho
+   *   ('new'|'hit'|'conflict'|'osm'|'suppressed'|'full'|'invalid'|'dup');
+   * - outcome 'near-miss': xem nearMiss(); reason là bước trượt ('agreement'|'confidence').
+   * Ảnh là ảnh lớn nhất của lượt bám trong các khung đã phân loại có nhãn đứng đầu đúng bằng label. Ảnh chỉ có khi kết
+   * quả Vision mang crops (process(…, { evalCrops: true })). fn = null: tắt, quên ngay các ảnh đang giữ. Lỗi (kể cả
+   * promise bị từ chối) của fn bị bỏ qua.
+   */
+  setEvalCrop(fn) {
+    this.onEvalCrop = typeof fn === 'function' ? fn : null;
+    if (!this.onEvalCrop) this.evalBest.clear();
   }
 
   /**
@@ -198,6 +240,7 @@ export class Learner {
     this.recentHits = new Map(); // id biển → lúc tính thấy lại (mono)
     this.simulated = false;
     this.tracker.reset();
+    this.evalBest.clear();
   }
 
   /** Nghe kết quả mỗi lượt đi qua biển: fn({ record, outcome: 'hit'|'miss'|'none', reason }). */
@@ -364,8 +407,56 @@ export class Learner {
       this.lastPosed = { t, D: pose.D };
     }
     const ended = this.tracker.update(result, pose);
+    if (this.onEvalCrop) this.#keepCrops(result, ended);
     const results = [...flushed.results, ...ended.map((tr) => this.#endTrack(tr))];
     return { ended: flushed.ended + ended.length, results };
+  }
+
+  /**
+   * Ảnh cắt của khung này (result.crops[k] ứng với result.boxes[i]) → giữ cho lượt bám đã nhận hộp đó, nếu hộp đã phân
+   * loại và lớn hơn ảnh đang giữ cho cùng nhãn đứng đầu. Lượt bám nhận hộp ở khung này khi điểm cuối của nó có cùng t và
+   * đúng toạ độ, cỡ của hộp (Tracker chép nguyên các trường đó).
+   */
+  #keepCrops(result, ended) {
+    const crops = Array.isArray(result.crops) ? result.crops : null;
+    if (!crops || !crops.length) return;
+    const withBox = [];
+    for (const c of crops) {
+      const b = c && Number.isInteger(c.i) ? result.boxes[c.i] : null;
+      if (b && c.blob) withBox.push({ b, blob: c.blob });
+    }
+    for (const tr of [...this.tracker.tracks, ...ended]) {
+      const pt = tr.points[tr.points.length - 1];
+      if (!pt || pt.t !== result.t || !classified(pt)) continue;
+      const hit = withBox.find(({ b }) => b.x === pt.x && b.y === pt.y && b.w === pt.w && b.h === pt.h);
+      if (!hit) continue;
+      const label = pt.cls[0][0];
+      let best = this.evalBest.get(tr.id);
+      if (!best) this.evalBest.set(tr.id, (best = new Map()));
+      const cur = best.get(label);
+      if (!cur || pt.w > cur.w) best.set(label, { blob: hit.blob, w: pt.w, p: pt.cls[0][1], pred: pt.cls.map((c) => [c[0], c[1]]) });
+    }
+  }
+
+  /** Gọi onEvalCrop với ảnh đã giữ cho nhãn label của một lượt bám (nếu có); không bao giờ ném lỗi ra ngoài. */
+  #evalCrop(kept, label, outcome, reason, night) {
+    const c = kept && kept.get(label);
+    const fn = this.onEvalCrop;
+    if (!c || !fn) return;
+    try {
+      const r = fn({ blob: c.blob, label, p: c.p, pred: c.pred, w: c.w, night, outcome, reason });
+      if (r && typeof r.then === 'function') r.then(null, () => {});
+    } catch {
+      /* ảnh kiểm tra chỉ là phần thêm: lỗi của bên nhận không ảnh hưởng tới việc học */
+    }
+  }
+
+  /** Ban đêm ở vị trí xe gần nhất (true|false), hoặc null khi chưa có lần định vị. */
+  #nightNow() {
+    const f = this.fixes[this.fixes.length - 1];
+    if (!f || !Array.isArray(f.coord)) return null;
+    const e = sunElevation(f.coord, new Date(this.now()));
+    return Number.isFinite(e) ? !(e > SUN_DAY) : null;
   }
 
   /** Gợi ý hộp cho bộ phân loại ở khung kế tiếp (Vision.process hints). */
@@ -407,9 +498,15 @@ export class Learner {
 
   #endTrack(track) {
     this.counters.tracks++;
-    const res = acceptTrack(track, { labels: this.labels, focal: this.focal, foe: this.camera.foe });
+    const kept = this.evalBest.get(track.id) || null;
+    this.evalBest.delete(track.id);
+    const ctx = { labels: this.labels, focal: this.focal, foe: this.camera.foe };
+    const res = acceptTrack(track, ctx);
     this.#markSeen(track);
     if (!res.ok) {
+      if (kept && this.onEvalCrop && nearMiss(track, ctx, res)) {
+        this.#evalCrop(kept, majorityLabel(track).label, 'near-miss', res.reason, this.#nightNow());
+      }
       this.#count('rejected', res.reason);
       return { ok: false, reason: res.reason };
     }
@@ -444,10 +541,12 @@ export class Learner {
     const t = this.mono();
     if (m.match && this.#recentHit(m.match.id, t)) {
       this.#count('events', 'dup');
+      this.#evalCrop(kept, o.label, 'accepted', 'dup', night);
       return { ok: true, event: 'dup', record: null, obs };
     }
     const r = this.store.observe(obs);
     this.#count('events', r.event);
+    this.#evalCrop(kept, o.label, 'accepted', r.event, night);
     if (r.record && (r.event === 'hit' || r.event === 'conflict' || r.event === 'new')) {
       this.recentHits.set(r.record.id, t);
       if (!r.created) {

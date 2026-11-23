@@ -41,6 +41,14 @@ const JUNCTION_NEAR = 40; // mục cách nút giao không quá chừng này (m) 
 const REVERSED = 120; // hướng đi tại mục lệch hơn chừng này (độ) so với lúc báo: đi theo chiều ngược lại
 const AGAINST_STUB = 1; // nhánh cấm đi ngược chiều: chỉ giữ chừng này (m) qua chỗ vào
 
+// Biển do camera trên xe ghi nhận (learnedsigns.js, tham số learned của SignEngine.update). Dữ liệu bản đồ luôn được
+// ưu tiên: có mục lấy từ bản đồ cùng loại biển (cùng dup) cách biển đã học không quá LEARNED_OSM_GAP m dọc hành lang
+// thì bỏ biển đã học. Bằng khoảng bộ học dùng để không học lại biển bản đồ đã có (signlearn.js, cổng 13).
+const LEARNED_OSM_GAP = 30;
+const CAMERA_SUFFIX = ' (camera ghi nhận)'; // lời rào sau câu đọc của biển do camera ghi nhận
+const PLATE_SUFFIX = ', có biển phụ'; // camera thấy biển phụ bên dưới (không đọc được nội dung)
+const DAY_MS = 864e5;
+
 // Nhớ hành lang vừa dựng (không dẫn đường):
 const PREFER_KEEP = 10e3; // không dựng được hành lang lâu hơn chừng này (ms) thì thôi ưu tiên các đường cũ
 const SWITCH_FIXES = 2; // số lần định vị liên tiếp cần để chuyển sang một đường không nối với các đường cũ
@@ -693,6 +701,7 @@ export function buildCorridor(fix, roads, nav = null, { vehicle = 'car', track =
 class Memo {
   constructor() {
     this.feats = new WeakMap();
+    this.camFeats = new WeakMap(); // nút biển đã học → các biển kèm câu đọc có lời rào và ghi chú (learnedFeatures)
     this.ways = new WeakMap();
     this.lines = new WeakMap();
     this.refresh();
@@ -707,6 +716,21 @@ class Memo {
   features(feat) {
     let v = this.feats.get(feat);
     if (!v) this.feats.set(feat, (v = classifyNode(feat.tags)));
+    return v;
+  }
+
+  /**
+   * Các biển của một nút biển đã học: như features, nhưng câu đọc có lời rào (cameraSay) và ghi chú thay bằng ghi chú
+   * về nguồn camera (learnedNote). Kho biển trả về cùng một đối tượng tới khi bản ghi đổi, nên chỉ tính một lần.
+   */
+  learnedFeatures(feat, formatDay) {
+    let v = this.camFeats.get(feat);
+    if (!v) {
+      const note = learnedNote(feat, formatDay);
+      const plate = Boolean(feat.meta && feat.meta.plate);
+      v = classifyNode(feat.tags).map((f) => ({ ...f, say: cameraSay(f.say, plate), note }));
+      this.camFeats.set(feat, v);
+    }
     return v;
   }
 
@@ -745,6 +769,96 @@ class Memo {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Biển do camera trên xe ghi nhận: lời rào, ghi chú, ngày
+// ---------------------------------------------------------------------------------------------
+
+/**
+ * Số thứ tự ngày theo lịch của máy (learnedsigns.js dayNumber: số ngày từ 1/1/1970 tới ngày đó theo giờ địa phương)
+ * → "dd/mm/yyyy", hoặc null. Số thứ tự đã mang sẵn ngày địa phương nên đọc lại theo UTC, không phụ thuộc múi giờ.
+ */
+export function dayDate(day) {
+  if (!Number.isFinite(day)) return null;
+  const d = new Date(Math.round(day) * DAY_MS);
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+}
+
+/** Câu đọc của một biển do camera ghi nhận: thêm ", có biển phụ" (nếu có) rồi " (camera ghi nhận)". */
+const cameraSay = (say, plate) => `${say}${plate ? PLATE_SUFFIX : ''}${CAMERA_SUFFIX}`;
+
+/**
+ * Ghi chú trên bảng chi tiết cho một nút biển đã học (hợp đồng 6: src, status, meta). Luôn kết thúc bằng lời nhắc
+ * tuân theo biển thật. formatDay: số thứ tự ngày → chữ (dayDate).
+ */
+function learnedNote(feat, formatDay = dayDate) {
+  const m = feat.meta || {};
+  const day = (d) => (Number.isFinite(d) ? formatDay(d) : null);
+  const first = day(m.firstDay);
+  const last = day(m.lastHitDay);
+  const n = Number.isFinite(m.hitDays) ? m.hitDays : 0;
+  const parts = [];
+  if (feat.src === 'import') {
+    parts.push('Biển lấy từ tệp đã nhập, không lấy từ bản đồ.');
+    if (first) parts.push(`Nhập ngày ${first}.`);
+    if (n > 0 && last) parts.push(`Camera trên xe đã thấy biển này vào ${n} ngày, lần gần nhất ngày ${last}.`);
+    else parts.push('Camera trên xe chưa thấy biển này.');
+  } else {
+    parts.push('Biển do camera trên xe ghi nhận, không lấy từ bản đồ.');
+    if (n >= 2 && first && last) parts.push(`Thấy lần đầu ngày ${first}, đã thấy vào ${n} ngày, lần gần nhất ngày ${last}.`);
+    else if (last || first) parts.push(`Thấy ngày ${last || first}, chưa thấy lại vào ngày khác.`);
+  }
+  if (m.plate) parts.push('Có biển phụ bên dưới, ứng dụng không đọc được nội dung.');
+  if (feat.status !== 'confirmed') parts.push('Chưa xác nhận nên không đọc thành tiếng.');
+  parts.push('Có thể nhận nhầm hoặc biển đã được dỡ. Luôn tuân theo biển báo và hiệu lệnh thực tế trên đường.');
+  return parts.join(' ');
+}
+
+/**
+ * Phần sau "Phía trước … mét, " của câu đọc, từ các mục đọc chung một câu (mỗi loại biển một mục, theo thứ tự khoảng
+ * cách; dạng của SignEngine.update: say, src, meta). Mục lấy từ bản đồ đọc trước, giữ nguyên thứ tự như trước khi có
+ * camera; biển do camera ghi nhận đọc sau cùng. Hai, ba biển camera không kèm biển phụ thì nối bằng "và" và chỉ nói
+ * lời rào một lần ("cấm rẽ trái và cấm quay đầu (camera ghi nhận)"); có biển phụ thì mỗi biển giữ lời rào của nó.
+ */
+export function joinSays(items) {
+  const says = [];
+  const cams = [];
+  for (const it of items) {
+    if (!it.src) {
+      if (!says.includes(it.say)) says.push(it.say);
+    } else if (!cams.some((c) => c.say === it.say)) cams.push(it);
+  }
+  if (cams.length === 1 || cams.some((c) => c.meta && c.meta.plate)) says.push(...cams.map((c) => c.say));
+  else if (cams.length) {
+    const bases = cams.map((c) => (c.say.endsWith(CAMERA_SUFFIX) ? c.say.slice(0, -CAMERA_SUFFIX.length) : c.say));
+    says.push(`${bases.slice(0, -1).join(', ')} và ${bases[bases.length - 1]}${CAMERA_SUFFIX}`);
+  }
+  return says.join(', ');
+}
+
+/** Nút biển đã học dùng được (kho biển là dữ liệu trên máy, vẫn kiểm tra để một bản ghi lạ không làm hỏng cảnh báo). */
+const learnedFeatOk = (f) =>
+  f != null &&
+  typeof f.id === 'string' &&
+  Array.isArray(f.coord) &&
+  Number.isFinite(f.coord[0]) &&
+  Number.isFinite(f.coord[1]) &&
+  f.tags != null &&
+  typeof f.tags === 'object';
+
+/** learned.featsNear(p, FEAT_RADIUS) không bao giờ làm hỏng cảnh báo từ bản đồ: lỗi thì coi như không có biển. */
+function learnedNear(learned, p) {
+  try {
+    const list = learned.featsNear(p, FEAT_RADIUS);
+    return Array.isArray(list) ? list.filter(learnedFeatOk) : [];
+  } catch {
+    return [];
+  }
+}
+
+/** Mục lấy từ bản đồ (mã dup) là cùng biển với biển đã học it: cùng dup; biển đã học không có trị số thì cùng mã. */
+const sameSign = (dup, it) => dup === it.dup || (it.value == null && it.code != null && dup.startsWith(`${it.code}|`));
+
+// ---------------------------------------------------------------------------------------------
 // C2. Các mục trên hành lang
 // ---------------------------------------------------------------------------------------------
 
@@ -767,10 +881,16 @@ function makeItem(key, f, s, coord, extra = {}) {
   };
 }
 
-/** Phần dữ liệu trả ra ngoài cho giao diện. */
-const publicItem = ({ key, kind, code, title, say, cat, distance: d, art, value, derived: isDerived, note, coord }) => ({
-  key, kind, code, title, say, cat, distance: d, art, value, derived: isDerived, note, coord,
-});
+/**
+ * Phần dữ liệu trả ra ngoài cho giao diện. Biển do camera ghi nhận có thêm src ('camera'|'import'), quiet (chưa xác
+ * nhận: chỉ hiện, không đọc) và meta ({ hitDays, firstDay, lastHitDay, plate }); mục lấy từ bản đồ không có ba khoá này.
+ */
+function publicItem(it) {
+  const { key, kind, code, title, say, cat, distance: d, art, value, derived: isDerived, note, coord } = it;
+  const out = { key, kind, code, title, say, cat, distance: d, art, value, derived: isDerived, note, coord };
+  if (it.src) Object.assign(out, { src: it.src, quiet: it.quiet, meta: it.meta });
+  return out;
+}
 
 /** Nút đứng riêng bên lề (không nằm trên đường) chỉ được nhận khi là biển, điểm nguy hiểm, dừng hoặc nhường đường. */
 function isStandaloneSign(tags) {
@@ -945,41 +1065,59 @@ function alignedWith(e, brg) {
   return diff <= 30 || diff >= 150;
 }
 
+/**
+ * Nút biển trên hành lang. Có ctx.learned (kho biển đã học, learnedsigns.js) thì tra cả biển do camera ghi nhận ở
+ * cùng các điểm tra cứu; chúng qua đúng các bước lọc như nút bản đồ (nhóm biển, chiều đi, bên đường, đường gần nhất)
+ * và mang thêm src, quiet, meta. Mục của chúng đứng sau mọi mục của nút bản đồ.
+ */
 function featItems(corr, roads, ctx, out) {
   const total = lengthOf(corr);
   const feats = new Map();
+  const learned = ctx.learned ? new Map() : null;
   for (let s = 0; ; s += FEAT_STEP) {
     const at = Math.min(s, total);
-    for (const f of roads.featsNear(pointOn(corr, at), FEAT_RADIUS)) feats.set(f.id, f);
+    const p = pointOn(corr, at);
+    for (const f of roads.featsNear(p, FEAT_RADIUS)) feats.set(f.id, f);
+    if (learned) for (const f of learnedNear(ctx.learned, p)) learned.set(f.id, f);
     if (at >= total) break;
   }
-  for (const feat of feats.values()) {
-    const features = ctx.memo.features(feat).filter((f) => categoryEnabled(f.cat, ctx.settings));
-    if (!features.length) continue;
-    const loc = locate(corr, feat.coord);
-    if (!loc || loc.s < 0 || loc.s > total + 1) continue;
-    let featWays = null;
-    if (feat.onWay) {
-      if (loc.d > ON_WAY_LATERAL) continue;
-      // Nút phải thuộc chính đường trên hành lang: loại nút của đường chui dưới cầu, đường song song.
-      const at = roads.waysAtVertex(feat.coord);
-      featWays = new Set(at.map((e) => e.way.id));
-      if (!at.some((e) => ctx.wayIds.has(e.way.id))) {
-        const piece = pieceAt(corr.pieces, loc.s);
-        if (!piece || piece.way) continue;
-        const brg = corridorBearing(corr, loc.index);
-        if (!at.some((e) => alignedWith(e, brg))) continue;
-      }
-    } else {
-      if (!isStandaloneSign(feat.tags) || loc.d > OFF_WAY_LATERAL) continue;
-      // Biển đứng gần một đường khác hơn hẳn thì là biển của đường đó.
-      const near = ctx.memo.nearestRoad(roads, feat);
-      if (near && !ctx.wayIds.has(near.id) && near.dist + 2 < loc.d) continue;
+  for (const feat of feats.values()) featItem(feat, ctx.memo.features(feat), null, corr, roads, ctx, out);
+  if (!learned) return;
+  for (const feat of learned.values()) {
+    const src = feat.src === 'import' ? 'import' : 'camera';
+    const extra = { src, quiet: feat.status !== 'confirmed', meta: feat.meta ?? null };
+    featItem(feat, ctx.memo.learnedFeatures(feat, ctx.formatDay), extra, corr, roads, ctx, out);
+  }
+}
+
+/** Các mục của một nút biển (extra: thêm vào mỗi mục, hoặc null). */
+function featItem(feat, all, extra, corr, roads, ctx, out) {
+  const total = lengthOf(corr);
+  const features = all.filter((f) => categoryEnabled(f.cat, ctx.settings));
+  if (!features.length) return;
+  const loc = locate(corr, feat.coord);
+  if (!loc || loc.s < 0 || loc.s > total + 1) return;
+  let featWays = null;
+  if (feat.onWay) {
+    if (loc.d > ON_WAY_LATERAL) return;
+    // Nút phải thuộc chính đường trên hành lang: loại nút của đường chui dưới cầu, đường song song.
+    const at = roads.waysAtVertex(feat.coord);
+    featWays = new Set(at.map((e) => e.way.id));
+    if (!at.some((e) => ctx.wayIds.has(e.way.id))) {
+      const piece = pieceAt(corr.pieces, loc.s);
+      if (!piece || piece.way) return;
+      const brg = corridorBearing(corr, loc.index);
+      if (!at.some((e) => alignedWith(e, brg))) return;
     }
-    for (const f of features) {
-      if (!applies(f, feat, loc, featWays, corr, roads, ctx)) continue;
-      out.push(makeItem(`${feat.id}:${f.kind}`, f, loc.s, feat.coord));
-    }
+  } else {
+    if (!isStandaloneSign(feat.tags) || loc.d > OFF_WAY_LATERAL) return;
+    // Biển đứng gần một đường khác hơn hẳn thì là biển của đường đó.
+    const near = ctx.memo.nearestRoad(roads, feat);
+    if (near && !ctx.wayIds.has(near.id) && near.dist + 2 < loc.d) return;
+  }
+  for (const f of features) {
+    if (!applies(f, feat, loc, featWays, corr, roads, ctx)) continue;
+    out.push(makeItem(`${feat.id}:${f.kind}`, f, loc.s, feat.coord, extra || undefined));
   }
 }
 
@@ -1361,6 +1499,7 @@ function curveItems(corr, ctx, out) {
 // ---------------------------------------------------------------------------------------------
 
 export { locate, pointOn, headingAt, pieceAt, armsAt, FEAT_STEP, FEAT_RADIUS, JUNCTION_NEAR, ON_WAY_LATERAL, OFF_WAY_LATERAL };
+export { LEARNED_OSM_GAP, CAMERA_SUFFIX, PLATE_SUFFIX };
 
 /** Các nút giao (đỉnh có từ 3 nhánh) trên hành lang → [{ s, key }] theo thứ tự s (junctionsOn, bộ nhớ tạm riêng). */
 export function junctionsAlong(corr, roads) {
@@ -1430,8 +1569,10 @@ export class SignEngine {
     return this.#corrTime;
   }
 
-  constructor() {
-    this.seen = new Map(); // khoá → { coord, time, reach, spoken, dup, brg, junction, anchors? }
+  /** @param opts { formatDay: số thứ tự ngày → chữ trong ghi chú biển do camera ghi nhận (mặc định dayDate) } */
+  constructor({ formatDay = dayDate } = {}) {
+    this.formatDay = formatDay;
+    this.seen = new Map(); // khoá → { coord, time, reach, spoken, dup, brg, junction, anchors?, src }
     this.lastSpeak = -Infinity;
     this.lastFix = null; // thời điểm lần định vị trước (ms)
     this.track = new Track(); // các đường và chiều đi của hành lang vừa dựng
@@ -1458,12 +1599,18 @@ export class SignEngine {
   /**
    * @param fix      { coord, speed (m/s), heading, accuracy, time (ms) }
    * @param roads    RoadData
-   * @param settings cài đặt (bật/tắt từng nhóm biển)
-   * @param opts     { vehicle: 'car'|'moto', nav: { route, seg, s } | null, now: Date }
+   * @param settings cài đặt (bật/tắt từng nhóm biển; signCamera === false: không báo biển do camera ghi nhận)
+   * @param opts     { vehicle: 'car'|'moto', nav: { route, seg, s } | null, now: Date,
+   *                   learned: kho biển đã học (có featsNear(coord, radius), như LearnedSigns) | null }
+   * Biển do camera ghi nhận (learned): dữ liệu bản đồ luôn thắng (cùng biển trong LEARNED_OSM_GAP m thì bỏ biển đã
+   * học); biển chưa xác nhận (quiet) chỉ hiện, không bao giờ được đọc; biển đã xác nhận được đọc kèm lời rào.
    * @returns { active: { item, distance, reach } | null, upcoming: [item], fired: [item], say: string | null }
    */
-  update(fix, roads, settings, { vehicle = 'car', nav = null, now = new Date() } = {}) {
+  update(fix, roads, settings, { vehicle = 'car', nav = null, now = new Date(), learned = null } = {}) {
     if (!fix || !Array.isArray(fix.coord) || !roads) return EMPTY;
+    // Biển do camera ghi nhận: chỉ khi có kho biển và người dùng không tắt "Báo biển do camera ghi nhận".
+    const camOn = !(settings && settings.signCamera === false);
+    const useLearned = camOn && learned != null && typeof learned.featsNear === 'function';
     const time = Number.isFinite(fix.time) ? fix.time : now.getTime();
     const speed = Math.max(0, fix.speed || 0);
     const reachNow = clamp(speed * 8, 100, 200);
@@ -1496,6 +1643,8 @@ export class SignEngine {
       wayIds: new Set(corr.pieces.filter((p) => p.way).map((p) => p.way.id)),
       junctions: junctionsOn(corr, roads, this.memo),
       curveKey: (anchors, brg) => this.#curveKey(anchors, brg),
+      learned: useLearned ? learned : null,
+      formatDay: this.formatDay,
     };
     const items = this.#collect(corr, roads, ctx);
 
@@ -1507,7 +1656,7 @@ export class SignEngine {
 
     // Mục mới thấy mà đã quá gần thì chỉ hiện. Biển cùng loại sát một biển vừa đọc, cùng chiều đi và cùng một
     // nút giao (đèn ở hai phía giao lộ, vạch qua đường liền nhau) thì coi như đã báo. Đèn hay lệnh cấm rẽ của
-    // một nút giao khác ngay sau đó vẫn được đọc.
+    // một nút giao khác ngay sau đó vẫn được đọc. Biển do camera ghi nhận đã đọc không làm biển bản đồ thôi đọc.
     for (const it of items) {
       if (this.seen.has(it.key)) continue;
       if (it.distance < minD) {
@@ -1517,6 +1666,7 @@ export class SignEngine {
       for (const e of this.seen.values()) {
         if (
           e.spoken &&
+          !(e.src && !it.src) &&
           e.dup === it.dup &&
           e.junction === it.junction &&
           sameWay(e.brg, it.brg) &&
@@ -1530,22 +1680,29 @@ export class SignEngine {
 
     const fired = [];
     let say = null;
-    const due = items.find((it) => !this.seen.has(it.key) && it.distance >= minD && it.distance <= trigger);
+    // Biển do camera ghi nhận mà chưa xác nhận (quiet) chỉ hiện, không bao giờ được đọc.
+    const due = items.find((it) => !it.quiet && !this.seen.has(it.key) && it.distance >= minD && it.distance <= trigger);
     if (due && speed >= MIN_SPEAK_SPEED && time - this.lastSpeak >= SPEAK_INTERVAL) {
-      // Cùng một biển từ hai nguồn (nút biển tốc độ và chỗ đổi giới hạn của đường) chỉ đọc một lần.
-      const says = [];
+      // Cùng một biển từ hai nguồn (nút biển tốc độ và chỗ đổi giới hạn của đường) chỉ đọc một lần. Mục lấy từ bản đồ
+      // giành chỗ trong câu trước, rồi mới tới biển do camera ghi nhận: cùng loại biển thì câu đọc theo bản đồ, và
+      // biển camera không chiếm chỗ của biển bản đồ khi câu đã đủ MAX_PER_SENTENCE loại.
+      const parts = [];
       const dups = new Set();
-      for (const it of items) {
-        if (this.seen.has(it.key) || it.distance < minD || it.distance > due.distance + MERGE_GAP) continue;
-        if (!dups.has(it.dup)) {
-          if (dups.size === MAX_PER_SENTENCE) continue;
-          dups.add(it.dup);
-          if (!says.includes(it.say)) says.push(it.say);
+      for (const camera of [false, true]) {
+        for (const it of items) {
+          if (Boolean(it.src) !== camera || it.quiet) continue;
+          if (this.seen.has(it.key) || it.distance < minD || it.distance > due.distance + MERGE_GAP) continue;
+          if (!dups.has(it.dup)) {
+            if (dups.size === MAX_PER_SENTENCE) continue;
+            dups.add(it.dup);
+            parts.push(it);
+          }
+          fired.push(it);
         }
-        fired.push(it);
       }
+      fired.sort((a, b) => a.distance - b.distance);
       for (const it of fired) this.#mark(it, time, Math.max(reachNow, it.distance), true);
-      say = `Phía trước ${spokenDistance(due.distance)}, ${says.join(', ')}`;
+      say = `Phía trước ${spokenDistance(fired[0].distance)}, ${joinSays(parts)}`;
       this.lastSpeak = time;
     }
 
@@ -1586,12 +1743,37 @@ export class SignEngine {
       const old = byKey.get(it.key);
       if (!old || it.distance < old.distance) byKey.set(it.key, it);
     }
-    const items = [...byKey.values()];
+    let items = [...byKey.values()];
     for (const it of items) {
       it.brg = headingAt(corr, it.distance); // hướng đi tại mục
       it.junction = it.junction ?? junctionNear(ctx.junctions, it.distance);
     }
+    if (ctx.learned) items = this.#withoutMapped(items, lengthOf(corr));
     return items.sort((a, b) => a.distance - b.distance);
+  }
+
+  /**
+   * Bỏ biển do camera ghi nhận mà bản đồ đã có (dữ liệu bản đồ luôn thắng): một mục bản đồ cùng biển (sameSign) phía
+   * trước cách nó không quá LEARNED_OSM_GAP m dọc hành lang, hoặc một mục bản đồ đã báo (seen, kể cả khi xe vừa đi
+   * qua nó) cùng chiều đi, cách nó không quá LEARNED_OSM_GAP m. Biển bản đồ ở ngay sau lưng xe không còn trên hành lang
+   * nên phải nhờ seen: thiếu bước này, biển camera đặt lệch vài mét về phía trước sẽ hiện thay chỗ biển vừa đi qua.
+   * Hành lang dài đủ LENGTH (bị cắt ở tầm nhìn, không phải ở cuối đường hay ở nút giao chưa rõ hướng): chưa thấy được
+   * LEARNED_OSM_GAP m sau biển camera ở cuối hành lang, nên chưa hiện nó (không thì nó hiện một lúc rồi biến mất khi
+   * biển bản đồ ngay sau đó vào tầm). Chỉ mất quãng 290–300 m cuối của danh sách sắp tới (UPCOMING_RANGE), xa hơn tầm đọc.
+   */
+  #withoutMapped(items, total) {
+    const horizon = total >= LENGTH - 1 ? total - LEARNED_OSM_GAP : Infinity;
+    const mapped = items.filter((it) => !it.src);
+    return items.filter((it) => {
+      if (!it.src) return true;
+      if (it.distance > horizon) return false;
+      if (mapped.some((o) => sameSign(o.dup, it) && Math.abs(o.distance - it.distance) <= LEARNED_OSM_GAP)) return false;
+      for (const e of this.seen.values()) {
+        if (e.src || !sameSign(e.dup, it) || !sameWay(e.brg, it.brg)) continue;
+        if (distance(e.coord, it.coord) <= LEARNED_OSM_GAP) return false;
+      }
+      return true;
+    });
   }
 
   #mark(it, time, reach, spoken) {
@@ -1604,6 +1786,7 @@ export class SignEngine {
       brg: it.brg,
       junction: it.junction,
       anchors: it.anchors || null,
+      src: it.src || null,
     });
   }
 

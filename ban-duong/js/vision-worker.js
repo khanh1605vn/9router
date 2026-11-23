@@ -9,8 +9,10 @@
 // Giao thức (mọi thông điệp được kiểm bằng VisionProto; kiểu lạ bị bỏ qua):
 //   → { type:'init', base, build:'compat'|'relaxed', files:{ iife, loader, wasm, det, cls }, sha256:{…}, labels }
 //   ← { type:'ready', build, input:[640,352], labels:n }
-//   → { type:'frame', id, t, bitmap (chuyển quyền), passes:['A'|'B',…], foe:{x,y}, hints?:[{x,y,w,h}] }
-//   ← { type:'result', id, t, ms:{pre,det,cls,total}, lum:{mean,std}, boxes:[…] }
+//   → { type:'frame', id, t, bitmap (chuyển quyền), passes:['A'|'B',…], foe:{x,y}, hints?:[{x,y,w,h}], evalCrops?:true }
+//   ← { type:'result', id, t, ms:{pre,det,cls,total[,crop]}, lum:{mean,std}, boxes:[…][, crops:[{ i, blob, w, h }]] }
+//     (crops và ms.crop chỉ có khi khung gửi evalCrops: true, tức người dùng bật "Lưu ảnh biển để kiểm tra độ chính
+//     xác": mỗi khung đã phân loại cho một ảnh PNG nhỏ, khung + 15 %, cạnh dài ≤ 96 px. Khung hình gốc vẫn bị đóng.)
 //   → { type:'stats' }   ← { type:'stats', frames, closed }   (đếm khung đã nhận / đã đóng, để kiểm thử)
 //   → { type:'run', id, model:'det'|'cls', input:Float32Array }   ← { type:'outputs', id, outputs:[{ shape, data }] }
 //     (chạy thẳng một tensor, để so với vectơ mẫu models/golden/ khi kiểm thử)
@@ -38,6 +40,7 @@ let closed = 0;
 let detCtx = null;
 let clsCtx = null;
 let lumCtx = null;
+let evalCanvas = null; // canvas cho ảnh cắt kiểm tra độ chính xác, tạo khi cần lần đầu
 // Mảng dùng lại giữa các khung hình.
 const detIn = new Float32Array(P.DET_W * P.DET_H * 3);
 const clsIn = new Float32Array(P.CLS_SIZE * P.CLS_SIZE * 3);
@@ -280,6 +283,30 @@ function draw(ctx, bmp, g, w, h) {
 
 let logits = null;
 
+/**
+ * Ảnh PNG cắt sát khung (VisionProto.evalCropRect) cho tập kiểm tra độ chính xác → { blob, w, h } hoặc null. Lỗi ở
+ * đây không làm hỏng khung: ảnh cắt chỉ là phần thêm.
+ */
+async function evalCrop(bmp, box, W, H) {
+  const r = P.evalCropRect(box, W, H);
+  if (!r) return null;
+  try {
+    if (!evalCanvas) evalCanvas = new OffscreenCanvas(r.w, r.h);
+    evalCanvas.width = r.w; // đổi cỡ cũng xoá nội dung và đặt lại trạng thái của ngữ cảnh
+    evalCanvas.height = r.h;
+    const ctx = evalCanvas.getContext('2d', { alpha: false });
+    if (!ctx) return null;
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = SMOOTHING;
+    ctx.drawImage(bmp, r.src[0], r.src[1], r.src[2], r.src[3], 0, 0, r.w, r.h);
+    const blob = await evalCanvas.convertToBlob({ type: P.EVAL_CROP_TYPE });
+    if (!blob || blob.type !== P.EVAL_CROP_TYPE || !(blob.size > 0 && blob.size <= P.EVAL_CROP_MAX_BYTES)) return null;
+    return { blob, w: r.w, h: r.h };
+  } catch {
+    return null;
+  }
+}
+
 async function onFrame(m) {
   const bmp = m.bitmap;
   const t0 = performance.now();
@@ -312,6 +339,7 @@ async function onFrame(m) {
     const kept = P.nms(cands);
     const boxes = kept.map((k) => ({ x: k.x, y: k.y, w: k.w, h: k.h, family: families[k.family], s: k.s, pass: k.pass, cls: null }));
     const c0 = performance.now();
+    const classified = [];
     for (const i of P.pickForClassifier(kept, m.hints)) {
       const r = P.cropRect(kept[i], W, H);
       if (!r) continue;
@@ -322,9 +350,23 @@ async function onFrame(m) {
       if (!logits) logits = new Float32Array(names.length);
       await runModel(cls, clsIn, [1, P.CLS_SIZE, P.CLS_SIZE, 3], (ch) => (ch === names.length ? logits : null));
       boxes[i].cls = P.topK(P.softmaxT(logits, T), names, P.TOP_K);
+      classified.push(i);
     }
     clsMs = performance.now() - c0;
-    return { type: 'result', id: m.id, t: m.t, ms: { pre, det: detMs, cls: clsMs, total: performance.now() - t0 }, lum, boxes };
+    const ms = { pre, det: detMs, cls: clsMs, total: 0 };
+    const out = { type: 'result', id: m.id, t: m.t, ms, lum, boxes };
+    if (m.evalCrops === true) {
+      // Chỉ khi được yêu cầu, và trước khi bitmap bị đóng (finally bên dưới).
+      const e0 = performance.now();
+      out.crops = [];
+      for (const i of classified) {
+        const c = await evalCrop(bmp, boxes[i], W, H);
+        if (c) out.crops.push({ i, ...c });
+      }
+      ms.crop = performance.now() - e0;
+    }
+    ms.total = performance.now() - t0;
+    return out;
   } finally {
     closeBitmap(m);
   }
