@@ -25,6 +25,7 @@ export const SETTLE_MS = 3500; // ms, xe dừng ở cuối đường rồi mới
 export const IDB_FLUSH_MS = 1500; // ms, chờ IndexedDB ghi xong trước khi đóng trang
 export const LOAD_TIMEOUT = 45000; // ms, chờ ứng dụng sẵn sàng
 export const POLL_MS = 200; // ms, nhịp theo dõi tư thế xe
+export const S4_JUNCTION_DAYS = 2; // S4: số lần đi qua sau khi dỡ cả biển của nút giao (R.122)
 export const S4_SLACK_DAYS = 3; // S4: thêm tối đa chừng này lần đi khi một lần đi không cho lần thiếu nào
 export const LATENCY_FRAMES = 200; // S11: số khung đo mỗi bản dựng (PLAN §8.2: ≥ 200)
 export const EPS = 1e-9; // sai số làm tròn khi so điểm L

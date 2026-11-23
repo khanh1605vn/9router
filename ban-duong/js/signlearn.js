@@ -11,6 +11,7 @@
 // Lần định vị mô phỏng ("Chạy thử") bị bỏ qua.
 
 import { angleDiff, bearing } from './geo.js';
+import { vertexKey } from './roaddata.js';
 import * as SE from './signengine.js';
 import {
   acceptTrack,
@@ -55,6 +56,9 @@ export const SIDE_MIN = 1.5; // lệch ngang dưới chừng này (m): biển tr
 export const OSM_DUP_RADIUS = 30; // bản đồ có biển cùng loại cách chừng này (m) theo cùng chiều: không học (bước 13)
 export const WAY_SLACK = 25; // các đường của hành lang trong chừng này (m) quanh biển là "đường của biển" (cùng MATCH_ALONG)
 export const PARALLEL_NEAR = 15; // đường khác cùng chiều trong chừng này (m) quanh biển: không biết xe ở đường nào
+// … trừ khi nó nối tiếp một đường của hành lang ở một đầu mút chung (OSM tách con đường ở nút giao) và lệch hướng không
+// quá chừng này (độ): đó là chính con đường đi tiếp, không phải đường song song.
+export const CONTINUE_ANGLE = 20;
 export const SUN_DAY = 5; // mặt trời cao hơn chừng này (độ) là ban ngày
 export const POS_ERR_MIN = 2; // sai số vị trí nhỏ nhất gán cho một lần thấy (m)
 export const ACCURACY_TO_SIGMA = 1.5; // sai số định vị của máy (bán kính) chia chừng này ≈ 1σ theo một trục
@@ -91,6 +95,28 @@ const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const lengthOf = (corr) => (corr && corr.cum && corr.cum.length ? corr.cum[corr.cum.length - 1] : 0);
 const usable = (corr) => Boolean(corr && Array.isArray(corr.coords) && corr.coords.length >= 2 && Array.isArray(corr.pieces));
 const defaultMono = () => (globalThis.performance ? globalThis.performance.now() : Date.now());
+
+/**
+ * Đường b nối tiếp đường a: chung một đầu mút (đỉnh đầu hoặc cuối của cả hai) và hướng đi vào đầu mút theo a lệch
+ * hướng đi ra theo b không quá CONTINUE_ANGLE (đo theo đoạn sát đầu mút). Không theo chiều vẽ, không theo chiều đi.
+ */
+export function continuesWay(a, b) {
+  if (!a || !b || a.id === b.id || !Array.isArray(a.g) || !Array.isArray(b.g)) return false;
+  const na = a.g.length >> 1;
+  const nb = b.g.length >> 1;
+  if (na < 2 || nb < 2) return false;
+  const pt = (w, i) => [w.g[2 * i], w.g[2 * i + 1]];
+  for (const [end, prev] of [[na - 1, na - 2], [0, 1]]) {
+    const v = pt(a, end);
+    const key = vertexKey(v);
+    const into = bearing(pt(a, prev), v);
+    for (const [start, next] of [[0, 1], [nb - 1, nb - 2]]) {
+      if (vertexKey(pt(b, start)) !== key) continue;
+      if (Math.abs(angleDiff(into, bearing(v, pt(b, next)))) <= CONTINUE_ANGLE) return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Lượt bám "suýt được nhận" (near-miss), cho tập ảnh kiểm tra độ chính xác: acceptTrack trượt ở một bước trong
@@ -739,9 +765,18 @@ export class Learner {
     if (!roads || typeof roads.matchWay !== 'function') return false;
     const total = lengthOf(corr);
     const fix = { coord: rec.coord, heading: this.engine.headingAt(corr, clamp(s, 0, total)), speed: 10, accuracy: 0 };
+    const skip = this.#waysNear(corr, s);
+    const mine = [...new Set(corr.pieces.filter((p) => p.way && skip.has(p.way.id)).map((p) => p.way))];
     try {
-      const other = roads.matchWay(fix, '', { vehicle: this.vehicle, skip: this.#waysNear(corr, s) });
-      return Boolean(other && other.dist <= PARALLEL_NEAR);
+      // Biển của nút giao nằm ngay trước nút giao, nơi hành lang thường dừng: đoạn đường đi tiếp sau nút giao (một id
+      // khác) không phải đường song song. Bỏ qua nó (và đoạn nối tiếp nó) rồi tìm lại. Mỗi vòng thêm một id: dừng được.
+      for (;;) {
+        const other = roads.matchWay(fix, '', { vehicle: this.vehicle, skip });
+        if (!other || other.dist > PARALLEL_NEAR) return false;
+        if (!mine.some((w) => continuesWay(w, other.way))) return true;
+        skip.add(other.way.id);
+        mine.push(other.way);
+      }
     } catch {
       return false;
     }

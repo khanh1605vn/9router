@@ -7,7 +7,9 @@ import {
   AIM_KEY_STEP,
   aimToPoint,
   camAvailable,
+  CHIP_WARN_HEALTH,
   chipLabel,
+  chipWarning,
   chipState,
   countText,
   dayText,
@@ -126,6 +128,21 @@ test('chipState: ẩn khi chưa bật; bật, tạm dừng, cần bật lại', 
   assert.equal(chipState(st({ enabled: true, camera: 'on', vision: 'error', visionError: 'integrity' })), 'off');
   assert.equal(chipState(st({ enabled: true, camera: 'on', vision: 'ready', visionError: 'args' })), 'on');
   for (const k of ['on', 'paused', 'off']) assert.match(chipLabel(k), /Bấm để tắt\.$/);
+});
+
+test('chipWarning: camera đang mở mà hình bị che, quá tối, quá sáng thì nút đổi màu và nhãn đọc nói rõ', () => {
+  assert.deepEqual([...CHIP_WARN_HEALTH], ['blank', 'dark', 'bright']);
+  for (const health of CHIP_WARN_HEALTH) {
+    const warn = chipWarning(st({ enabled: true, camera: 'on', capturing: true, health }));
+    assert.equal(warn, TEXT[health]);
+    assert.equal(chipLabel('on', warn), `Camera nhận diện biển đang bật. ${TEXT[health]} Bấm để tắt.`);
+  }
+  assert.equal(chipWarning(st({ enabled: true, camera: 'on', capturing: true, health: null })), null, 'hình tốt');
+  assert.equal(chipWarning(st({ enabled: true, camera: 'on', capturing: false, health: 'blank' })), null, 'chưa lấy khung');
+  assert.equal(chipWarning(st({ enabled: true, camera: 'paused', capturing: true, health: 'blank' })), null, 'tạm dừng');
+  assert.equal(chipWarning(st({ enabled: false, camera: 'on', capturing: true, health: 'blank' })), null, 'chưa bật');
+  assert.equal(chipLabel('on', null), chipLabel('on'));
+  assert.match(readFileSync(new URL('../css/app.css', import.meta.url), 'utf8'), /\.cam-chip\.cam-on\.cam-warn \{/);
 });
 
 test('settingsView: chỉ bật được khi xe đã đỗ; tắt và xoá luôn được', () => {

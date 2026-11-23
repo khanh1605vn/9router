@@ -382,6 +382,8 @@ test('phản hồi: result.crops tuỳ chọn, mỗi ảnh ứng với một khu
  * Worker đã khởi tạo với LiteRT giả (bộ dò trả một đỉnh ở giữa ô lượt A, khung 40×40; bộ phân loại chọn nhãn 0) và
  * OffscreenCanvas giả (ghi lại drawImage, convertToBlob trả PNG).
  */
+const WORKER_WAIT_MS = 10000; // chờ một tin của worker giả tối đa chừng này (ms), quá hạn thì phép thử báo lỗi, không treo
+
 async function readyWorker() {
   const posted = [];
   const ctx = vm.createContext({ console, performance, Blob, WebAssembly, crypto: globalThis.crypto });
@@ -454,8 +456,10 @@ async function readyWorker() {
     sha256[k] = createHash('sha256').update(new Uint8Array(files[k])).digest('hex');
   }
   send(init({ files, sha256 }));
+  // Chờ tin của worker theo thời gian, không theo số vòng lặp: băm SHA-256 trong worker chậm hẳn khi máy đang bận.
   const next = async () => {
-    for (let i = 0; i < 200 && !posted.length; i++) await new Promise((r) => setImmediate(r));
+    const until = performance.now() + WORKER_WAIT_MS;
+    while (!posted.length && performance.now() < until) await new Promise((r) => setTimeout(r, 1));
     return posted.shift();
   };
   const ready = await next();

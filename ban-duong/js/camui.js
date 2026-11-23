@@ -151,8 +151,18 @@ export function chipState(st) {
   return 'paused';
 }
 
-/** Nhãn đọc cho nút camera nhỏ (aria-label). */
-export function chipLabel(kind) {
+// Tình trạng hình (Learner#health) làm nút camera nhỏ đổi màu cảnh báo khi camera đang mở: bị che, quá tối, quá sáng.
+export const CHIP_WARN_HEALTH = Object.freeze(['blank', 'dark', 'bright']);
+
+/** Camera đang mở và đang lấy khung nhưng hình không dùng được: câu báo (như mục Cài đặt), không thì null. */
+export function chipWarning(st) {
+  if (chipState(st) !== 'on' || !st.capturing || !CHIP_WARN_HEALTH.includes(st.health)) return null;
+  return TEXT[st.health] || null;
+}
+
+/** Nhãn đọc cho nút camera nhỏ (aria-label). warn: câu của chipWarning khi camera đang mở mà hình không dùng được. */
+export function chipLabel(kind, warn = null) {
+  if (kind === 'on' && warn) return `Camera nhận diện biển đang bật. ${warn} Bấm để tắt.`;
   if (kind === 'on') return 'Camera nhận diện biển đang bật. Bấm để tắt.';
   if (kind === 'paused') return 'Camera nhận diện biển đang tạm dừng. Bấm để tắt.';
   return 'Camera nhận diện biển chưa chạy, cần bật lại khi xe đã đỗ. Bấm để tắt.';
@@ -880,18 +890,21 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
   let chipKind = '';
   function renderChip() {
     const kind = chipState(st);
+    const warn = chipWarning(st);
     const chip = $('btnCamChip');
     chip.hidden = kind === 'hidden';
-    if (kind === chipKind) {
+    const key = `${kind}|${warn || ''}`;
+    if (key === chipKind) {
       chip.title = st.text;
       return;
     }
-    chipKind = kind;
+    chipKind = key;
     chip.classList.toggle('cam-on', kind === 'on');
+    chip.classList.toggle('cam-warn', Boolean(warn));
     chip.classList.toggle('cam-paused', kind === 'paused');
     chip.classList.toggle('cam-off', kind === 'off');
     chip.firstElementChild.innerHTML = lineIcon(kind === 'off' ? 'camera-off' : 'camera');
-    chip.setAttribute('aria-label', chipLabel(kind));
+    chip.setAttribute('aria-label', chipLabel(kind, warn));
     chip.title = st.text;
   }
 

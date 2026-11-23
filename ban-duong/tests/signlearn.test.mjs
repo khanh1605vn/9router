@@ -13,6 +13,8 @@ import {
   ARM_SAME,
   CLS_MIN_PX,
   CONFLICT_RADIUS,
+  CONTINUE_ANGLE,
+  continuesWay,
   CORRIDOR_KEEP_MS,
   CORRIDORS_MAX,
   EXTRAPOLATE_MS,
@@ -863,6 +865,62 @@ test('đường song song cùng chiều (trên cao, đường gom): biển của
     const r = drive({ seed: 9, store, world: parallelWorld(gap), signs: [], sigma: 1.5 });
     assert.equal(outcomes(r, id), want, `đường khác cách ${gap} m`);
   }
+});
+
+/** Như WORLD, nhưng đường chính bị OSM tách làm hai ở nút giao (id 1 trước, id 4 sau), như dữ liệu thật. */
+function splitWorld() {
+  const main = [];
+  for (let x = 0; x <= 1400; x += 50) main.push(along(x));
+  const j = JX / 50;
+  const J = main[j];
+  const ways = [
+    { id: 1, n: 'Đường chính', h: 'primary', c: null, m: null, o: 0, g: main.slice(0, j + 1).flat() },
+    { id: 4, n: 'Đường chính', h: 'primary', c: null, m: null, o: 0, g: main.slice(j).flat() },
+    { id: 2, n: 'Đường ngang', h: 'residential', c: null, m: null, o: 0, g: [off(J, -150), off(J, -50), J, off(J, 50), off(J, 150)].flat() },
+  ];
+  const roads = new RoadData({ fetchImpl: () => Promise.reject(new Error('không có mạng')), cache: { get: async () => null, put: () => {} } });
+  roads.setCell(cellKey(...cellOf(O)), { ways, feats: [], v: 3, t: Date.now() });
+  return { roads, ways, J, jKey: vertexKey(J) };
+}
+
+test('continuesWay: chung đầu mút và lệch hướng ≤ CONTINUE_ANGLE là cùng con đường đi tiếp; rẽ ngang, giữa đường thì không', () => {
+  assert.equal(CONTINUE_ANGLE, 20);
+  const { ways, J } = splitWorld();
+  const [a, b, cross] = ways;
+  assert.equal(continuesWay(a, b), true);
+  assert.equal(continuesWay(b, a), true, 'không theo chiều vẽ');
+  const rev = { ...b, id: 5, g: [...b.g].reverse().reduce((o, v, i, arr) => (i % 2 ? o : [...o, arr[i + 1], v]), []) };
+  assert.equal(continuesWay(a, rev), true, 'đường đi tiếp vẽ ngược chiều');
+  assert.equal(continuesWay(a, a), false, 'chính nó');
+  // Đường ngang qua đỉnh nút giao (đỉnh giữa, không phải đầu mút) và một đường bắt đầu ở nút giao nhưng rẽ 90°.
+  assert.equal(continuesWay(a, cross), false);
+  const turn = { id: 6, g: [J, off(J, 50), off(J, 100)].flat() };
+  assert.equal(continuesWay(a, turn), false);
+  const bend = (deg) => ({ id: 7, g: [J, destination(J, 90 + deg, 50)].flat() });
+  assert.equal(continuesWay(a, bend(CONTINUE_ANGLE - 2)), true, `lệch ${CONTINUE_ANGLE - 2}°`);
+  assert.equal(continuesWay(a, bend(CONTINUE_ANGLE + 2)), false, `lệch ${CONTINUE_ANGLE + 2}°`);
+  assert.equal(continuesWay(a, { id: 8, g: [J] }), false, 'một đỉnh');
+  assert.equal(continuesWay(null, b), false);
+});
+
+test('biển của nút giao khi OSM tách đường ở nút giao: đoạn đi tiếp không bị coi là đường song song, biển bị dỡ vẫn bị trừ điểm', () => {
+  const world = splitWorld();
+  for (let seed = 1; seed <= 6; seed++) {
+    const store = newStore();
+    const rec = store.observe({ code: 'R.122', value: null, family: 'octagon', coord: along(STOP.x), facing: 270, wayId: 1, junction: world.jKey, night: false, posErr: 4 }).record;
+    store.confirm(rec.id);
+    const r = drive({ seed, store, world, signs: [], sigma: 1.5 });
+    assert.equal(outcomes(r, rec.id), 'miss:null', `seed ${seed}`);
+  }
+  // Đường song song thật sát bên vẫn chặn trừ điểm khi đường chính bị tách ở nút giao.
+  const { roads, ways } = splitWorld();
+  const par = [];
+  for (let x = 0; x <= 1400; x += 50) par.push(off(along(x), 6));
+  roads.setCell(cellKey(...cellOf(O)), { ways: [...ways, { id: 3, n: 'Đường gom', h: 'service', c: null, m: null, o: 1, g: par.flat() }], feats: [], v: 3, t: Date.now() });
+  const store = newStore();
+  const rec = store.observe({ code: 'R.122', value: null, family: 'octagon', coord: along(STOP.x), facing: 270, wayId: 1, junction: vertexKey(ways[0].g.slice(-2)), night: false, posErr: 4 }).record;
+  store.confirm(rec.id);
+  assert.equal(outcomes(drive({ seed: 9, store, world: { roads }, signs: [], sigma: 1.5 }), rec.id), 'none:way');
 });
 
 test('cùng đường: lần thấy của camera không gộp vào biển đường bên cạnh; id đường cũ của biển vẫn khớp và được cập nhật', () => {

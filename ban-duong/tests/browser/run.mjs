@@ -18,13 +18,14 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
+import { deflateSync } from 'node:zlib';
 import { APP, loadPlaywright, startDevServer } from './lib/harness.mjs';
 import {
   bboxHasRoad, bboxOf, JUNCTION_KEY, LANE_EAST, LANE_WEST, locate, ORIGIN, overpassFixture, ROAD, sceneSigns, SIGNS, SOURCES,
 } from './lib/drive-world.mjs';
 import {
   ALONG_ERR_MAX, DAY0, DAY_MS, EAST, GPS_ACCURACY, GPS_SIGMA, HIDE_STOP_MS, IDB_FLUSH_MS, LATENCY_FRAMES, LIMIT_MARGIN,
-  LOAD_TIMEOUT, missesToRetire, NIGHT_SHIFT_MS, POLL_MS, PORT_FIRST, PORT_LAST, RAMP_S, S4_SLACK_DAYS, SETTLE_MS, SPEAK_MAX,
+  LOAD_TIMEOUT, missesToRetire, NIGHT_SHIFT_MS, POLL_MS, PORT_FIRST, PORT_LAST, RAMP_S, S4_JUNCTION_DAYS, S4_SLACK_DAYS, SETTLE_MS, SPEAK_MAX,
   SPEAK_MIN, SPEED, TIMEZONE, VIEWPORT, WEST,
 } from './lib/drive-config.mjs';
 import { ML_MANIFEST } from '../../js/mlmanifest.js';
@@ -92,7 +93,32 @@ function trainingRunning() {
 // Trình duyệt và ngữ cảnh
 // ---------------------------------------------------------------------------------------------
 
-const PNG_1PX = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mPs7+v/DwAGIQK7l7qCRgAAAABJRU5ErkJggg==', 'base64');
+/** Ảnh PNG 1×1 một màu (ô bản đồ giả), dựng bằng zlib để chắc chắn giải mã được. */
+function png1px([r, g, b]) {
+  const crcTable = Array.from({ length: 256 }, (_, n) => {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    return c >>> 0;
+  });
+  const crc = (buf) => {
+    let c = 0xffffffff;
+    for (const x of buf) c = crcTable[(c ^ x) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type, data) => {
+    const len = Buffer.alloc(4);
+    len.writeUInt32BE(data.length);
+    const td = Buffer.concat([Buffer.from(type, 'ascii'), data]);
+    const c = Buffer.alloc(4);
+    c.writeUInt32BE(crc(td));
+    return Buffer.concat([len, td, c]);
+  };
+  const ihdr = Buffer.from([0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]); // 1×1, 8 bit, RGB
+  const idat = deflateSync(Buffer.from([0, r, g, b]));
+  return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', idat), chunk('IEND', Buffer.alloc(0))]);
+}
+
+const PNG_1PX = png1px([233, 238, 242]);
 const OVERPASS = JSON.stringify(overpassFixture());
 const EMPTY_OVERPASS = JSON.stringify({ version: 0.6, osm3s: { timestamp_osm_base: '2026-11-20T00:00:00Z' }, elements: [] });
 
@@ -400,7 +426,7 @@ SC.S3 = {
 };
 
 SC.S4 = {
-  title: 'Biển bị dỡ khỏi cảnh: biển đã xác nhận bị loại sau số lần thiếu của §5.8, biển chưa xác nhận sau 2 lần',
+  title: 'Biển bị dỡ khỏi cảnh: biển đã xác nhận bị loại sau số lần thiếu của §5.8, biển chưa xác nhận sau 2 lần; biển của nút giao cũng bị tính lần thiếu',
   async run(env, res) {
     // Ngày chuẩn bị: P.127 lên mức trần (L_MAX) để đúng câu "7 lần từ mức trần"; W.224 mới thấy một lần.
     const prep = await drivePass(env, { day: env.nextDay(), signs: ['P.127[50]', 'W.224', 'R.122'] });
@@ -440,6 +466,19 @@ SC.S4 = {
     const retiredAtW = timeline.find((x) => x.W?.status === 'retired');
     res.check(`P.127[50] bị loại đúng ở lần thiếu thứ ${kP}`, retiredAtP && retiredAtP.P.misses - p0.misses === kP && timeline.filter((x) => x.P?.status === 'confirmed').every((x) => x.P.misses - p0.misses < kP), retiredAtP?.P);
     res.check(`W.224 bị loại đúng ở lần thiếu thứ ${kW}`, retiredAtW && retiredAtW.W.misses - w0.misses === kW && timeline.filter((x) => x.W?.status === 'candidate').every((x) => x.W.misses - w0.misses < kW), retiredAtW?.W);
+    // Biển của nút giao (R.122, neo 10 m trước nút giao, đường chính tách làm hai đường OSM ở nút giao như dữ liệu thật):
+    // dỡ nốt nó thì mỗi lượt đi qua cũng phải là một lần thiếu.
+    const junction = [];
+    for (let i = 0; i < S4_JUNCTION_DAYS; i++) {
+      const pass = await drivePass(env, { day: env.nextDay(), signs: [] });
+      common(res, pass);
+      const R = recOf(pass.after, 'R.122');
+      const ev = pass.log.passed.filter((e) => e.code === 'R.122').map((e) => `${e.outcome}${e.reason ? `:${e.reason}` : ''}`);
+      junction.push({ day: pass.day, R: R && recBrief(R), events: ev });
+      res.check(`ngày ${pass.day}: R.122 đã dỡ (biển nút giao) có một lần thiếu`, ev.length === 1 && ev[0] === 'miss' && R && R.misses === (lastR?.misses ?? 0) + 1, { events: ev, before: lastR && recBrief(lastR), after: R && recBrief(R) });
+      if (R) lastR = R;
+    }
+    res.data.junction = junction;
     env.chain.confirmed = false; // P.127 đã bị loại: các kịch bản sau cần chuỗi S1–S3 mới
   },
 };

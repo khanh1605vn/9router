@@ -180,6 +180,7 @@ test('ngưỡng của kịch bản (lib/drive-config.mjs)', () => {
   assert.equal(C.LOAD_TIMEOUT, 45000);
   assert.equal(C.POLL_MS, 200);
   assert.equal(C.S4_SLACK_DAYS, 3);
+  assert.equal(C.S4_JUNCTION_DAYS, 2);
   assert.ok(C.LATENCY_FRAMES >= 200);
   assert.equal(C.DAY_MS, 864e5);
   assert.equal(C.TIMEZONE, 'Asia/Ho_Chi_Minh');

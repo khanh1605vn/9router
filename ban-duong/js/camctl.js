@@ -64,7 +64,7 @@ export const TEXT = Object.freeze({
   dark: 'Hình từ camera quá tối.',
   bright: 'Hình từ camera quá sáng.',
   labels: 'Chưa tải được danh sách biển. Hãy kết nối mạng rồi mở lại ứng dụng.',
-  keepAwakeOn: 'Đã bật "Giữ màn hình sáng khi dẫn đường" vì camera chỉ chạy khi màn hình sáng.',
+  keepAwakeOn: 'Đã bật “Giữ màn hình sáng khi lái” vì camera chỉ chạy khi màn hình sáng.',
 });
 
 /** Lời giải thích cho mã lỗi của bộ nhận diện (VisionError.code). */

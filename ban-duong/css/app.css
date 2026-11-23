@@ -560,8 +560,10 @@ h2, h3, p { margin: 0; }
 
 /* ---------- Camera nhận diện biển (thử nghiệm) ---------- */
 
-/* Nút camera nhỏ cạnh các nút bản đồ: xanh lục khi camera đang mở, xám khi tạm dừng, gạch chéo khi cần bật lại. */
+/* Nút camera nhỏ cạnh các nút bản đồ: xanh lục khi camera đang mở, xám khi tạm dừng, gạch chéo khi cần bật lại.
+   Hổ phách khi camera đang mở mà hình không dùng được (bị che, quá tối, quá sáng). */
 .fab.cam-chip.cam-on { background: var(--sign-green); color: #fff; }
+.fab.cam-chip.cam-on.cam-warn { background: var(--amber); color: #fff; }
 .fab.cam-chip.cam-paused { color: var(--ink-3); }
 .fab.cam-chip.cam-off { color: var(--ink-2); }
 
