@@ -771,6 +771,98 @@ test('LV RESET tự xuất hiện khi không có lệnh nào đang chờ cũng �
   assert.equal(s.client.state, 'ready');
 });
 
+test('LV RESET tự đến ngay sau câu trả lời ATZ (trước ATE0) không bị bỏ qua: ATFE rồi khởi tạo lại', async () => {
+  const s = setup();
+  s.client.start();
+  await s.clock.advance(1150); // ATZ gửi lúc 400 ms, trả lời lúc ~1000 ms; ATE0 chưa gửi trước 1400 ms
+  assert.deepEqual(s.cmds(), ['ATZ']);
+  s.elm.spontaneous(['LV RESET']); // đề máy đúng lúc này: chip sụt áp, chặn dò CAN tới khi có ATFE
+  await s.clock.advance(8000);
+  assert.deepEqual(s.cmds().slice(0, 4), ['ATZ', 'ATFE', 'ATZ', 'ATE0']);
+  assert.equal(s.elm.feCount, 1);
+  assert.ok(!s.states.includes('nocar'), 'không được kẹt ở trạng thái chưa thấy xe');
+  assert.equal(s.client.state, 'ready');
+  assert.equal(s.snap.speed, 60);
+  assertSafeWrites(s.elm.writes);
+});
+
+test('LV RESET thay cho câu trả lời ATZ ở lần kết nối đầu → ATFE rồi ATZ lại, không báo lỗi', async () => {
+  const s = setup();
+  s.elm.lvResetOnce = 'ATZ';
+  s.client.start();
+  await s.clock.advance(10000);
+  assert.deepEqual(s.cmds().slice(0, 5), ['ATZ', 'ATI', 'ATFE', 'ATZ', 'ATE0']);
+  assert.equal(s.elm.feCount, 1);
+  assert.ok(!s.states.includes('nocar') && !s.states.includes('error'));
+  assert.equal(s.client.state, 'ready');
+  assert.equal(s.snap.adapter, 'ELM327 v1.5');
+});
+
+test('LV RESET ở bất kỳ lúc nào trong khoảng ATZ (400–1400 ms) đều dẫn tới ATFE và đọc được xe', async () => {
+  for (let t = 400; t <= 1400; t += 50) {
+    const s = setup();
+    s.client.start();
+    await s.clock.advance(t);
+    s.elm.spontaneous(['LV RESET']);
+    await s.clock.advance(12000);
+    assert.equal(s.client.state, 'ready', `LV RESET lúc ${t} ms`);
+    assert.ok(s.elm.feCount >= 1, `LV RESET lúc ${t} ms: chưa gửi ATFE`);
+    assert.ok(!s.states.includes('nocar'), `LV RESET lúc ${t} ms: kẹt ở nocar`);
+  }
+});
+
+test('LV RESET thay cho câu trả lời ATFE (sụt áp lần hai) → sau ATZ lại ATFE, không kẹt ở nocar', async () => {
+  const s = setup();
+  s.client.start();
+  await s.clock.advance(8000);
+  assert.equal(s.client.state, 'ready');
+  const n = s.elm.commands.length;
+  s.elm.lvResetOnce = 'ATFE';
+  s.elm.spontaneous(['LV RESET']);
+  await s.clock.advance(10000);
+  const list = s.cmds().slice(n);
+  assert.deepEqual(list.slice(0, 4), ['ATFE', 'ATZ', 'ATFE', 'ATZ']);
+  assert.ok(!s.states.slice(s.states.indexOf('ready')).includes('nocar'), 'không được kẹt ở trạng thái chưa thấy xe');
+  assert.equal(s.client.state, 'ready');
+  assert.equal(s.snap.speed, 60);
+});
+
+test('hai lần sụt áp liên tiếp khi đề máy (lần sau rơi vào lúc khởi tạo lại) vẫn đọc lại được xe', async () => {
+  for (const gap of [50, 200, 400, 600, 800, 1000, 1100, 1300, 2000]) {
+    const s = setup();
+    s.client.start();
+    await s.clock.advance(8000);
+    assert.equal(s.client.state, 'ready');
+    s.elm.spontaneous(['LV RESET']);
+    await s.clock.advance(gap);
+    s.elm.spontaneous(['LV RESET']);
+    await s.clock.advance(30000);
+    assert.equal(s.client.state, 'ready', `cách nhau ${gap} ms`);
+    assert.equal(s.snap.speed, 60);
+  }
+});
+
+test("dò CAN bị chặn mà ứng dụng không thấy 'LV RESET' → 'UNABLE TO CONNECT', lần thử sau gửi ATFE trước 0100", async () => {
+  const s = setup();
+  s.client.start();
+  await s.clock.advance(100);
+  // Bộ ELM327 giả chỉ bỏ chặn khi có ATFE (ATZ không bỏ chặn), như trường hợp xấu nhất.
+  s.elm.canBlocked = true;
+  await s.clock.advance(6000);
+  assert.equal(s.client.state, 'nocar');
+  assert.equal(s.infos[s.states.indexOf('nocar')].reason, 'unable');
+  assert.equal(s.elm.feCount, 0);
+  await s.clock.advance(15000);
+  const list = s.cmds();
+  const k = list.indexOf('ATFE');
+  assert.ok(k > list.indexOf('0100'), 'phải gửi ATFE khi thử lại sau UNABLE TO CONNECT');
+  assert.equal(list[k + 1], '0100');
+  assert.equal(s.elm.feCount, 1);
+  assert.equal(s.client.state, 'ready');
+  assert.equal(s.snap.speed, 60);
+  assertSafeWrites(s.elm.writes);
+});
+
 test('bộ đọc không có ATRV (trả ?) → đọc điện áp bằng PID 0142', async () => {
   const s = setup({ atrv: '?' });
   s.client.start();

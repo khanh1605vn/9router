@@ -195,11 +195,11 @@
       <div class="opt"><span>Mã lỗi động cơ<small id="obdDtcHint">Chỉ đọc được khi đã kết nối và xe đang đứng yên.</small></span><button id="btnObdDtc" class="btn" type="button" disabled>Đọc mã lỗi</button></div>
       <div id="obdDtc" class="obd-dtc" hidden></div>
       <p class="note">Cần một bộ đọc OBD-II dùng chip ELM327 (hoặc tương thích) cắm vào cổng OBD của xe. Chỉ kết nối khi xe đang đỗ.</p>
-      <p class="note">Bộ Bluetooth Low Energy (BLE): bấm “Kết nối bộ OBD Bluetooth” rồi chọn thiết bị, không cần ghép đôi trước. Không thấy bộ đọc trong danh sách thì bấm “Hiện mọi thiết bị”.</p>
+      <p class="note">Bộ Bluetooth Low Energy (BLE): bật Bluetooth, bấm “Kết nối bộ OBD Bluetooth” rồi chọn thiết bị, không cần ghép đôi trước. Nếu Android hỏi, cho phép Chrome dùng quyền “Thiết bị ở gần” (Android 12 trở lên) hoặc “Vị trí” (Android 11 trở xuống). Không thấy bộ đọc trong danh sách thì bấm “Hiện mọi thiết bị”.</p>
       <p class="note">Bộ Bluetooth thường (loại rẻ, phổ biến): ghép đôi trong phần cài đặt Bluetooth của điện thoại trước (mã PIN thường là 1234 hoặc 0000), rồi bấm “Bộ OBD Bluetooth thường”. Cần Chrome 138 trở lên trên Android.</p>
-      <p class="note">Dùng được trên Chrome, Edge, Samsung Internet (Android) và Chrome trên máy tính. Không dùng được trên iPhone, iPad, Firefox, hoặc khi mở trang ngay trong Zalo, Facebook.</p>
+      <p class="note">Dùng được trên Chrome, Samsung Internet (Android) và Chrome trên máy tính Windows, macOS, ChromeOS (trên Linux chưa bật sẵn). Edge trên Android chưa được kiểm chứng. Không dùng được trên iPhone, iPad, Firefox, hoặc khi mở trang ngay trong Zalo, Facebook.</p>
       <p class="note">Ứng dụng chỉ đọc tốc độ, vòng tua, nhiệt độ nước làm mát, mức nhiên liệu và điện áp; dữ liệu của xe không được gửi đi đâu. Ứng dụng không đọc số khung (VIN) và không bao giờ xoá mã lỗi.</p>
-      <label class="opt"><span>Giao diện màn hình ô tô<small>Tự động: bật khi màn hình cảm ứng nằm ngang và rộng (màn hình Android trên xe).</small></span>
+      <label class="opt"><span>Giao diện màn hình ô tô<small>Tự động: bật khi màn hình cảm ứng nằm ngang và rộng, như màn hình trên xe hoặc điện thoại xoay ngang.</small></span>
         <select id="optCarUi"><option value="auto">Tự động</option><option value="on">Bật</option><option value="off">Tắt</option></select>
       </label>
 

@@ -403,8 +403,14 @@ export class MapView {
     const zoom = zoom0 + (wantZoom - zoom0) * 0.08;
     const h = this.container.clientHeight;
     const left = this.pad.left || 0;
+    // Khi lái, mũi tên nằm ở phần dưới bản đồ để thấy xa phía trước, nhưng không bao giờ dưới vùng thanh trên
+    // (biển chỉ dẫn, thanh cảnh báo) khi màn hình thấp như điện thoại xoay ngang. Đổi dần để bản đồ không giật
+    // khi thanh cảnh báo hiện ra hay ẩn đi.
+    const wantTop = Math.max(Math.round(h * 0.36), Math.min(this.pad.top, h - this.pad.bottom - 40));
+    this.driveTop = this.driveTop == null || !drive ? wantTop : this.driveTop + (wantTop - this.driveTop) * 0.15;
+    if (Math.abs(wantTop - this.driveTop) < 1) this.driveTop = wantTop;
     const padding = drive
-      ? { top: Math.round(h * 0.36), bottom: this.pad.bottom, left, right: 0 }
+      ? { top: Math.round(this.driveTop), bottom: this.pad.bottom, left, right: 0 }
       : { top: this.pad.top, bottom: this.pad.bottom, left, right: 0 };
     const key = `${this.shown.lon.toFixed(7)},${this.shown.lat.toFixed(7)},${bearing.toFixed(2)},${pitch.toFixed(2)},${zoom.toFixed(3)},${padding.top},${padding.bottom},${left}`;
     if (key === this.lastCam) return; // không có gì thay đổi: khỏi vẽ lại

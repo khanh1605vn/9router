@@ -79,9 +79,12 @@ export function buildQuery(cx, cy) {
     `node["barrier"="toll_booth"];` +
     `)->.pts;` +
     `rel(bw.roads)["type"="restriction"]->.restr;` +
+    // Theo mã nguồn Overpass, node(r.restr:"via") là câu lệnh đệ quy đứng riêng nên không bị khung [bbox]
+    // chung giới hạn: nút "via" nằm ngoài ô vẫn được in ra (chưa kiểm chứng trên máy chủ thật).
     `node(r.restr:"via")->.via;` +
     `rel["type"="enforcement"]->.enf;` +
-    `.roads out body geom qt;` +
+    // Đường chỉ cần thẻ và hình học; mảng id nút không dùng tới mà chiếm khoảng 20% dung lượng sau khi nén.
+    `.roads out tags geom qt;` +
     `.pts out body qt;` +
     `.restr out body qt;` +
     `.via out skel qt;` +
@@ -195,29 +198,16 @@ function parseRestriction(el, coordOf) {
   };
 }
 
-/** Tìm toạ độ các nút "via" chưa được in ra, dựa vào mảng "nodes" và "geometry" của đường. */
-function coordsFromWays(wayEls, wanted, into) {
-  for (const el of wayEls) {
-    if (!Array.isArray(el.nodes) || !Array.isArray(el.geometry)) continue;
-    el.nodes.forEach((ref, k) => {
-      const pt = el.geometry[k];
-      if (pt && wanted.has(ref) && !into.has(ref)) into.set(ref, [pt.lon, pt.lat]);
-    });
-  }
-}
-
 /** Chuyển phản hồi Overpass thành { ways, points, feats, restr, base } gọn nhẹ. */
 export function parseOverpass(json) {
   const elements = json?.elements || [];
   const ways = [];
-  const wayEls = [];
   const vertices = new Set();
   for (const el of elements) {
     if (el.type !== 'way') continue;
     const way = parseWay(el);
     if (!way) continue;
     ways.push(way);
-    wayEls.push(el);
     for (let i = 0; i < way.g.length; i += 2) vertices.add(vkey(way.g[i], way.g[i + 1]));
   }
 
@@ -279,14 +269,7 @@ export function parseOverpass(json) {
     }
   }
 
-  // Nút "via" nằm ngoài khung ô không được in ra, nhưng vẫn có trong hình học của đường.
-  const missing = new Set();
-  for (const el of restrEls) {
-    for (const m of el.members || []) {
-      if (m.role === 'via' && m.type === 'node' && !nodeCoord.has(m.ref)) missing.add(m.ref);
-    }
-  }
-  if (missing.size) coordsFromWays(wayEls, missing, nodeCoord);
+  // Toạ độ nút "via" lấy từ nhóm ".via out skel" (hoặc nhóm điểm, nếu nút có thẻ).
   const restr = [];
   for (const el of restrEls) {
     const r = parseRestriction(el, (ref) => nodeCoord.get(ref));
@@ -419,6 +402,9 @@ export async function clearRoadCache() {
 
 const IDB_CACHE = { get: dbGet, put: dbPut };
 
+/** Bản ghi (hoặc ô trong bộ nhớ) đúng phiên bản và chưa quá 7 ngày. */
+const isFresh = (rec) => rec.v === CACHE_VERSION && Date.now() - rec.t < TTL;
+
 export class RoadData {
   /**
    * @param fetchImpl  thay cho fetch (kiểm thử)
@@ -427,8 +413,10 @@ export class RoadData {
   constructor({ fetchImpl, cache } = {}) {
     this.fetch = fetchImpl || ((...a) => fetch(...a));
     this.cache = cache || IDB_CACHE;
-    this.cells = new Map(); // key → { ways, points, feats, restr, base, grid, vertices, featGrid, restrFrom, used }
-    this.pending = new Map();
+    this.cells = new Map(); // key → { ways, points, feats, restr, base, v, t, grid, vertices, featGrid, restrFrom, used }
+    this.reading = new Map(); // ô đang đọc từ bộ đệm trên máy
+    this.cacheChecked = new Set(); // ô đã đọc bộ đệm xong (kể cả khi không có bản ghi)
+    this.pending = new Map(); // ô đang tải từ Overpass (tối đa hai)
     this.failedAt = new Map();
     this.listeners = new Set();
     this.endpoint = 0;
@@ -455,6 +443,9 @@ export class RoadData {
       feats,
       restr,
       base: data.base || null,
+      // Phiên bản và thời điểm tải của bản ghi: thiếu hoặc quá hạn thì ô được tải lại khi có dịp.
+      v: data.v ?? null,
+      t: data.t ?? 0,
       grid: buildIndex(ways),
       vertices: buildVertexIndex(ways),
       featGrid: buildFeatGrid(feats),
@@ -464,6 +455,7 @@ export class RoadData {
     if (this.cells.size > MAX_CELLS) {
       const oldest = [...this.cells.entries()].sort((a, b) => a[1].used - b[1].used)[0];
       this.cells.delete(oldest[0]);
+      this.cacheChecked.delete(oldest[0]); // quay lại ô này thì đọc bộ đệm trước
     }
   }
 
@@ -484,18 +476,27 @@ export class RoadData {
     }
   }
 
-  async #load(cx, cy) {
-    const key = cellKey(cx, cy);
+  /** Đọc ô từ bộ đệm trên máy, rồi tải từ mạng nếu không có bản ghi hoặc bản ghi đã cũ. */
+  async #readCell(key, cx, cy) {
     const cached = await this.#readCache(key);
-    const fresh = cached && cached.v === CACHE_VERSION && Date.now() - cached.t < TTL;
-    if (cached) {
+    this.cacheChecked.add(key);
+    // Ô đã có trong bộ nhớ (vừa tải xong từ mạng) thì mới hơn bộ đệm.
+    if (cached && !this.cells.has(key)) {
       this.setCell(key, cached);
+      this.status = 'ready';
       this.#emit();
-      if (fresh) return;
     }
+    this.#want(cx, cy);
+  }
+
+  async #fetchCell(cx, cy) {
+    const key = cellKey(cx, cy);
     const body = `data=${encodeURIComponent(buildQuery(cx, cy))}`;
+    // Đọc một lần: lượt tải chạy song song có thể đổi this.endpoint trong lúc chờ.
+    const start = this.endpoint;
     for (let attempt = 0; attempt < OVERPASS_ENDPOINTS.length; attempt++) {
-      const url = OVERPASS_ENDPOINTS[(this.endpoint + attempt) % OVERPASS_ENDPOINTS.length];
+      const index = (start + attempt) % OVERPASS_ENDPOINTS.length;
+      const url = OVERPASS_ENDPOINTS[index];
       // Máy chủ treo thì bỏ sau 70 giây để còn thử máy chủ kế tiếp.
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
@@ -511,9 +512,8 @@ export class RoadData {
         const failure = overpassFailure(json);
         if (failure) throw new Error(failure); // dữ liệu thiếu: không dùng, không lưu
         const data = parseOverpass(json);
-        this.endpoint = (this.endpoint + attempt) % OVERPASS_ENDPOINTS.length;
-        this.setCell(key, data);
-        this.#writeCache({
+        this.endpoint = index;
+        const record = {
           key,
           v: CACHE_VERSION,
           t: Date.now(),
@@ -522,7 +522,9 @@ export class RoadData {
           points: data.points,
           feats: data.feats,
           restr: data.restr,
-        });
+        };
+        this.setCell(key, record);
+        this.#writeCache(record);
         this.failedAt.delete(key);
         this.status = 'ready';
         this.#emit();
@@ -534,7 +536,7 @@ export class RoadData {
       }
     }
     this.failedAt.set(key, Date.now());
-    this.status = cached ? 'ready' : 'error';
+    this.status = this.cells.has(key) ? 'ready' : 'error';
     this.#emit();
   }
 
@@ -543,13 +545,24 @@ export class RoadData {
     const cell = this.cells.get(key);
     if (cell) {
       cell.used = Date.now();
+      if (isFresh(cell)) return;
+      // Dữ liệu cũ (bản ghi kiểu cũ hoặc quá 7 ngày) vẫn được dùng trong lúc chờ tải lại.
+    } else if (!this.cacheChecked.has(key)) {
+      // Đọc bộ đệm trên máy trước: chỉ mất vài mili giây nên không tính vào giới hạn truy vấn Overpass.
+      if (!this.reading.has(key) && !this.pending.has(key)) {
+        if (this.status !== 'ready') this.status = 'loading';
+        const job = this.#readCell(key, cx, cy).finally(() => this.reading.delete(key));
+        this.reading.set(key, job);
+      }
       return;
     }
     if (this.pending.has(key)) return;
     if (Date.now() - (this.failedAt.get(key) || 0) < RETRY_AFTER) return;
-    if (this.pending.size >= 2) return; // Overpass giới hạn số truy vấn đồng thời
+    // Overpass giới hạn số truy vấn đồng thời: tối đa hai. Ô đã có dữ liệu (dù cũ) chỉ được tải lại khi
+    // không còn lượt tải nào khác, để ô chưa có dữ liệu luôn còn chỗ.
+    if (this.pending.size >= (cell ? 1 : 2)) return;
     if (this.status !== 'ready') this.status = 'loading';
-    const job = this.#load(cx, cy).finally(() => this.pending.delete(key));
+    const job = this.#fetchCell(cx, cy).finally(() => this.pending.delete(key));
     this.pending.set(key, job);
   }
 

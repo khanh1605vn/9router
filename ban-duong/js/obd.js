@@ -674,16 +674,25 @@ export class ObdClient {
     this.#setState('init');
     this.#reinitPending = false;
     this.#supported = new Set();
-    if (forget) await this.#command('ATFE', TIMING.at);
+    if (forget && needsReset((await this.#command('ATFE', TIMING.at)).lines)) this.#reinitPending = true;
     const t0 = this.#now();
     const z = await this.#command('ATZ', TIMING.atz);
+    // Đề máy đúng lúc đang kết nối: "LV RESET" có thể đến thay cho câu trả lời ATZ, hoặc tự đến trong
+    // lúc chờ dưới đây. Không được bỏ qua dấu hiệu này: việc dò CAN có thể đang bị chặn, và chỉ chắc chắn
+    // được bỏ chặn khi gửi AT FE.
+    if (needsReset(z.lines)) this.#reinitPending = true;
     const rest = TIMING.atzMin - (this.#now() - t0);
     if (rest > 0) await this.#wait(rest);
     let id = identifyAdapter(z.lines);
-    if (!id) id = identifyAdapter((await this.#command('ATI', TIMING.at)).lines);
+    if (!id) {
+      const i = await this.#command('ATI', TIMING.at);
+      if (needsReset(i.lines)) this.#reinitPending = true;
+      id = identifyAdapter(i.lines);
+    }
+    // "LV RESET" / ERR94 là câu của chip ELM327: ATFE rồi khởi tạo lại, không báo "không phải bộ OBD".
+    if (this.#reinitPending) throw new Reinit(true);
     if (!id) throw this.#validated ? new LinkLost() : new NotElm(MSG.notElm);
     this.#snap.adapter = id;
-    this.#reinitPending = false; // ATZ vừa khởi động lại chip
     for (const cmd of INIT_COMMANDS.slice(1)) this.#checkReset(await this.#command(cmd, TIMING.at));
   }
 
@@ -691,11 +700,18 @@ export class ObdClient {
   async #findCar(reason) {
     let first = true;
     let resendProtocol = false;
+    // 'UNABLE TO CONNECT' cũng có thể do chip đã tự khởi động lại mà ứng dụng không nhận được "LV RESET":
+    // khi đó việc dò CAN có thể bị chặn tới khi có AT FE. Gửi ATFE (vô hại) trước mỗi lần thử lại để không kẹt mãi.
+    let forgetEvents = reason === 'unable';
     if (reason) this.#setState('nocar', { reason });
     for (;;) {
       if (!first || reason) {
         await this.#wait(TIMING.nocarRetry);
         await this.#whilePaused();
+      }
+      if (forgetEvents) {
+        this.#checkReset(await this.#command('ATFE', TIMING.at));
+        forgetEvents = false;
       }
       if (resendProtocol) {
         this.#checkReset(await this.#command('ATSP0', TIMING.at));
@@ -712,6 +728,7 @@ export class ObdClient {
         break;
       }
       if (r.kind === 'error') resendProtocol = true;
+      if (r.kind === 'unable') forgetEvents = true;
       if (this.#state !== 'nocar') this.#setState('nocar', { reason: r.kind });
     }
     for (const base of [0x20, 0x40]) {

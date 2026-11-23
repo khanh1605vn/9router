@@ -25,13 +25,17 @@ export function normalizeForSpeech(text) {
 // Mức ưu tiên: chỉ dẫn rẽ > cảnh báo > thông tin.
 export const PRIORITY = { info: 0, alert: 1, turn: 2 };
 
+// Câu cảnh báo bị câu rẽ gấp chen ngang được đọc lại ngay sau câu đó nếu mới xếp hàng chưa quá chừng này (ms);
+// lâu hơn thì khoảng cách trong câu đã cũ.
+const REPEAT_WITHIN = 5000;
+
 class Voice {
   constructor() {
     this.enabled = true;
     this.beeps = true;
     this.ctx = null;
     this.voice = null;
-    this.currentPriority = -1;
+    this.queue = []; // câu đang đọc và đang chờ: { text, priority, urgent, at }
     this.primed = false;
     this.supported = typeof window !== 'undefined' && 'speechSynthesis' in window;
     if (this.supported) {
@@ -76,32 +80,54 @@ class Voice {
     }
   }
 
+  /** Mức ưu tiên cao nhất trong các câu đang đọc và đang chờ (-1 khi rảnh). */
+  get currentPriority() {
+    return this.queue.reduce((m, e) => Math.max(m, e.priority), -1);
+  }
+
   /**
-   * Đọc một câu. Câu ưu tiên cao hơn sẽ ngắt câu đang đọc; câu cùng mức hoặc cảnh báo thì xếp hàng
-   * đọc tiếp ngay sau; thông tin phụ bị bỏ qua nếu máy đang bận.
+   * Đọc một câu. Thông tin phụ bị bỏ qua nếu máy đang bận và bị mọi câu khác ngắt. Cảnh báo và chỉ dẫn rẽ
+   * thường xếp hàng đọc tiếp ngay sau câu đang đọc, không cắt mất câu cảnh báo. Chỉ câu gấp (urgent: câu rẽ
+   * ngay) mới ngắt câu đang đọc; câu cảnh báo bị ngắt khi đó được đọc lại ngay sau câu gấp.
+   * @returns true nếu câu được đưa vào hàng đọc
    */
-  speak(text, priority = PRIORITY.info) {
+  speak(text, priority = PRIORITY.info, { urgent = false } = {}) {
     if (!this.enabled || !this.supported || !text) return false;
     const synth = window.speechSynthesis;
-    if (synth.speaking || synth.pending) {
-      if (priority > this.currentPriority) synth.cancel();
-      else if (priority === PRIORITY.info) return false;
+    const busy = synth.speaking || synth.pending;
+    if (!busy) this.queue = []; // máy đã đọc xong (có trình duyệt không báo onend)
+    let again = [];
+    if (busy) {
+      const top = this.currentPriority;
+      const cut = urgent ? !this.queue.some((e) => e.urgent) : priority > top && top <= PRIORITY.info;
+      if (cut) {
+        const now = Date.now();
+        again = this.queue.filter((e) => e.priority === PRIORITY.alert && now - e.at < REPEAT_WITHIN);
+        this.queue = [];
+        synth.cancel();
+      } else if (priority === PRIORITY.info) return false;
     }
-    const u = new SpeechSynthesisUtterance(normalizeForSpeech(text));
+    this.#say({ text, priority, urgent, at: Date.now() });
+    for (const e of again) this.#say({ ...e }); // bản mới: sự kiện lỗi của câu vừa bị huỷ không xoá nhầm
+    return true;
+  }
+
+  #say(entry) {
+    const u = new SpeechSynthesisUtterance(normalizeForSpeech(entry.text));
     u.lang = 'vi-VN';
     if (this.voice) u.voice = this.voice;
     u.rate = 1.05;
     u.onend = u.onerror = () => {
-      if (!synth.speaking && !synth.pending) this.currentPriority = -1;
+      const i = this.queue.indexOf(entry);
+      if (i >= 0) this.queue.splice(i, 1);
     };
-    this.currentPriority = Math.max(this.currentPriority, priority);
-    synth.speak(u);
-    return true;
+    this.queue.push(entry);
+    window.speechSynthesis.speak(u);
   }
 
   stop() {
     if (this.supported) window.speechSynthesis.cancel();
-    this.currentPriority = -1;
+    this.queue = [];
   }
 
   #tone(freq, start, length, gain = 0.2) {

@@ -223,6 +223,92 @@ test('đèn ở hai phía giao lộ (cùng loại, cách nhau 60 m) chỉ đọc
   const log = drive(roads, { end: 600 });
   assert.equal(spoken(log).length, 1);
   assert.ok(log.some((r) => r.active?.item.key === 'n2:signals'), 'đèn thứ hai vẫn hiện khi đã qua đèn đầu');
+
+  // Đèn ghi ở hai phía của cùng một ngã tư (J − 20 m và J + 20 m): vẫn chỉ đọc một lần.
+  const J = at(500);
+  const cross = roadsOf(
+    [way(1, NORTH), way(2, line(J, E, 300)), way(3, line(J, W, 300))],
+    [feat(1, at(480), { highway: 'traffic_signals' }), feat(2, at(520), { highway: 'traffic_signals' })],
+  );
+  assert.equal(spoken(drive(cross, { end: 600 })).length, 1);
+});
+
+test('đèn và cấm rẽ của hai ngã tư khác nhau cách nhau 70 m: đọc cả hai', () => {
+  const J1 = at(500);
+  const J2 = at(570);
+  const ways = [
+    way(1, NORTH.slice(0, 51)), way(2, NORTH.slice(50, 58)), way(3, NORTH.slice(57)),
+    way(4, line(J1, E, 300), { h: 'residential' }), way(5, line(J1, W, 300), { h: 'residential' }),
+    way(6, line(J2, E, 300), { h: 'residential' }), way(7, line(J2, W, 300), { h: 'residential' }),
+  ];
+  const sig = roadsOf(ways, [feat(1, J1, { highway: 'traffic_signals' }), feat(2, J2, { highway: 'traffic_signals' })]);
+  const said = spoken(driveLine(sig, NORTH, { speed: 12 }));
+  assert.equal(said.length, 2, JSON.stringify(said.map((r) => r.say)));
+  assert.deepEqual(said.map((r) => r.fired.map((f) => f.key)), [['n1:signals'], ['n2:signals']]);
+
+  const bans = roadsOf(ways, [], [
+    { id: 'r1', from: 1, to: 5, via: J1, tags: { type: 'restriction', restriction: 'no_left_turn' } },
+    { id: 'r2', from: 2, to: 7, via: J2, tags: { type: 'restriction', restriction: 'no_left_turn' } },
+  ]);
+  const banSaid = spoken(driveLine(bans, NORTH, { speed: 12 }));
+  assert.equal(banSaid.length, 2, JSON.stringify(banSaid.map((r) => r.say)));
+  for (const r of banSaid) assert.match(r.say, /cấm rẽ trái$/);
+});
+
+test('quay đầu xe rồi đi lại qua đèn và gờ vừa báo: báo lại, thanh cảnh báo không hiện mục quá xa', () => {
+  const roads = straight([feat(1, at(600), { highway: 'traffic_signals' }), feat(2, at(620), { traffic_calming: 'hump' })]);
+  const engine = new SignEngine();
+  let time = 0;
+  const step = (x, brg) => {
+    time += 1000;
+    return engine.update({ coord: destination(O, N, x), speed: 12, heading: brg, accuracy: 5, time }, roads, {}, { now: NOON });
+  };
+  const north = [];
+  for (let x = 300; x <= 820; x += 12) north.push(step(x, N));
+  assert.equal(spoken(north).length, 1);
+  assert.equal(spoken(north)[0].say, 'Phía trước 100 mét, đèn tín hiệu giao thông, gờ giảm tốc');
+  // Quay đầu ở 820 m, chạy xuống phía Nam qua lại hai mục đó (cách chưa tới 500 m nên chưa bị quên).
+  const south = [];
+  for (let x = 816; x >= 450; x -= 12) south.push(step(x, S));
+  const said = spoken(south);
+  assert.equal(said.length, 1, 'phải báo lại khi đi theo chiều ngược lại');
+  assert.match(said[0].say, /^Phía trước 100 mét, gờ giảm tốc, đèn tín hiệu giao thông$/);
+  for (const r of south) {
+    if (r.active) assert.ok(r.active.distance <= r.active.reach, `mục hiện ở ${r.active.distance} m, reach ${r.active.reach}`);
+  }
+  assert.equal(south[0].active, null, 'gờ còn 196 m: chưa tới khoảng báo');
+
+  // Đèn riêng cho từng chiều cách nhau 40 m: đèn chiều về đã đọc không làm câm đèn chiều đi sau khi quay đầu.
+  const split = straight([
+    feat(1, at(600), { highway: 'traffic_signals', 'traffic_signals:direction': 'forward' }),
+    feat(2, at(640), { highway: 'traffic_signals', 'traffic_signals:direction': 'backward' }),
+  ]);
+  const eng = new SignEngine();
+  let t = 0;
+  const go = (x, brg) => {
+    t += 1000;
+    return eng.update({ coord: destination(O, N, x), speed: 12, heading: brg, accuracy: 5, time: t }, split, {}, { now: NOON });
+  };
+  const up = [];
+  for (let x = 300; x <= 820; x += 12) up.push(go(x, N));
+  assert.deepEqual(spoken(up).map((r) => r.fired.map((f) => f.key)), [['n1:signals']]);
+  const down = [];
+  for (let x = 816; x >= 450; x -= 12) down.push(go(x, S));
+  assert.deepEqual(spoken(down).map((r) => r.fired.map((f) => f.key)), [['n2:signals']]);
+});
+
+test('đi qua cua tay áo: đèn ở nhánh sau cua chỉ đọc một lần', () => {
+  // Hướng đi tại đèn không đổi giữa lúc báo và lúc tới gần, dù hướng xe đã quay 180°.
+  const r = 30;
+  const a = line(O, N, 400);
+  const center = destination(a[a.length - 1], E, r);
+  const arc = [];
+  for (let k = 1; k <= 18; k++) arc.push(destination(center, 270 + 10 * k, r));
+  const back = line(arc[arc.length - 1], S, 400).slice(1);
+  const coords = [...a, ...arc, ...back];
+  const roads = roadsOf([way(1, coords)], [feat(1, back[4], { highway: 'traffic_signals' })]);
+  const said = spoken(driveLine(roads, coords, { speed: 30 / 3.6 })).filter((r) => /đèn/.test(r.say));
+  assert.equal(said.length, 1, JSON.stringify(said.map((r) => r.say)));
 });
 
 test('tắt nhóm biển trong cài đặt thì không báo; vạch qua đường mặc định tắt', () => {
@@ -264,6 +350,16 @@ test('hướng bằng số độ: biển quay mặt về phía xe tới', () => 
   const roads = straight([feat(1, destination(at(400), E, 5), { traffic_sign: 'VN:W.225', direction: '180' }, false)]);
   assert.equal(spoken(drive(roads, { end: 600 })).length, 1);
   assert.equal(spoken(drive(roads, { ...SOUTHBOUND, end: 900 })).length, 0);
+});
+
+test('biển hai mặt direction=0;180 đứng bên lề: áp dụng cho cả hai chiều', () => {
+  const roads = straight([feat(1, destination(at(400), W, 6), { traffic_sign: 'VN:W.225', direction: '0;180' }, false)]);
+  const north = spoken(drive(roads, { end: 600 }));
+  assert.equal(north.length, 1);
+  assert.match(north[0].say, /chú ý trẻ em$/);
+  const south = spoken(drive(roads, { ...SOUTHBOUND, end: 900 }));
+  assert.equal(south.length, 1);
+  assert.match(south[0].say, /chú ý trẻ em$/);
 });
 
 test('biển đứng riêng không ghi hướng: chỉ nhận biển bên phải chiều đi', () => {
@@ -378,6 +474,28 @@ test('đường phía trước đi ngược chiều đường một chiều: bá
   assert.equal(spoken(drive(legal, { end: 480 })).length, 0);
 });
 
+test('đường cấm đi ngược chiều phía trước: không báo biển, gờ, đèn nằm bên trong đường đó', () => {
+  const K = at(500);
+  const ahead = NORTH.slice(50);
+  const roads = roadsOf(
+    [way(1, NORTH.slice(0, 51)), way(2, [...ahead].reverse(), { o: 1 }), way(3, line(K, E, 300)), way(4, line(K, W, 300))],
+    [
+      feat(1, at(505), { traffic_calming: 'hump' }), // 5 m bên trong đường cấm
+      feat(2, at(550), { traffic_calming: 'hump' }),
+      feat(3, at(640), { highway: 'traffic_signals' }),
+    ],
+  );
+  const log = drive(roads, { end: 495, speed: 12 });
+  const said = spoken(log);
+  assert.equal(said.length, 1, JSON.stringify(said.map((r) => r.say)));
+  assert.match(said[0].say, /^Phía trước .+, đường cấm đi ngược chiều$/);
+  const at380 = log.find((r) => r.x >= 380);
+  assert.deepEqual(at380.upcoming.map((u) => u.code), ['P.102']);
+  const corr = buildCorridor({ coord: at(400), speed: 12, heading: N, accuracy: 5 }, roads);
+  assert.ok(corr.cum.at(-1) <= 101 + 1e-6, `hành lang dài ${corr.cum.at(-1)} m`);
+  assert.deepEqual(corr.pieces.map((p) => [p.way.id, p.against]), [[1, false], [2, true]]);
+});
+
 test('chỗ tách thành hai làn một chiều: đi vào làn đúng chiều, không báo cấm đi ngược chiều', () => {
   const K = at(500);
   const left = line(K, 357, 400).reverse(); // làn chiều ngược lại: vẽ hướng về K
@@ -421,6 +539,25 @@ test('cấm rẽ có except motorcycle: ô tô được báo, xe máy thì khôn
   assert.equal(spoken(drive(roads, { end: 480, vehicle: 'moto' })).length, 0);
   // Đi ngược lại (rời khỏi nút "via") thì không báo.
   assert.equal(spoken(drive(roads, { from: at(500), brg: S, end: 400 })).length, 0);
+});
+
+test('thẻ OSM trùng tên thuộc tính của Object (hazard=constructor, restriction=__proto__): không lỗi, biển khác vẫn được báo', () => {
+  const V = at(500);
+  const roads = roadsOf(
+    [way(1, NORTH.slice(0, 51)), way(2, line(V, N, 500)), way(3, line(V, E, 300)), way(4, line(V, W, 300))],
+    [feat(1, at(200), { hazard: 'constructor' }), feat(2, at(300), { hazard: '__proto__' }), feat(3, V, { highway: 'traffic_signals' })],
+    [
+      { id: 'r1', from: 1, to: 3, via: V, tags: { type: 'restriction', restriction: 'constructor' } },
+      { id: 'r2', from: 1, to: 4, via: V, tags: { type: 'restriction', restriction: '__proto__', 'restriction:conditional': 'constructor @ (Mo-Fr 06:00-09:00)' } },
+      { id: 'r3', from: 1, to: 2, via: V, tags: { type: 'restriction', restriction: 'only_constructor' } },
+    ],
+  );
+  let log;
+  assert.doesNotThrow(() => (log = drive(roads, { end: 480 })));
+  const says = spoken(log).map((r) => r.say);
+  assert.ok(says.some((s) => /nguy hiểm/.test(s)), JSON.stringify(says));
+  assert.ok(says.some((s) => /đèn tín hiệu giao thông/.test(s)), JSON.stringify(says));
+  assert.ok(!says.some((s) => /cấm rẽ|chỉ được/.test(s)), JSON.stringify(says));
 });
 
 test('cấm rẽ theo giờ: trong giờ thì báo, ngoài giờ thì không, giờ không đọc được thì báo kèm "theo giờ"', () => {
@@ -534,6 +671,87 @@ test('detectCurves: hai chỗ ngoặt ngược phía gần nhau thành "nhiều 
   assert.equal(found[0].kind, 'curves');
 });
 
+/** Đường thẳng 400 m lên phía Bắc, cung tròn bán kính r quay `turn` độ sang phải (đỉnh cách nhau ~5 m), rồi 400 m. */
+function wideBend(r, turn = 90) {
+  const a = line(O, N, 400);
+  const P = a[a.length - 1];
+  const center = destination(P, E, r);
+  const n = Math.ceil((r * turn * Math.PI) / 180 / 5);
+  const arc = [];
+  for (let k = 1; k <= n; k++) arc.push(destination(center, 270 + (turn * k) / n, r));
+  return [...a, ...arc, ...line(arc[arc.length - 1], turn % 360, 400).slice(1)];
+}
+
+test('detectCurves: cua rộng tới bán kính 120 m vẫn được nhận khi chạy nhanh; rộng hơn thì không', () => {
+  // Trước đây cửa sổ chỉ 90 m nên cung bán kính trên ~83 m không bao giờ đủ 55°, kể cả ở 100 km/h.
+  for (const r of [85, 100, 120]) {
+    const coords = wideBend(r);
+    const found = detectCurves(coords, cumulativeDistances(coords), 90 / 3.6);
+    assert.equal(found.length, 1, `R=${r}`);
+    assert.equal(found[0].side, 'right');
+    assert.ok(Math.abs(found[0].radius - r) <= 10, `R=${r}: bán kính ${found[0].radius}`);
+  }
+  const hairpin = wideBend(100, 180);
+  assert.equal(detectCurves(hairpin, cumulativeDistances(hairpin), 90 / 3.6).length, 1, 'cua tay áo R=100');
+  const wide = wideBend(140);
+  assert.equal(detectCurves(wide, cumulativeDistances(wide), 90 / 3.6).length, 0, 'R=140 vượt ngưỡng 120 m');
+  // Cung R=100 ở 30 km/h: v²/R ≈ 0,7 m/s² < 1,5 → không báo.
+  const slow = wideBend(100);
+  assert.equal(detectCurves(slow, cumulativeDistances(slow), 30 / 3.6).length, 0);
+});
+
+test('cua bán kính 100 m ở 90 km/h: đọc đúng một lần', () => {
+  const coords = wideBend(100);
+  const said = spoken(driveLine(roadsOf([way(1, coords)]), coords, { speed: 90 / 3.6 }));
+  assert.equal(said.length, 1, JSON.stringify(said.map((r) => r.say)));
+  assert.match(said[0].say, /chỗ ngoặt nguy hiểm vòng bên phải$/);
+  const d = said[0].fired[0].distance;
+  assert.ok(d >= 100 && d <= 200, `đọc ở ${d} m`);
+});
+
+test('góc phố: đường gấp ngay tại nút giao không phải chỗ ngoặt; cùng hình dạng không có đường khác thì vẫn báo', () => {
+  // Đường 1 chạy lên phía Bắc rồi gấp 90° sang Đông ở J; đường 2 (đi tiếp lên Bắc) và đường 3 (sang Tây) cũng
+  // bắt đầu ở J, nên J là ngã tư.
+  const a = line(O, N, 400);
+  const J = a[a.length - 1];
+  const coords = [...a, ...line(J, E, 400).slice(1)];
+  const corner = roadsOf([way(1, coords), way(2, line(J, N, 300)), way(3, line(J, W, 300))]);
+  for (const kmh of [35, 45]) {
+    const said = spoken(driveLine(corner, coords, { speed: kmh / 3.6 }));
+    assert.equal(said.length, 0, `${kmh} km/h: ${JSON.stringify(said.map((r) => r.say))}`);
+  }
+  const bendOnly = spoken(driveLine(roadsOf([way(1, coords)]), coords, { speed: 45 / 3.6 }));
+  assert.equal(bendOnly.length, 1);
+  assert.match(bendOnly[0].say, /chỗ ngoặt nguy hiểm vòng bên phải$/);
+
+  // Góc phố bo tròn bán kính 12 m, nút giao nằm giữa cung.
+  const r = 12;
+  const b = line(O, N, 400 - r);
+  const P = b[b.length - 1];
+  const c = destination(P, E, r);
+  const arc = [];
+  for (let k = 1; k <= 8; k++) arc.push(destination(c, 270 + 10 * k, r));
+  const T = destination(c, N, r);
+  const rounded = [...b, ...arc, T, ...line(T, E, 400).slice(1)];
+  const mid = arc[4];
+  const roads = roadsOf([way(1, rounded), way(2, line(mid, N, 300)), way(3, line(mid, W, 300))]);
+  assert.equal(spoken(driveLine(roads, rounded, { speed: 40 / 3.6 })).length, 0);
+});
+
+test('cua tay áo có đường nhánh ở đỉnh cua vẫn được báo (chỉ bỏ góc đổi hướng sát nút giao)', () => {
+  const r = 25;
+  const a = line(O, N, 400);
+  const center = destination(a[a.length - 1], E, r);
+  const arc = [];
+  for (let k = 1; k <= 18; k++) arc.push(destination(center, 270 + 10 * k, r)); // quay 180° sang phải
+  const apex = arc[8];
+  const coords = [...a, ...arc, ...line(arc[arc.length - 1], S, 400).slice(1)];
+  const roads = roadsOf([way(1, coords), way(2, line(apex, N, 200))]);
+  const said = spoken(driveLine(roads, coords, { speed: 40 / 3.6 }));
+  assert.equal(said.length, 1, JSON.stringify(said.map((r) => r.say)));
+  assert.match(said[0].say, /chỗ ngoặt nguy hiểm vòng bên phải$/);
+});
+
 test('chỗ ngoặt phía trước được đọc đúng một lần khi chạy nhanh, không đọc khi chạy chậm', () => {
   const coords = bend(60);
   const roads = roadsOf([way(1, coords)]);
@@ -601,6 +819,30 @@ test('dẫn đường: hành lang theo tuyến, thấy biển sau chỗ rẽ; kh
   const said = spoken(log);
   assert.equal(said.length, 1, JSON.stringify(said.map((r) => r.say)));
   assert.match(said[0].say, /đèn tín hiệu giao thông$/);
+});
+
+test('dẫn đường: đoạn đường ngắn hơn 20 m vẫn được khớp (hạn chế chiều cao, cấm rẽ từ đoạn nối ngắn)', () => {
+  const all = line(O, N, 800, 1); // đỉnh mỗi 1 m để cắt đường ở bất kỳ đâu
+  const steps = [{ index: 0, type: 'depart' }, { index: all.length - 1, type: 'arrive' }];
+  // Đoạn 13 m chui dưới cầu đường sắt, đặt lệch đủ mọi kiểu so với lưới mẫu 20 m của tuyến.
+  for (let off = 0; off < 20; off++) {
+    const a = 500 + off;
+    const b = a + 13;
+    const roads = roadsOf([way(1, all.slice(0, a + 1)), way(2, all.slice(a, b + 1), { t: { maxheight: '2.5' } }), way(3, all.slice(b))]);
+    const said = spoken(driveLine(roads, all, { speed: 12, withNav: true, steps, from: 300 }));
+    assert.equal(said.length, 1, `lệch ${off} m: ${JSON.stringify(said.map((r) => r.say))}`);
+    assert.match(said[0].say, /hạn chế chiều cao 2,5 mét$/);
+  }
+  // Cấm rẽ trái từ đoạn 14 m nằm giữa hai làn của đường cắt ngang.
+  const V = all[719];
+  const roads = roadsOf(
+    [way(1, all.slice(0, 706)), way(2, all.slice(705, 720)), way(3, all.slice(719)), way(4, line(V, W, 300)), way(5, line(V, E, 300))],
+    [],
+    [{ id: 'r1', from: 2, to: 4, via: V, tags: { type: 'restriction', restriction: 'no_left_turn' } }],
+  );
+  const said = spoken(driveLine(roads, all, { speed: 12, withNav: true, steps, from: 450 }));
+  assert.equal(said.length, 1, JSON.stringify(said.map((r) => r.say)));
+  assert.match(said[0].say, /cấm rẽ trái$/);
 });
 
 test('mất khớp đường một lúc: giữ thanh cảnh báo vài giây rồi bỏ', () => {

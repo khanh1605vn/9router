@@ -100,6 +100,31 @@ export class AlertEngine {
   }
 }
 
+// Biển tốc độ tối đa và biển hết hạn chế tốc độ tối đa: thuộc về "Đọc giới hạn tốc độ khi thay đổi".
+const LIMIT_CODES = new Set(['P.127', 'P.127a', 'P.127b', 'P.127c', 'DP.127', 'DP.134']);
+
+/**
+ * Câu đọc cho các biển vừa đến lượt báo (kết quả SignEngine.update). Người dùng tắt "Đọc giới hạn tốc độ khi
+ * thay đổi" (settings.speakLimit = false) thì câu không còn biển tốc độ tối đa; biển vẫn hiện trên màn hình.
+ * @returns string | null
+ */
+export function signSpeech(result, settings = {}) {
+  if (!result?.say) return null;
+  if (settings.speakLimit !== false) return result.say;
+  const keep = result.fired.filter((it) => !LIMIT_CODES.has(it.code));
+  if (keep.length === result.fired.length) return result.say;
+  // Cùng một biển (cùng mã và trị số) chỉ đọc một lần, như bộ máy biển báo.
+  const says = [];
+  const seen = new Set();
+  for (const it of keep) {
+    const dup = `${it.code ?? it.kind}|${it.value ?? ''}`;
+    if (seen.has(dup)) continue;
+    seen.add(dup);
+    if (it.say && !says.includes(it.say)) says.push(it.say);
+  }
+  return says.length ? `Phía trước ${spokenDistance(keep[0].distance)}, ${says.join(', ')}` : null;
+}
+
 /** Giữ giới hạn tốc độ ổn định giữa các lần định vị và phát cảnh báo khi chạy quá. */
 export class SpeedMonitor {
   constructor() {

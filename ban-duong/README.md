@@ -14,7 +14,7 @@ Thư mục này là một ứng dụng tĩnh độc lập: không cần build, k
 - **Báo trước biển báo phía trước** (khoảng 100–200 m): đèn tín hiệu, biển dừng, nhường đường, vòng xuyến, cấm rẽ, cấm đi ngược chiều, đổi giới hạn tốc độ, gờ giảm tốc, đường ngang đường sắt, chỗ ngoặt nguy hiểm… Hiện trên thanh vàng giống cảnh báo camera, kèm hình biển; bấm vào để xem chi tiết. Xem [cách hoạt động và giới hạn](#báo-trước-biển-báo).
 - **Cảnh báo điểm phía trước**: camera bắn tốc độ, camera đèn đỏ, camera giám sát, trạm thu phí.
 - **Kết nối với ô tô** qua bộ đọc OBD-II Bluetooth (ELM327): lấy tốc độ của xe (vẫn chạy khi mất GPS trong hầm), vòng tua, nhiệt độ nước làm mát, điện áp; nhắc khi máy quá nóng hoặc điện áp thấp; đọc mã lỗi động cơ. Xem [hướng dẫn](#kết-nối-bộ-obd).
-- **Giao diện màn hình ô tô**: bố cục ngang cho màn hình Android trên xe, chữ và nút lớn hơn.
+- **Giao diện màn hình ô tô**: bố cục ngang cho màn hình Android trên xe (cũng tự bật khi điện thoại đủ rộng xoay ngang), chữ và nút lớn hơn.
 - **Điểm tự đánh dấu**: camera phạt nguội, cổng trường học, điểm nguy hiểm, công trường, ngập nước, kẹt xe, tai nạn; xuất và nhập tệp để chia sẻ với người khác.
 - **Chế độ lái tự do**: không cần đặt điểm đến, vẫn theo dõi tốc độ và cảnh báo; tự bật khi phát hiện đang di chuyển.
 - **Chạy thử**: mô phỏng chuyến đi dọc tuyến đã chọn để xem trước chỉ dẫn và cảnh báo.
@@ -27,7 +27,7 @@ Cần Node.js 22 trở lên.
 ```bash
 cd ban-duong
 npm start          # mở http://localhost:5173
-npm test           # 154 bài kiểm thử logic (không cần mạng)
+npm test           # 186 bài kiểm thử logic (không cần mạng)
 ```
 
 Trên máy tính không có GPS, ứng dụng lấy tâm bản đồ làm điểm xuất phát; dùng nút **Chạy thử** để xem dẫn đường hoạt động.
@@ -58,7 +58,7 @@ Lần đầu mở, hãy cho phép trang dùng vị trí và chạm vào màn hì
 Khi dẫn đường hoặc ở chế độ lái, ứng dụng xét khoảng 320 m phía trước: theo tuyến đường khi đang dẫn đường, hoặc theo con đường đang chạy (giả định đi thẳng qua nút giao) khi lái tự do.
 
 - **Báo lúc nào**: khoảng cách báo bằng quãng đường xe chạy trong 8 giây, giữ trong khoảng 100–200 m (chạy càng nhanh báo càng sớm). Các biển cách nhau dưới 40 m được đọc chung một câu, ví dụ “Phía trước 150 mét, đèn tín hiệu giao thông, cấm rẽ trái”. Tối đa một câu mỗi 3 giây; xe đứng yên thì không đọc câu mới.
-- **Trên màn hình**: biển gần nhất hiện trên thanh vàng (cùng chỗ với cảnh báo camera; cái nào gần hơn thì hiện, cái còn lại vẫn được đọc). Dải nhỏ phía trên đồng hồ tốc độ hiện tối đa 2 biển kế tiếp; khi điện thoại xoay ngang thì dải này ẩn đi để khỏi che bản đồ.
+- **Trên màn hình**: khi tới khoảng cách báo (khoảng 100–200 m), biển hiện trên thanh vàng, cùng chỗ với cảnh báo camera; nếu cùng lúc có camera thì cái nào gần hơn hiện, cái kia vẫn được đọc. Các biển xa hơn hiện ở dải nhỏ phía trên đồng hồ tốc độ (tối đa 2 biển). Điện thoại xoay ngang thường đủ rộng (từ 800 px bề ngang) để giao diện màn hình ô tô tự bật, khi đó dải vẫn hiện; màn hình hẹp hơn thì dải ẩn đi để khỏi che bản đồ.
 - **Nguồn**: biển báo được nhập vào OpenStreetMap, cộng với thông tin tương đương biển: đèn tín hiệu, biển dừng và nhường đường, vạch người đi bộ qua đường, gờ giảm tốc, đường ngang đường sắt, vòng xuyến, cấm rẽ, đường một chiều, cấm xe, hạn chế chiều cao, tải trọng, chiều ngang, cấm vượt, chỗ đổi giới hạn tốc độ, hầm, và chỗ ngoặt tính từ hình dạng đường (chỉ báo khi chạy từ 30 km/h).
 - **Bật/tắt từng nhóm** trong **Cài đặt → Biển báo phía trước**. Vạch người đi bộ qua đường tắt sẵn vì ở đô thị quá dày.
 
@@ -71,14 +71,15 @@ Giới hạn cần biết:
 
 ## Kết nối bộ OBD
 
-Cần có: một bộ đọc OBD-II dùng chip ELM327 (hoặc tương thích) và điện thoại Android mở ứng dụng bằng **Chrome**, **Edge** hoặc **Samsung Internet** qua địa chỉ HTTPS. Chỉ kết nối khi xe đang đỗ.
+Cần có: một bộ đọc OBD-II dùng chip ELM327 (hoặc tương thích) và điện thoại Android mở ứng dụng bằng **Chrome** hoặc **Samsung Internet** qua địa chỉ HTTPS (Edge trên Android chưa được kiểm chứng). Trên máy tính dùng được Chrome trên Windows, macOS, ChromeOS; trên Linux, Bluetooth trên web của Chrome chưa bật sẵn. Chỉ kết nối khi xe đang đỗ.
 
 **Bộ Bluetooth Low Energy (BLE)**
 
 1. Cắm bộ đọc vào cổng OBD của xe (thường nằm dưới vô lăng), bật khoá điện hoặc nổ máy.
-2. Trong ứng dụng: **Cài đặt → Kết nối với ô tô → Kết nối bộ OBD Bluetooth**.
-3. Chọn bộ đọc trong danh sách (tên thường bắt đầu bằng OBD, ELM, Vlink, vLinker, Veepeak, OBDLink…). Không thấy thì bấm **Hiện mọi thiết bị**. Không cần ghép đôi trước.
-4. Chờ dòng **Đã kết nối với xe**. Lần đầu bộ đọc dò giao thức của xe có thể mất tới 20 giây.
+2. Bật Bluetooth của điện thoại. Trong ứng dụng: **Cài đặt → Kết nối với ô tô → Kết nối bộ OBD Bluetooth**.
+3. Nếu Android hỏi, cho phép Chrome dùng quyền **Thiết bị ở gần** (Android 12 trở lên) hoặc quyền **Vị trí** (Android 11 trở xuống); Android cần quyền này để Chrome tìm được thiết bị Bluetooth Low Energy.
+4. Chọn bộ đọc trong danh sách (tên thường bắt đầu bằng OBD, ELM, Vlink, vLinker, Veepeak, OBDLink…). Không thấy thì bấm **Hiện mọi thiết bị**. Không cần ghép đôi trước.
+5. Chờ dòng **Đã kết nối với xe**. Lần đầu bộ đọc dò giao thức của xe có thể mất tới 20 giây.
 
 Mỗi lần mở lại trang thường phải bấm kết nối lại, vì trình duyệt chưa cho trang web tự nhớ thiết bị BLE.
 
@@ -96,7 +97,7 @@ Không dùng được trên iPhone, iPad (Safari, Chrome và các trình duyệt
 
 1. Trên màn hình xe chạy Android có CH Play, cài **Chrome**. Ứng dụng “trình duyệt” có sẵn trên nhiều màn hình xe là loại nhúng (WebView), không có Bluetooth.
 2. Mở địa chỉ HTTPS của ứng dụng bằng Chrome → nút ba chấm → **Thêm vào màn hình chính**.
-3. Cho phép vị trí. **Giao diện màn hình ô tô** tự bật khi màn hình cảm ứng nằm ngang và rộng; có thể chọn **Bật/Tắt** trong **Cài đặt → Kết nối với ô tô**. Ở giao diện này, thanh chỉ dẫn, cảnh báo và bảng điều khiển nằm thành cột bên trái, bản đồ ở bên phải, nút bấm lớn hơn.
+3. Cho phép vị trí. **Giao diện màn hình ô tô** tự bật khi màn hình cảm ứng nằm ngang và rộng (từ 800 px bề ngang, cao không quá 760 px), nên cũng bật trên phần lớn điện thoại khi xoay ngang; có thể chọn **Bật/Tắt** trong **Cài đặt → Kết nối với ô tô**. Ở giao diện này, thanh chỉ dẫn, cảnh báo và bảng điều khiển nằm thành cột bên trái, bản đồ ở bên phải, nút bấm lớn hơn.
 4. Muốn đọc dữ liệu xe thì làm như phần [Kết nối bộ OBD](#kết-nối-bộ-obd). Bluetooth của màn hình xe tuỳ hãng, có máy không kết nối được bộ BLE.
 
 ## Nghe giọng nói qua loa xe

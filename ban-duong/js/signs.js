@@ -405,7 +405,7 @@ export function parseMeasure(raw, unit) {
     v = parseFloat(ft[1]) * 0.3048 + parseFloat(ft[2] || '0') * 0.0254;
   } else {
     const m = /^(\d+(?:[.,]\d+)?)\s*([a-z]*)\.?$/.exec(s);
-    if (!m || !(m[2] in table)) return null;
+    if (!m || !Object.hasOwn(table, m[2])) return null;
     v = parseFloat(m[1].replace(',', '.')) * table[m[2]];
   }
   if (!Number.isFinite(v) || v <= 0) return null;
@@ -524,9 +524,21 @@ export function parseCodeTag(code) {
 const COMPASS = ['n', 'nne', 'ne', 'ene', 'e', 'ese', 'se', 'sse', 's', 'ssw', 'sw', 'wsw', 'w', 'wnw', 'nw', 'nnw'];
 const WORDS = { north: 0, east: 90, south: 180, west: 270 };
 
+/** Một giá trị hướng: số độ 0–360, N…NNW hoặc north/east/south/west → độ (0–359,9), không đọc được → null. */
+function degreeOf(part) {
+  if (/^\d+(?:\.\d+)?$/.test(part)) {
+    const deg = parseFloat(part);
+    return deg <= 360 ? deg % 360 : null;
+  }
+  const ci = COMPASS.indexOf(part);
+  if (ci >= 0) return ci * 22.5;
+  return Object.hasOwn(WORDS, part) ? WORDS[part] : null;
+}
+
 /**
  * Đọc hướng áp dụng từ khoá đầu tiên có giá trị trong `keys`.
- * → { mode: 'forward' | 'backward' | 'both' | 'deg' | 'none', deg? } (deg là hướng mặt biển).
+ * → { mode: 'forward' | 'backward' | 'both' | 'deg' | 'none', degs? } (degs: các hướng mặt biển, độ).
+ * Nhiều giá trị cách nhau bằng ';' (biển hai mặt, ví dụ 0;180) thì xét từng giá trị; khoảng góc (45-100) bỏ qua.
  */
 export function parseDirection(tags, keys) {
   let raw = null;
@@ -543,15 +555,12 @@ export function parseDirection(tags, keys) {
   if (raw === 'both' || raw === 'all' || raw === 'forward;backward' || raw === 'backward;forward') {
     return { mode: 'both' };
   }
-  const first = raw.split(';')[0].trim();
-  if (/^\d+(?:\.\d+)?$/.test(first)) {
-    const deg = parseFloat(first);
-    return deg <= 360 ? { mode: 'deg', deg: deg % 360 } : { mode: 'none' };
+  const degs = [];
+  for (const part of raw.split(';')) {
+    const deg = degreeOf(part.trim());
+    if (deg != null && !degs.includes(deg)) degs.push(deg);
   }
-  const ci = COMPASS.indexOf(first);
-  if (ci >= 0) return { mode: 'deg', deg: ci * 22.5 };
-  if (first in WORDS) return { mode: 'deg', deg: WORDS[first] };
-  return { mode: 'none' };
+  return degs.length ? { mode: 'deg', degs } : { mode: 'none' };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -649,7 +658,8 @@ const HAZARD_OTHER = ['W.233', 'Nguy hiểm khác', 'chú ý nguy hiểm'];
 /** Biển nguy hiểm tương ứng với một giá trị hazard=* (cả trên nút lẫn trên way). */
 function hazardFeature(value, dirKeys = DIR_HAZARD) {
   const v = listOf(value)[0] || '';
-  const [code, title, say, pict] = HAZARD[v] || HAZARD_OTHER;
+  // Object.hasOwn: giá trị từ OSM như "constructor", "__proto__" không được trúng thuộc tính của Object.
+  const [code, title, say, pict] = Object.hasOwn(HAZARD, v) ? HAZARD[v] : HAZARD_OTHER;
   if (!code) {
     return {
       kind: `hazard:${v}`,
@@ -828,9 +838,12 @@ function calmingFeature(tags) {
   });
 }
 
+// Giá trị crossing:barrier theo iD/JOSM: yes|no|half|full|double_half.
+const RAIL_BARRIER_YES = new Set(['yes', 'full', 'half', 'double_half', 'gate', 'gates']);
+
 function railFeature(tags) {
   const barrier = String(tags['crossing:barrier'] ?? '').trim().toLowerCase();
-  if (barrier && barrier !== 'no') {
+  if (RAIL_BARRIER_YES.has(barrier)) {
     return feature(SIGN_CATALOGUE['W.210'], {
       kind: 'rail:barrier',
       title: 'Đường sắt có rào chắn',
@@ -838,12 +851,26 @@ function railFeature(tags) {
       dirKeys: [],
     });
   }
-  return feature(SIGN_CATALOGUE['W.211'], {
+  if (barrier === 'no') {
+    return feature(SIGN_CATALOGUE['W.211'], {
+      kind: 'rail',
+      title: 'Đường sắt không có rào chắn',
+      say: 'đường ngang đường sắt không có rào chắn, chú ý quan sát tàu',
+      dirKeys: [],
+    });
+  }
+  // Dữ liệu không ghi (hoặc ghi giá trị lạ): không nói có hay không có rào chắn, không gắn mã biển.
+  return {
     kind: 'rail',
-    title: 'Đường sắt không có rào chắn',
-    say: 'đường ngang đường sắt không có rào chắn, chú ý quan sát tàu',
+    code: null,
+    cat: 'rail',
+    title: 'Đường ngang đường sắt',
+    say: 'đường ngang đường sắt, chú ý quan sát tàu',
+    art: SIGN_CATALOGUE['W.211'].art,
+    value: null,
     dirKeys: [],
-  });
+    note: 'Dữ liệu OpenStreetMap không ghi chỗ này có rào chắn hay không.',
+  };
 }
 
 /**
@@ -1030,7 +1057,7 @@ const joinVi = (words) => (words.length < 2 ? words.join('') : `${words.slice(0,
 function turnFeature({ bans, only = null, timed = false } = {}) {
   const suffix = timed ? ' theo giờ' : '';
   const note = NOTES.turn + (timed ? NOTES.timed : '');
-  if (only && ONLY[only]) {
+  if (only && Object.hasOwn(ONLY, only)) {
     const [title, pict] = ONLY[only];
     const entry = SIGN_CATALOGUE['R.301'];
     return asDerived(

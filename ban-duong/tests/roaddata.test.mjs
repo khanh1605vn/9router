@@ -28,14 +28,14 @@ function sampleResponse() {
     version: 0.6,
     osm3s: { timestamp_osm_base: '2026-07-28T02:16:18Z' },
     elements: [
+      // Nhóm đường (.roads out tags geom): chỉ có thẻ và hình học, không có mảng "nodes".
       {
         type: 'way',
         id: 100,
-        nodes: [1, 2, 3],
         geometry: [N1, N2, N3],
         tags: { highway: 'primary', name: 'Nguyễn Trãi', maxspeed: '50', maxheight: '3.5', overtaking: 'no', 'name:en': 'Nguyen Trai', surface: 'asphalt' },
       },
-      { type: 'way', id: 101, nodes: [2, 4], geometry: [N2, N4], tags: { highway: 'residential', name: 'Hẻm 12' } },
+      { type: 'way', id: 101, geometry: [N2, N4], tags: { highway: 'residential', name: 'Hẻm 12' } },
       // Nhóm điểm (.pts out body)
       { type: 'node', id: 1, ...N1, tags: { 'traffic_sign:forward': 'VN:P.102' } },
       { type: 'node', id: 2, ...N2, tags: { highway: 'traffic_signals', 'traffic_signals:direction': 'forward', 'name:en': 'x', source: 'survey' } },
@@ -80,7 +80,7 @@ function sampleResponse() {
       },
       {
         type: 'relation',
-        id: 203, // nút via 4 không được in ra nhưng có trong hình học của đường 101
+        id: 203, // nút via 4 không mang thẻ: toạ độ chỉ có trong nhóm via
         members: [
           { type: 'way', ref: 101, role: 'from' },
           { type: 'node', ref: 4, role: 'via' },
@@ -100,6 +100,7 @@ function sampleResponse() {
       },
       // Nút via in lại không có thẻ (.via out skel)
       { type: 'node', id: 2, ...N2 },
+      { type: 'node', id: 4, ...N4 },
     ],
   };
 }
@@ -113,12 +114,13 @@ test('truy vấn Overpass lấy thêm nút trên đường, quan hệ cấm rẽ
   assert.match(q, /rel\(bw\.roads\)\["type"="restriction"\]->\.restr;/);
   assert.match(q, /node\(r\.restr:"via"\)->\.via;/);
   assert.match(q, /rel\["type"="enforcement"\]->\.enf;/);
-  for (const out of ['.roads out body geom qt;', '.pts out body qt;', '.restr out body qt;', '.via out skel qt;', '.enf out body geom qt;']) {
+  for (const out of ['.roads out tags geom qt;', '.pts out body qt;', '.restr out body qt;', '.via out skel qt;', '.enf out body geom qt;']) {
     assert.ok(q.includes(out), out);
   }
   for (const k of ['traffic_signals', 'mini_roundabout', 'traffic_calming', 'level_crossing', 'height_restrictor', 'traffic_sign:forward', 'traffic_sign:backward', 'hazard', 'speed_camera', 'toll_booth', 'surveillance']) {
     assert.ok(q.includes(k), k);
   }
+  assert.ok(!q.includes('.roads out body'), 'đường không kèm mảng id nút (không dùng tới)');
   const count = (re) => (q.match(re) || []).length;
   assert.equal(count(/\(/g), count(/\)/g));
   assert.equal(count(/\[/g), count(/\]/g));
@@ -189,7 +191,7 @@ test('parseOverpass: quan hệ cấm rẽ qua một nút, bỏ loại qua đư�
     via: [106.7, 10.771],
     tags: { type: 'restriction', restriction: 'no_left_turn', 'restriction:motorcar': 'no_left_turn', except: 'bicycle;motorcycle' },
   });
-  assert.deepEqual(r203.via, [106.701, 10.771], 'toạ độ nút via lấy từ hình học của đường');
+  assert.deepEqual(r203.via, [106.701, 10.771], 'toạ độ nút via lấy từ nhóm via (out skel)');
   assert.deepEqual(r203.tags, { type: 'restriction', 'restriction:conditional': 'no_straight_on @ (06:00-22:00)' });
 });
 
@@ -233,7 +235,15 @@ const CENTER = [(Math.floor(106.7 / CELL) + 0.5) * CELL, (Math.floor(10.77 / CEL
 const CENTER_KEY = cellKey(...cellOf(CENTER));
 
 async function settle(roads) {
-  await Promise.all([...roads.pending.values()]);
+  while (roads.reading.size || roads.pending.size) {
+    await Promise.all([...roads.reading.values(), ...roads.pending.values()]);
+  }
+}
+
+/** Chờ (qua các vòng sự kiện) đến khi điều kiện đúng, tối đa vài trăm vòng. */
+async function until(cond, rounds = 500) {
+  for (let k = 0; k < rounds && !cond(); k++) await new Promise((r) => setImmediate(r));
+  return cond();
 }
 
 test('tải ô: phản hồi báo lỗi thì thử máy chủ khác, lưu bộ đệm phiên bản 2', async () => {
@@ -313,6 +323,120 @@ test('bộ đệm v2 còn hạn thì không tải lại, quá 7 ngày thì tải
   roads2.ensureAround(CENTER);
   await settle(roads2);
   assert.equal(stale.calls.length, 1);
+});
+
+test('ô có dữ liệu cũ: lần tải lại hỏng thì 60 giây sau thử lại, không giữ dữ liệu cũ suốt phiên', async (t) => {
+  // Đồng hồ giả: chỉ thay Date.now, trả lại như cũ khi xong bài.
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  t.after(() => {
+    Date.now = realNow;
+  });
+  const old = { key: CENTER_KEY, t: Date.now(), ways: parseOverpass(sampleResponse()).ways, points: [] };
+  const cache = fakeCache([old]);
+  const down = new TypeError('Failed to fetch');
+  const { calls, impl } = fakeFetch([down, down, down, { json: sampleResponse() }, { json: sampleResponse() }]);
+  const roads = new RoadData({ fetchImpl: impl, cache });
+  const SIGNAL = [106.7, 10.771];
+
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(calls.length, 3, 'lần đầu: cả ba máy chủ đều lỗi');
+  assert.equal(roads.hasData(CENTER), true, 'vẫn dùng tạm dữ liệu cũ');
+  assert.equal(roads.featsNear(SIGNAL, 5).length, 0);
+
+  now += 30e3;
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(calls.length, 3, 'chưa đủ 60 giây thì chưa thử lại');
+
+  now += 31e3;
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(calls.length, 4, 'mạng có lại: tải lại được');
+  assert.equal(roads.featsNear(SIGNAL, 5).length, 1);
+  assert.equal(cache.puts.at(-1).v, 2);
+
+  now += 3600e3;
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(calls.length, 4, 'dữ liệu mới thì không tải nữa');
+
+  now += 7 * 24 * 3600e3;
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(calls.length, 5, 'ô quá 7 ngày ngay trong phiên cũng được tải lại');
+});
+
+test('lượt tải mạng đang treo không chặn việc đọc ô có sẵn trên máy', async () => {
+  const [cx, cy] = cellOf(CENTER);
+  const data = parseOverpass(sampleResponse());
+  const v1 = (x, y) => ({ key: cellKey(x, y), t: Date.now(), ways: [], points: [] });
+  const cache = fakeCache([
+    { key: CENTER_KEY, v: 2, t: Date.now(), ...data }, // C: bản ghi mới
+    v1(cx, cy - 1), // A: bản ghi kiểu cũ
+    v1(cx + 1, cy - 1), // B: bản ghi kiểu cũ
+  ]);
+  // Máy chủ nhận yêu cầu nhưng không trả lời (đến khi được thả ở cuối bài).
+  const hung = [];
+  let down = false;
+  const impl = () => (down ? Promise.reject(new TypeError('Failed to fetch')) : new Promise((_, reject) => hung.push(reject)));
+  const roads = new RoadData({ fetchImpl: impl, cache });
+
+  // Sát mép Đông của A: A và B đều cần tải lại, nhưng làm mới ô đã có dữ liệu chỉ chiếm một lượt.
+  roads.ensureAround([(cx + 0.9) * CELL, (cy - 0.5) * CELL]);
+  await until(() => roads.reading.size === 0);
+  assert.equal(roads.hasData([(cx + 1.5) * CELL, (cy - 0.5) * CELL]), true, 'B đọc được từ bộ đệm');
+  assert.equal(roads.pending.size, 1);
+
+  // Đi vào C: đọc ngay từ bộ đệm, không phải chờ lượt tải mạng.
+  roads.ensureAround(CENTER);
+  await until(() => roads.reading.size === 0);
+  assert.equal(roads.hasData(CENTER), true);
+  assert.equal(roads.featsNear([106.7, 10.771], 5).length, 1);
+
+  // Đi tiếp vào D chưa có dữ liệu: vẫn còn một lượt để tải ngay dù lượt làm mới A đang treo.
+  roads.ensureAround([(cx + 0.5) * CELL, (cy + 1.5) * CELL]);
+  await until(() => roads.reading.size === 0);
+  assert.equal(roads.pending.has(cellKey(cx, cy + 1)), true);
+  assert.equal(roads.pending.size, 2);
+
+  down = true;
+  while (hung.length) hung.shift()(new TypeError('Failed to fetch'));
+  await settle(roads);
+  assert.equal(hung.length, 0);
+});
+
+test('tải ô: hai ô tải song song, mỗi ô tự thử đủ ba máy chủ theo thứ tự', async () => {
+  // Máy chủ 0 treo với hai yêu cầu đầu (đến khi được thả), sau đó lỗi ngay; máy chủ 1 trả 429; máy chủ 2 trả lời được.
+  const hung = [];
+  let zeroCalls = 0;
+  const tried = new Map(); // khung bbox của ô → các máy chủ đã thử
+  const impl = async (url, opts) => {
+    const i = OVERPASS_ENDPOINTS.indexOf(url);
+    const bbox = /bbox:([\d.,]+)/.exec(decodeURIComponent(opts.body))[1];
+    tried.set(bbox, [...(tried.get(bbox) || []), i]);
+    if (i === 0) {
+      if (++zeroCalls > 2) throw new TypeError('Failed to fetch');
+      return new Promise((_, reject) => hung.push(() => reject(new TypeError('Failed to fetch'))));
+    }
+    if (i === 1) return { ok: false, status: 429, json: async () => null };
+    return { ok: true, status: 200, json: async () => sampleResponse() };
+  };
+  const roads = new RoadData({ fetchImpl: impl, cache: fakeCache() });
+  const [cx, cy] = cellOf(CENTER);
+  roads.ensureAround([(cx + 0.9) * CELL, (cy + 0.5) * CELL]); // sát mép Đông: tải cả ô bên cạnh
+  assert.ok(await until(() => hung.length === 2), 'hai ô cùng đang chờ máy chủ 0');
+  hung[0](); // ô thứ nhất: máy chủ 0 lỗi → máy chủ 1 (429) → máy chủ 2 trả lời
+  assert.ok(await until(() => roads.endpoint === 2));
+  hung[1](); // ô thứ hai cũng phải thử tiếp máy chủ 1 rồi 2, không quay lại máy chủ 0
+  await settle(roads);
+  assert.deepEqual([...tried.values()], [[0, 1, 2], [0, 1, 2]]);
+  assert.equal(roads.failedAt.size, 0);
+  assert.equal(roads.endpoint, 2);
+  assert.equal(roads.hasData(CENTER), true);
+  assert.equal(roads.hasData([(cx + 1.5) * CELL, (cy + 0.5) * CELL]), true);
 });
 
 // ---- Chỉ mục: đỉnh giao lộ, nút biển báo, quan hệ cấm rẽ ----

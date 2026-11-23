@@ -34,12 +34,20 @@ const CURVE_ALIAS = 60; // chỗ ngoặt lệch vị trí trong khoảng này v�
 const HOLD_MS = 5000; // mất khớp đường một lúc thì vẫn giữ thanh cảnh báo chừng này
 const JUNCTION_SCAN = 150; // tìm nút giao gần biển dừng/nhường đường trong khoảng này (m)
 const MEMO_REFRESH = 60e3; // tính lại kết quả tra cứu phụ thuộc ô bên cạnh mỗi phút (ms)
+const JUNCTION_NEAR = 40; // mục cách nút giao không quá chừng này (m) được coi là thuộc nút giao đó
+const REVERSED = 120; // hướng đi tại mục lệch hơn chừng này (độ) so với lúc báo: đi theo chiều ngược lại
+const AGAINST_STUB = 1; // nhánh cấm đi ngược chiều: chỉ giữ chừng này (m) qua chỗ vào
 
-// Cong: lấy mẫu mỗi 10 m, cửa sổ tối đa 90 m, tổng góc đổi hướng ≥ 55°.
+// Cong: lấy mẫu mỗi 10 m, tổng góc đổi hướng ≥ 55°, bán kính ≤ 120 m. Cửa sổ phải đủ dài để cung bán kính
+// 120 m quay đủ 55° (14 mẫu, cung đo được tối đa 130 m); cửa sổ ngắn hơn bỏ sót các cua rộng khi chạy nhanh.
 const CURVE_STEP = 10;
-const CURVE_SPAN = 9;
 const CURVE_TURN = 55;
 const CURVE_RADIUS = 120;
+const CURVE_SPAN = Math.ceil((CURVE_RADIUS * CURVE_TURN * Math.PI) / 180 / CURVE_STEP) + 2;
+// Đường gấp khúc ngay tại nút giao (góc phố): đổi hướng ≥ 40° giữa 10 m trước và 10 m sau nút thì là chỗ rẽ
+// ở nút giao, không phải chỗ ngoặt.
+const CORNER_TURN = 40;
+const CORNER_SPAN = 10;
 const CURVE_MIN_SPEED = 8.3; // 30 km/h
 const CURVE_MIN_ACCEL = 1.5; // v²/R (m/s²)
 const CURVE_JOIN = 30; // hai đoạn cong cùng phía cách nhau không quá chừng này là một chỗ ngoặt (m)
@@ -111,12 +119,26 @@ function locate(corr, coord) {
       s = along;
       d = Math.abs(cross);
     }
+  } else if (hit.index === coords.length - 2 && hit.t === 1) {
+    // Điểm nằm quá cuối hành lang: tính tiếp quãng vượt ra để bên gọi loại được (không coi là ở ngay cuối).
+    const [ex, ey] = toLocal(coord, coords[coords.length - 1]);
+    const beyond = (ex * bx + ey * by) / len;
+    if (beyond > 0) {
+      s = cum[cum.length - 1] + beyond;
+      d = Math.abs(cross);
+    }
   }
   return { s, d, index: hit.index, right: cross < 0 };
 }
 
 const corridorBearing = (corr, index) => bearing(corr.coords[index], corr.coords[index + 1]);
 const pointOn = (corr, s) => pointAtDistance(corr.coords, corr.cum, s).point;
+
+/** Hướng đi (độ) dọc hành lang quanh vị trí s, đo theo dây cung ±5 m để không nhảy hướng khi s rơi đúng đỉnh gấp khúc. */
+function headingAt(corr, s) {
+  const total = lengthOf(corr);
+  return bearing(pointOn(corr, clamp(s - 5, 0, total)), pointOn(corr, clamp(s + 5, 0, total)));
+}
 
 /** Đoạn hành lang chứa vị trí s; ở ranh giới hai đoạn thì lấy đoạn đang đi tới (đoạn trước). */
 function pieceAt(pieces, s, wayIds = null) {
@@ -204,10 +226,16 @@ function freeCorridor(fix, roads, hint) {
     const n = vertexCount(way);
     const s0 = lengthOf(corr);
     let open = true;
-    for (let i = from; open && i >= 0 && i < n; i += dir) open = extend(corr, vertexAt(way, i));
+    if (against && assumed) {
+      // Nhánh đi ngược đường một chiều: chỉ giữ 1 m qua chỗ vào để báo "cấm đi ngược chiều". Người lái phải
+      // rẽ ở nút giao, nên biển, đèn, chỗ ngoặt bên trong đường đó không phải của đường phía trước.
+      extend(corr, pointAlongWay(way, from - dir, dir, AGAINST_STUB));
+    } else {
+      for (let i = from; open && i >= 0 && i < n; i += dir) open = extend(corr, vertexAt(way, i));
+    }
     const s1 = lengthOf(corr);
     if (s1 > s0) corr.pieces.push({ way, dir, s0, s1, assumed, against });
-    // Nhánh đi ngược đường một chiều: giữ lại để báo "cấm đi ngược chiều" nhưng không đoán tiếp.
+    // Nhánh ngược chiều: không đoán tiếp.
     if (!open || against || corr.pieces.length >= MAX_PIECES) break;
     const endIdx = dir > 0 ? n - 1 : 0;
     const next = continuation(roads, way, endIdx, dir, visited);
@@ -262,15 +290,34 @@ function navCorridor(nav, roads) {
   if (corr.coords.length < 2) return emptyCorridor();
 
   // Mẫu đặt theo bội số 20 m tính từ đầu tuyến để ranh giới ổn định giữa các lần định vị.
-  const samples = [];
-  const sample = (a) => {
+  const match = (a) => {
     const p = pointAtDistance(rc, rcum, a);
     const m = roads.matchWay({ coord: p.point, heading: p.bearing, speed: 10, accuracy: 10 });
-    samples.push({ s: a - s, way: m ? m.way : null, dir: m ? m.dir : 0 });
+    return { s: a - s, way: m ? m.way : null, dir: m ? m.dir : 0 };
   };
-  sample(s);
-  for (let a = (Math.floor(s / NAV_SAMPLE) + 1) * NAV_SAMPLE; a < end - 1; a += NAV_SAMPLE) sample(a);
-  sample(end);
+  const idOf = (sm) => (sm.way ? sm.way.id : null);
+  const grid = [s];
+  for (let a = (Math.floor(s / NAV_SAMPLE) + 1) * NAV_SAMPLE; a < end - 1; a += NAV_SAMPLE) grid.push(a);
+  grid.push(end);
+  // Đường ngắn hơn 20 m (đoạn chui dưới cầu, đoạn nối giữa hai làn của đường cắt ngang…) có thể lọt giữa hai
+  // mẫu. Giữa hai mẫu khớp với hai đường khác nhau, lấy thêm mẫu ở trung điểm từng đoạn tuyến: mỗi đường mà
+  // tuyến đi qua đều chứa trọn ít nhất một đoạn tuyến.
+  const samples = [];
+  let seg = at.index;
+  for (const a of grid) {
+    const sm = match(a);
+    const prev = samples[samples.length - 1];
+    if (prev && idOf(prev) !== idOf(sm)) {
+      const a0 = prev.s + s;
+      while (seg + 1 < rc.length && rcum[seg + 1] <= a0) seg++;
+      for (let j = seg; j + 1 < rc.length; j++) {
+        const mid = (rcum[j] + rcum[j + 1]) / 2;
+        if (mid >= a) break;
+        if (mid > a0) samples.push(match(mid));
+      }
+    }
+    samples.push(sm);
+  }
   // Một mẫu lẻ không khớp nằm giữa hai mẫu cùng đường: coi là cùng đường.
   for (let k = 1; k + 1 < samples.length; k++) {
     const [a, b, c] = [samples[k - 1], samples[k], samples[k + 1]];
@@ -414,6 +461,43 @@ function armsAt(roads, coord) {
   return arms;
 }
 
+/**
+ * Các nút giao trên hành lang → [{ s, key }] theo thứ tự s. Đi theo đỉnh của chính đường OSM ở từng đoạn,
+ * vì khi dẫn đường toạ độ tuyến chỉ có 6 chữ số thập phân nên không trùng hẳn đỉnh OSM.
+ */
+function junctionsOn(corr, roads, memo) {
+  const out = [];
+  const keys = new Set();
+  for (const p of corr.pieces) {
+    if (!p.way) continue;
+    const line = memo.coordsOf(p.way);
+    const hit = nearestOnLine(pointOn(corr, p.s0), line);
+    if (!hit) continue;
+    let prev = hit.point;
+    let s = p.s0;
+    for (let k = p.dir > 0 ? hit.index + 1 : hit.index; k >= 0 && k < line.length; k += p.dir) {
+      s += distance(prev, line[k]);
+      prev = line[k];
+      if (s > p.s1 + 1) break;
+      const key = vertexKey(line[k]);
+      if (keys.has(key) || armsAt(roads, line[k]) < 3) continue;
+      keys.add(key);
+      out.push({ s, key });
+    }
+  }
+  return out.sort((a, b) => a.s - b.s);
+}
+
+/** Khoá nút giao gần vị trí s nhất (trong JUNCTION_NEAR m), hoặc null. */
+function junctionNear(junctions, s) {
+  let best = null;
+  for (const j of junctions) {
+    const d = Math.abs(j.s - s);
+    if (d <= JUNCTION_NEAR && (!best || d < best.d)) best = { d, key: j.key };
+  }
+  return best ? best.key : null;
+}
+
 /** Điểm trên đường tại chỉ số đỉnh f (có thể lẻ: 2,5 = giữa đỉnh 2 và đỉnh 3). */
 function pointAtIndex(way, f) {
   const n = vertexCount(way);
@@ -496,8 +580,11 @@ function applies(f, feat, loc, featWays, corr, roads, ctx) {
       return (dir.mode === 'forward') === (piece.dir > 0);
     case 'both':
       return true;
-    case 'deg':
-      return Math.abs(angleDiff(corridorBearing(corr, loc.index), (dir.deg + 180) % 360)) <= 60;
+    case 'deg': {
+      // Biển hai mặt (direction=0;180…): áp dụng khi một trong các mặt quay về phía xe tới.
+      const brg = corridorBearing(corr, loc.index);
+      return dir.degs.some((deg) => Math.abs(angleDiff(brg, (deg + 180) % 360)) <= 60);
+    }
     default:
       break;
   }
@@ -618,6 +705,8 @@ const RESTRICTION = {
   only_right_turn: ['only', 'right'],
   only_straight_on: ['only', 'straight'],
 };
+/** Bảng lệnh cấm tra bằng chuỗi từ OSM: chỉ nhận khoá của chính bảng (không nhận "constructor", "__proto__"…). */
+const restrictionOf = (v) => (v != null && Object.hasOwn(RESTRICTION, v) ? RESTRICTION[v] : null);
 const EXCEPT = { car: ['motorcar', 'motor_vehicle'], moto: ['motorcycle', 'moped', 'mofa', 'motor_vehicle'] };
 const SPECIFIC = { car: 'restriction:motorcar', moto: 'restriction:motorcycle' };
 const TIMEISH = /\d{1,2}:\d{2}|\b(?:Mo|Tu|We|Th|Fr|Sa|Su|PH|SH|sunrise|sunset)\b/i;
@@ -680,7 +769,7 @@ function effectiveRestriction(tags, vehicle, now) {
       if (on === null && !unknown) unknown = c;
     }
     if (hit) value = hit.value;
-    else if (unknown && !RESTRICTION[base]) {
+    else if (unknown && !restrictionOf(base)) {
       // Chỉ cấm trong khung giờ chưa đọc được: vẫn báo, kèm chữ "theo giờ".
       value = unknown.value;
       timed = true;
@@ -688,7 +777,7 @@ function effectiveRestriction(tags, vehicle, now) {
       timed = unknown.value !== base; // lệnh cấm có thể được bỏ trong một số giờ
     }
   }
-  const r = RESTRICTION[value];
+  const r = restrictionOf(value);
   return r ? { type: r[0], turn: r[1], timed } : null;
 }
 
@@ -716,7 +805,8 @@ function restrictionItems(corr, roads, ctx, out) {
   }
   for (const [key, g] of groups) {
     const f = derived('turn', { bans: g.bans, only: g.only, timed: g.timed });
-    if (f && categoryEnabled(f.cat, ctx.settings)) out.push(makeItem(`r${key}`, f, g.s, g.coord));
+    // Lệnh cấm thuộc đúng nút "via" của nó: hai nút khác nhau không bao giờ coi là một biển.
+    if (f && categoryEnabled(f.cat, ctx.settings)) out.push(makeItem(`r${key}`, f, g.s, g.coord, { junction: key }));
   }
 }
 
@@ -787,8 +877,11 @@ export function timeRangesActive(text, date) {
 
 // ---- Chỗ ngoặt tính từ hình dạng đường ----
 
-/** Các đoạn cong (chưa xét tốc độ): [{ side, s, s1, radius, turn, coord }]. */
-function findCurves(coords, cum, { phase = 0, skip = null } = {}) {
+/**
+ * Các đoạn cong (chưa xét tốc độ): [{ side, s, s1, radius, turn, coord }].
+ * corners: vị trí (m) các góc phố, tức chỗ đường gấp khúc ngay tại nút giao; góc đổi hướng ở đó không tính.
+ */
+function findCurves(coords, cum, { phase = 0, skip = null, corners = [] } = {}) {
   const total = cum.length ? cum[cum.length - 1] : 0;
   const pts = [];
   const ss = [];
@@ -802,8 +895,13 @@ function findCurves(coords, cum, { phase = 0, skip = null } = {}) {
   for (let k = 0; k + 1 < n; k++) brg.push(bearing(pts[k], pts[k + 1]));
   const turn = new Array(n).fill(0);
   for (let k = 1; k + 1 < n; k++) turn[k] = angleDiff(brg[k - 1], brg[k]);
+  // Góc ở góc phố rơi vào các mẫu cách nó dưới 10 m (dây cung giữa hai mẫu cắt qua góc): bỏ đi. Phần cong còn
+  // lại quanh đó (cua gắt có đường nhánh ở đỉnh) vẫn được xét.
+  for (const c of corners) {
+    for (let k = 1; k + 1 < n; k++) if (Math.abs(ss[k] - c) < CURVE_STEP) turn[k] = 0;
+  }
 
-  // Với mỗi điểm đầu: cửa sổ ngắn nhất (≤ 90 m) có tổng góc đổi hướng ≥ 55°.
+  // Với mỗi điểm đầu: cửa sổ ngắn nhất (tối đa CURVE_SPAN mẫu) có tổng góc đổi hướng ≥ 55°.
   const wins = [];
   for (let a = 0; a + 2 < n; a++) {
     let sum = 0;
@@ -891,16 +989,28 @@ function curveItems(corr, ctx, out) {
   }
   const skip = (s0, s1) =>
     round.some((p) => p.s0 < s1 && p.s1 > s0) || turns.some((t) => t >= s0 - MANEUVER_GAP && t <= s1 + MANEUVER_GAP);
+  // Góc phố: đường (thường là cùng một đường OSM) gấp ≥ 40° ngay tại nút giao. Đó là chỗ rẽ ở ngã tư, không
+  // phải chỗ ngoặt nguy hiểm; khi không dẫn đường thì không có chỉ dẫn rẽ nào để loại nó.
+  const total = lengthOf(corr);
+  const corners = [];
+  for (const j of ctx.junctions) {
+    const v = pointOn(corr, j.s);
+    const a = pointOn(corr, Math.max(0, j.s - CORNER_SPAN));
+    const b = pointOn(corr, Math.min(total, j.s + CORNER_SPAN));
+    if (distance(a, v) < 1 || distance(v, b) < 1) continue;
+    if (Math.abs(angleDiff(bearing(a, v), bearing(v, b))) >= CORNER_TURN) corners.push(j.s);
+  }
   const phase = ctx.nav ? (CURVE_STEP - (ctx.nav.s % CURVE_STEP)) % CURVE_STEP : 0;
-  // Chỗ ngoặt đã báo thì giữ lại tới khi đi qua, kể cả khi xe đã giảm tốc.
-  const raw = findCurves(corr.coords, corr.cum, { phase, skip }).filter(
-    (c) => curveOk(c, ctx.speed) || ctx.curveKey([c.coord]) != null,
+  // Chỗ ngoặt đã báo (theo cùng chiều đi) thì giữ lại tới khi đi qua, kể cả khi xe đã giảm tốc.
+  const raw = findCurves(corr.coords, corr.cum, { phase, skip, corners }).filter(
+    (c) => curveOk(c, ctx.speed) || ctx.curveKey([c.coord], headingAt(corr, c.s)) != null,
   );
   for (const c of mergeCurves(raw)) {
     const f = c.kind === 'curves' ? derived('curves') : derived('curve', { side: c.side });
     const coord = c.coord;
     const key =
-      ctx.curveKey(c.anchors) ?? `c${coord[0].toFixed(4)},${coord[1].toFixed(4)}:${c.kind === 'curves' ? 'curves' : c.side}`;
+      ctx.curveKey(c.anchors, headingAt(corr, c.s)) ??
+      `c${coord[0].toFixed(4)},${coord[1].toFixed(4)}:${c.kind === 'curves' ? 'curves' : c.side}`;
     out.push(makeItem(key, f, c.s, coord, { anchors: c.anchors }));
   }
 }
@@ -911,9 +1021,12 @@ function curveItems(corr, ctx, out) {
 
 const EMPTY = Object.freeze({ active: null, upcoming: [], fired: [], say: null });
 
+/** Hai hướng đi (độ) cùng chiều (lệch không quá REVERSED); thiếu hướng thì coi là cùng chiều. */
+const sameWay = (a, b) => a == null || b == null || Math.abs(angleDiff(a, b)) <= REVERSED;
+
 export class SignEngine {
   constructor() {
-    this.seen = new Map(); // khoá → { coord, time, reach, spoken, dup, anchors? }
+    this.seen = new Map(); // khoá → { coord, time, reach, spoken, dup, brg, junction, anchors? }
     this.lastSpeak = -Infinity;
     this.lastFix = null; // thời điểm lần định vị trước (ms)
     this.hint = null; // { wayId, dir }: chiều đi gần nhất, giữ hành lang khi xe dừng
@@ -969,12 +1082,20 @@ export class SignEngine {
       speed,
       memo: this.memo,
       wayIds: new Set(corr.pieces.filter((p) => p.way).map((p) => p.way.id)),
-      curveKey: (anchors) => this.#curveKey(anchors),
+      junctions: junctionsOn(corr, roads, this.memo),
+      curveKey: (anchors, brg) => this.#curveKey(anchors, brg),
     };
     const items = this.#collect(corr, roads, ctx);
 
-    // Mục mới thấy mà đã quá gần thì chỉ hiện. Biển cùng loại sát một biển vừa đọc (đèn ở hai phía giao lộ,
-    // vạch qua đường liền nhau) thì coi như đã báo.
+    // Mục đã báo nay lại ở phía trước nhưng theo chiều ngược lại (quay đầu xe, đi lại đường cũ): báo lại như mục mới.
+    for (const it of items) {
+      const e = this.seen.get(it.key);
+      if (e && !sameWay(e.brg, it.brg)) this.seen.delete(it.key);
+    }
+
+    // Mục mới thấy mà đã quá gần thì chỉ hiện. Biển cùng loại sát một biển vừa đọc, cùng chiều đi và cùng một
+    // nút giao (đèn ở hai phía giao lộ, vạch qua đường liền nhau) thì coi như đã báo. Đèn hay lệnh cấm rẽ của
+    // một nút giao khác ngay sau đó vẫn được đọc.
     for (const it of items) {
       if (this.seen.has(it.key)) continue;
       if (it.distance < minD) {
@@ -982,7 +1103,13 @@ export class SignEngine {
         continue;
       }
       for (const e of this.seen.values()) {
-        if (e.spoken && e.dup === it.dup && distance(e.coord, it.coord) <= SAME_KIND_GAP) {
+        if (
+          e.spoken &&
+          e.dup === it.dup &&
+          e.junction === it.junction &&
+          sameWay(e.brg, it.brg) &&
+          distance(e.coord, it.coord) <= SAME_KIND_GAP
+        ) {
           this.#mark(it, time, reachNow, false);
           break;
         }
@@ -1013,7 +1140,8 @@ export class SignEngine {
     let active = null;
     for (const it of items) {
       const e = this.seen.get(it.key);
-      if (e || it.distance <= trigger) {
+      // Mục đã báo hiện tới khi đi qua, nhưng không xa hơn khoảng lúc báo (vạch đo không bao giờ bắt đầu từ 0).
+      if (it.distance <= (e ? Math.max(trigger, e.reach) : trigger)) {
         active = { item: publicItem(it), distance: it.distance, reach: e ? e.reach : Math.max(reachNow, it.distance) };
         break;
       }
@@ -1045,17 +1173,34 @@ export class SignEngine {
       const old = byKey.get(it.key);
       if (!old || it.distance < old.distance) byKey.set(it.key, it);
     }
-    return [...byKey.values()].sort((a, b) => a.distance - b.distance);
+    const items = [...byKey.values()];
+    for (const it of items) {
+      it.brg = headingAt(corr, it.distance); // hướng đi tại mục
+      it.junction = it.junction ?? junctionNear(ctx.junctions, it.distance);
+    }
+    return items.sort((a, b) => a.distance - b.distance);
   }
 
   #mark(it, time, reach, spoken) {
-    this.seen.set(it.key, { coord: it.coord, time, reach, spoken, dup: it.dup, anchors: it.anchors || null });
+    this.seen.set(it.key, {
+      coord: it.coord,
+      time,
+      reach,
+      spoken,
+      dup: it.dup,
+      brg: it.brg,
+      junction: it.junction,
+      anchors: it.anchors || null,
+    });
   }
 
-  /** Khoá của chỗ ngoặt đã báo nằm gần một trong các điểm neo này (vị trí tính lại mỗi lần lệch vài mét). */
-  #curveKey(anchors) {
+  /**
+   * Khoá của chỗ ngoặt đã báo theo cùng chiều đi (hướng brg), nằm gần một trong các điểm neo này (vị trí tính
+   * lại mỗi lần lệch vài mét).
+   */
+  #curveKey(anchors, brg) {
     for (const [key, e] of this.seen) {
-      if (!e.anchors) continue;
+      if (!e.anchors || !sameWay(e.brg, brg)) continue;
       for (const a of e.anchors) {
         for (const b of anchors) if (distance(a, b) <= CURVE_ALIAS) return key;
       }

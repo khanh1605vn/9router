@@ -215,15 +215,14 @@ test('parseDirection: chữ, số độ, phương hướng và thứ tự ưu ti
   assert.deepEqual(d('both'), { mode: 'both' });
   assert.deepEqual(d('all'), { mode: 'both' });
   assert.deepEqual(d('forward;backward'), { mode: 'both' });
-  assert.deepEqual(d('45'), { mode: 'deg', deg: 45 });
-  assert.deepEqual(d('360'), { mode: 'deg', deg: 0 });
-  assert.deepEqual(d('90;270'), { mode: 'deg', deg: 90 });
+  assert.deepEqual(d('45'), { mode: 'deg', degs: [45] });
+  assert.deepEqual(d('360'), { mode: 'deg', degs: [0] });
   assert.deepEqual(d('45-100'), { mode: 'none' });
   assert.deepEqual(d('400'), { mode: 'none' });
-  assert.deepEqual(d('NE'), { mode: 'deg', deg: 45 });
-  assert.deepEqual(d('NNW'), { mode: 'deg', deg: 337.5 });
-  assert.deepEqual(d('W'), { mode: 'deg', deg: 270 });
-  assert.deepEqual(d('north'), { mode: 'deg', deg: 0 });
+  assert.deepEqual(d('NE'), { mode: 'deg', degs: [45] });
+  assert.deepEqual(d('NNW'), { mode: 'deg', degs: [337.5] });
+  assert.deepEqual(d('W'), { mode: 'deg', degs: [270] });
+  assert.deepEqual(d('north'), { mode: 'deg', degs: [0] });
   assert.deepEqual(d('clockwise'), { mode: 'none' });
   assert.deepEqual(parseDirection({}, ['direction']), { mode: 'none' });
   const keys = ['traffic_signals:direction', 'direction'];
@@ -233,6 +232,18 @@ test('parseDirection: chữ, số độ, phương hướng và thứ tự ưu ti
   assert.deepEqual(parseDirection({ direction: 'backward', 'traffic_signals:direction': ' ' }, keys), {
     mode: 'backward',
   });
+});
+
+test('parseDirection: nhiều giá trị cách nhau bằng ";" thì giữ mọi hướng, bỏ khoảng góc', () => {
+  const d = (v) => parseDirection({ direction: v }, ['direction']);
+  // Biển hai mặt: trước đây chỉ lấy giá trị đầu tiên (90), bỏ mất mặt quay về hướng 270.
+  assert.deepEqual(d('90;270'), { mode: 'deg', degs: [90, 270] });
+  assert.deepEqual(d('0; 180'), { mode: 'deg', degs: [0, 180] });
+  assert.deepEqual(d('N;S'), { mode: 'deg', degs: [0, 180] });
+  assert.deepEqual(d('90;90'), { mode: 'deg', degs: [90] });
+  assert.deepEqual(d('45-100;190'), { mode: 'deg', degs: [190] });
+  assert.deepEqual(d('45-100;190-250'), { mode: 'none' });
+  assert.deepEqual(d('constructor'), { mode: 'none' });
 });
 
 // ------------------------------------------------------------------------------------------
@@ -314,11 +325,23 @@ test('classifyNode: đường ngang đường sắt', () => {
   assert.equal(barrier.title, 'Đường sắt có rào chắn');
   assert.equal(barrier.say, 'đường ngang đường sắt có rào chắn');
   assert.equal(barrier.cat, 'rail');
-  for (const tags of [{ railway: 'level_crossing' }, { railway: 'level_crossing', 'crossing:barrier': 'no' }]) {
+  for (const v of ['yes', 'half', 'double_half']) assert.equal(one({ railway: 'level_crossing', 'crossing:barrier': v }).code, 'W.210', v);
+  const none = one({ railway: 'level_crossing', 'crossing:barrier': 'no' });
+  assert.equal(none.code, 'W.211');
+  assert.equal(none.title, 'Đường sắt không có rào chắn');
+  assert.equal(none.say, 'đường ngang đường sắt không có rào chắn, chú ý quan sát tàu');
+  assert.deepEqual(none.dirKeys, []);
+  // Dữ liệu không ghi rào chắn (hoặc ghi giá trị lạ): không được tự nói "có" hay "không có rào chắn".
+  for (const tags of [{ railway: 'level_crossing' }, { railway: 'level_crossing', 'crossing:barrier': 'unknown' }]) {
     const f = one(tags);
-    assert.equal(f.code, 'W.211');
-    assert.equal(f.title, 'Đường sắt không có rào chắn');
-    assert.equal(f.say, 'đường ngang đường sắt không có rào chắn, chú ý quan sát tàu');
+    assert.equal(f.code, null);
+    assert.equal(f.cat, 'rail');
+    assert.equal(f.kind, 'rail');
+    assert.equal(f.title, 'Đường ngang đường sắt');
+    assert.equal(f.say, 'đường ngang đường sắt, chú ý quan sát tàu');
+    assert.doesNotMatch(`${f.title} ${f.say}`, /rào chắn/);
+    assert.match(f.note, /không ghi/);
+    assert.deepEqual(f.art, { shape: 'danger', pict: 'train' });
     assert.deepEqual(f.dirKeys, []);
   }
 });
@@ -372,6 +395,23 @@ test('classifyNode: hazard=*', () => {
     assert.deepEqual(h(v).dirKeys, ['hazard:direction', 'direction']);
     assert.match(h(v).kind, /^hazard:/);
   }
+});
+
+test('giá trị OSM trùng tên thuộc tính của Object (constructor, __proto__…) không làm hỏng việc phân loại', () => {
+  for (const v of ['constructor', '__proto__', 'toString', 'hasOwnProperty', 'valueOf']) {
+    const f = one({ hazard: v });
+    assert.equal(f.code, 'W.233', v);
+    assert.equal(f.title, 'Nguy hiểm khác', v);
+    assert.equal(derived('hazard', { value: v }).code, 'W.233', v);
+    assert.equal(one({ traffic_sign: 'hazard', hazard: v }).code, 'W.233', v);
+  }
+  // Đơn vị lạ trùng tên thuộc tính của Object: không đọc được, không trả NaN.
+  assert.equal(parseMeasure('3 constructor', 'm'), null);
+  assert.equal(parseMeasure('3constructor', 't'), null);
+  assert.equal(parseMeasure('3.5 m', 'm'), 3.5);
+  // Hướng "chỉ được đi" lạ: không có biển.
+  assert.equal(derived('turn', { only: 'constructor' }), null);
+  assert.equal(derived('turn', { only: '__proto__', bans: [] }), null);
 });
 
 test('classifyNode: traffic_sign có mã và tốc độ', () => {

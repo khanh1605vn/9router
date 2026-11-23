@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AlertEngine, describePoint, SpeedMonitor } from '../js/alerts.js';
+import { AlertEngine, describePoint, signSpeech, SpeedMonitor } from '../js/alerts.js';
+import { SignEngine } from '../js/signengine.js';
 import { buildQuery, cellKey, cellOf, parseMaxspeed, parseOverpass, RoadData } from '../js/roaddata.js';
 import { parseRoute } from '../js/routing.js';
 import { RouteTracker } from '../js/tracker.js';
@@ -187,4 +188,71 @@ test('tốc độ tối đa tự đặt dùng khi đường không có dữ li�
   assert.equal(r.level, 'over');
   assert.equal(r.announce, null);
   assert.equal(new SpeedMonitor().update(f, null, { customMax: 0 }).limit, null);
+});
+
+// ---------- Câu đọc biển báo và cài đặt "Đọc giới hạn tốc độ khi thay đổi" ----------
+
+const item = (code, kind, value, say, d) => ({ key: `${kind}@${d}`, code, kind, value, say, distance: d });
+const LIMIT = item('P.127', 'speed:40', 40, 'tốc độ tối đa 40 ki lô mét trên giờ', 120);
+const LIMIT_NODE = item('P.127', 'speed:40', 40, 'biển tốc độ tối đa 40 ki lô mét trên giờ', 125);
+const SIGNAL = item('W.209', 'signals', null, 'đèn tín hiệu giao thông', 140);
+
+test('câu đọc biển báo: bật đọc giới hạn tốc độ (mặc định) thì giữ nguyên câu của bộ máy biển báo', () => {
+  const sr = { fired: [LIMIT, SIGNAL], say: 'Phía trước 100 mét, tốc độ tối đa 40 ki lô mét trên giờ, đèn tín hiệu giao thông' };
+  assert.equal(signSpeech(sr, {}), sr.say);
+  assert.equal(signSpeech(sr, { speakLimit: true }), sr.say);
+  assert.equal(signSpeech({ fired: [], say: null }, { speakLimit: false }), null);
+});
+
+test('câu đọc biển báo: tắt đọc giới hạn tốc độ thì bỏ biển tốc độ khỏi câu, các biển khác vẫn đọc', () => {
+  const both = { fired: [LIMIT, LIMIT_NODE, SIGNAL], say: 'Phía trước 100 mét, tốc độ tối đa 40 ki lô mét trên giờ, đèn tín hiệu giao thông' };
+  assert.equal(signSpeech(both, { speakLimit: false }), 'Phía trước 150 mét, đèn tín hiệu giao thông');
+  const onlyLimit = { fired: [LIMIT, LIMIT_NODE], say: 'Phía trước 100 mét, tốc độ tối đa 40 ki lô mét trên giờ' };
+  assert.equal(signSpeech(onlyLimit, { speakLimit: false }), null);
+  const end = item('DP.134', 'sign:DP.134', null, 'hết hạn chế tốc độ tối đa', 110);
+  assert.equal(signSpeech({ fired: [end], say: 'Phía trước 100 mét, hết hạn chế tốc độ tối đa' }, { speakLimit: false }), null);
+  // Biển khác cùng mã và trị số chỉ đọc một lần; biển khu đông dân cư không phải biển giới hạn tốc độ.
+  const zone = item('R.420', 'sign:R.420', null, 'bắt đầu khu đông dân cư', 130);
+  const two = { fired: [LIMIT, SIGNAL, { ...SIGNAL, key: 'b', distance: 150 }, zone], say: 'x' };
+  assert.equal(signSpeech(two, { speakLimit: false }), 'Phía trước 150 mét, đèn tín hiệu giao thông, bắt đầu khu đông dân cư');
+});
+
+test('tắt đọc giới hạn tốc độ: chạy qua chỗ đổi 60 → 40 km/h có đèn tín hiệu, chỉ nghe báo đèn', () => {
+  const O = [106.695, 10.785];
+  const line = (start, brg, length) => {
+    const pts = [start];
+    for (let d = 10; d <= length + 1e-6; d += 10) pts.push(destination(start, brg, d));
+    return pts;
+  };
+  const NORTH = line(O, 0, 1000);
+  const K = NORTH[50]; // chỗ đổi giới hạn, 500 m
+  const roads = new RoadData();
+  roads.setCell(cellKey(...cellOf(O)), {
+    ways: [
+      { id: 1, n: '', h: 'primary', c: 60, m: 60, o: 0, g: NORTH.slice(0, 51).flat() },
+      { id: 2, n: '', h: 'primary', c: 40, m: 40, o: 0, g: line(K, 0, 500).flat() },
+    ],
+    points: [],
+    feats: [{ id: 'n9', coord: NORTH[52], onWay: true, tags: { highway: 'traffic_signals' } }],
+    restr: [],
+  });
+  const run = (settings) => {
+    const engine = new SignEngine();
+    const said = [];
+    let time = 1_000_000;
+    for (let x = 0; x <= 600; x += 15) {
+      const fix = { coord: destination(O, 0, x), speed: 15, heading: 0, accuracy: 5, time };
+      const sr = engine.update(fix, roads, settings, { vehicle: 'car', now: new Date(2026, 10, 23, 12) });
+      const say = signSpeech(sr, settings);
+      if (say) said.push(say);
+      time += 1000;
+    }
+    return said;
+  };
+  const on = run({ speakLimit: true });
+  assert.ok(on.some((s) => /tốc độ tối đa 40/.test(s) && /đèn tín hiệu/.test(s)), JSON.stringify(on));
+  const off = run({ speakLimit: false });
+  assert.ok(off.length >= 1, JSON.stringify(off));
+  assert.ok(off.every((s) => !/tốc độ/.test(s)), JSON.stringify(off));
+  assert.ok(off.some((s) => /đèn tín hiệu giao thông/.test(s)), JSON.stringify(off));
 });

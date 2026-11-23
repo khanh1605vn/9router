@@ -409,7 +409,7 @@ h2, h3, p { margin: 0; }
 }
 #searchInput:focus-visible { box-shadow: inset 0 0 0 2px var(--sign-blue); }
 
-.list-label { margin: 14px 0 4px; color: var(--ink-3); font-size: 12px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
+.list-label { margin: 14px 0 4px; color: var(--ink-2); font-size: 13px; font-weight: 700; }
 .result {
   width: 100%;
   display: flex;
@@ -426,7 +426,8 @@ h2, h3, p { margin: 0; }
 .result-dist { flex: none; color: var(--ink-3); font-size: 13px; font-variant-numeric: tabular-nums; }
 .empty { padding: 28px 8px; color: var(--ink-2); text-align: center; }
 
-.settings h3 { margin: 22px 0 8px; color: var(--ink-3); font-size: 12px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; }
+/* Tiêu đề mục viết hoa đúng chính tả (chỉ chữ đầu), phân biệt bằng cỡ chữ, độ đậm và màu. */
+.settings h3 { margin: 22px 0 8px; color: var(--ink-2); font-size: 13px; font-weight: 700; }
 .settings h3:first-child { margin-top: 10px; }
 .opt { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 0; border-bottom: 1px solid var(--line); }
 .opt > span { flex: 1; min-width: 0; font-weight: 500; }
@@ -580,6 +581,8 @@ h2, h3, p { margin: 0; }
   .limit { width: 52px; height: 52px; font-size: 22px; border-width: 6px; }
   /* Không đủ chỗ giữa thanh cảnh báo và đồng hồ tốc độ: chỉ giữ thanh cảnh báo. */
   html:not(.car-ui) .sign-strip { display: none; }
+  /* Thanh cảnh báo đang hiện thì ẩn dòng "Sau đó…" để cột bên trái không đè lên đồng hồ tốc độ. */
+  html:not(.car-ui) #top:has(#alertBar:not([hidden])) #navThen { display: none; }
 }
 
 /* ---------- Giao diện màn hình ô tô (màn hình ngang trên xe) ----------
@@ -625,8 +628,9 @@ html.car-ui .icon-btn.quiet { width: 56px; height: 56px; }
 html.car-ui .chip,
 html.car-ui .btn { min-height: 56px; border-radius: 28px; }
 html.car-ui .btn.compact { width: 56px; }
-html.car-ui .segmented button { min-height: 52px; }
+html.car-ui .segmented button { min-height: 56px; }
 html.car-ui .opt { min-height: 60px; }
+html.car-ui .opt select { height: 56px; }
 html.car-ui .chips,
 html.car-ui .row.actions { flex-wrap: wrap; }
 
