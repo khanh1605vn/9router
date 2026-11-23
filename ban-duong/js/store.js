@@ -49,6 +49,15 @@ export const DEFAULT_SETTINGS = {
   carUi: 'auto', // giao diện màn hình ô tô: 'auto' | 'on' | 'off'
   theme: 'auto', // 'auto' | 'light' | 'dark'
   keepAwake: true,
+  // Camera nhận diện biển (thử nghiệm)
+  camEnabled: false, // chỉ bật được bằng tay khi xe đã đỗ
+  camDeviceId: null, // camera đã chọn ở mục kiểm tra camera; null = camera sau của điện thoại
+  // chỉnh điểm tụ (px của khung hình) so với mặc định: giữa khung, 0,42 chiều cao. Đóng băng vì settings chỉ chép nông
+  // từ đây: luôn lưu bằng store.set('camAim', { dx, dy }) với đối tượng mới, không sửa tại chỗ.
+  camAim: Object.freeze({ dx: 0, dy: 0 }),
+  signCamera: true, // báo các biển do camera ghi nhận
+  camSpeed: true, // dùng biển tốc độ do camera ghi nhận cho đồng hồ tốc độ (không bao giờ nâng giới hạn)
+  camEval: false, // lưu ảnh biển nhỏ trên máy để kiểm tra độ chính xác
 };
 
 /** Loại điểm người dùng tự đánh dấu. ttl = thời gian tồn tại (giờ), 0 = giữ mãi. */

@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<title>Kiểm thử camera</title>
+</head>
+<body>
+<p>Trang kiểm thử camera (chỉ dùng cho tests/browser/camera-smoke.mjs).</p>
+<script type="module">
+  import { CameraService, cameraSupport } from '/js/camera.js';
+
+  // Ghi lại mọi lần gọi getUserMedia và mọi stream nhận được, để kiểm số lần mở camera và track còn sống.
+  const md = navigator.mediaDevices;
+  const realGum = md.getUserMedia.bind(md);
+  const gumCalls = [];
+  const streams = [];
+  md.getUserMedia = async (c) => {
+    gumCalls.push(JSON.parse(JSON.stringify(c)));
+    const s = await realGum(c);
+    streams.push(s);
+    return s;
+  };
+
+  // Ẩn/hiện trang giả: thay document.visibilityState rồi phát visibilitychange (trình duyệt không giao diện luôn "visible").
+  let fakeHidden = null;
+  const proto = Object.getPrototypeOf(Object.getPrototypeOf(document));
+  const realVis = Object.getOwnPropertyDescriptor(proto, 'visibilityState') || Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    get: () => (fakeHidden == null ? realVis.get.call(document) : fakeHidden ? 'hidden' : 'visible'),
+  });
+  Object.defineProperty(document, 'hidden', { configurable: true, get: () => document.visibilityState === 'hidden' });
+
+  const states = [];
+  let cam = null;
+
+  window.camTest = {
+    gumCalls,
+    states,
+    support: () => cameraSupport(),
+    make(opts = {}) {
+      if (cam) cam.dispose();
+      states.length = 0;
+      cam = new CameraService(opts.noImageCapture ? { ImageCapture: null } : {});
+      cam.onState((s) => states.push(s));
+      return true;
+    },
+    permission: () => cam.permission(),
+    list: () => cam.list(),
+    start: (o) => cam.start(o),
+    stop: () => cam.stop(),
+    state: () => cam.state,
+    settings: () => cam.settings,
+    focus: () => cam.focus,
+    liveTracks: () => streams.flatMap((s) => s.getTracks()).filter((t) => t.readyState === 'live').length,
+    allTracks: () => streams.flatMap((s) => s.getTracks()).length,
+    async grab(n = 1) {
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const t0 = performance.now();
+        const f = await cam.grab();
+        const ms = performance.now() - t0;
+        if (!f) {
+          out.push(null);
+          continue;
+        }
+        out.push({ isBitmap: f.bitmap instanceof ImageBitmap, w: f.bitmap.width, h: f.bitmap.height, t: f.t, ms });
+        f.bitmap.close();
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      return out;
+    },
+    setHidden(h) {
+      fakeHidden = h;
+      document.dispatchEvent(new Event('visibilitychange'));
+    },
+    realVisibility: () => realVis.get.call(document),
+    useRealVisibility() {
+      fakeHidden = null;
+    },
+  };
+  window.camTestReady = true;
+</script>
+</body>
+</html>

@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "globalName": "LiteRT",
+  "packages": {
+    "@litertjs/core": {
+      "version": "2.6.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@litertjs/core/-/core-2.6.0.tgz",
+      "integrity": "sha512-TH6/5zLq57YzyZH6q+vO8be1SvTH76uDFe+CiL0wWtRNTUDhc2GAWm2YCohhnyt4fPvefSNztg5PKFZGAYL0cw==",
+      "installScripts": []
+    },
+    "@litertjs/wasm-utils": {
+      "version": "2.6.0",
+      "license": "Apache-2.0",
+      "resolved": "https://registry.npmjs.org/@litertjs/wasm-utils/-/wasm-utils-2.6.0.tgz",
+      "integrity": "sha512-rxARtl8owf+aPV2TsMiAClYDBaEDemML3PjrzBxIpGCvv6POswR7068Kt0sIkrK5XvKkY2Z+JLcm3a9CHmvuUg==",
+      "installScripts": []
+    },
+    "@esbuild/linux-x64": {
+      "version": "0.25.12",
+      "license": "MIT",
+      "resolved": "https://registry.npmjs.org/@esbuild/linux-x64/-/linux-x64-0.25.12.tgz",
+      "integrity": "sha512-uqZMTLr/zR/ed4jIGnwSLkaHmPjOjJvnm6TVVitAa08SLS9Z0VM8wIRx7gWbJB5/J54YuIMInDquWyYvQLZkgw==",
+      "installScripts": []
+    }
+  },
+  "esbuild": {
+    "package": "@esbuild/linux-x64",
+    "version": "0.25.12",
+    "args": [
+      "--bundle",
+      "--format=iife",
+      "--global-name=LiteRT",
+      "--platform=browser",
+      "--target=es2020",
+      "--minify",
+      "--charset=utf8",
+      "--sourcefile=ban-duong-litert-entry.mjs",
+      "--loader=js"
+    ],
+    "entry": "export { loadLiteRt, unloadLiteRt, loadAndCompile, Tensor } from '@litertjs/core';\n"
+  },
+  "licenses": {
+    "LICENSE": {
+      "url": "https://raw.githubusercontent.com/google-ai-edge/LiteRT/main/LICENSE",
+      "sha256OfDownload": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    "NOTICE-XNNPACK": {
+      "url": "https://raw.githubusercontent.com/google/XNNPACK/master/LICENSE",
+      "sha256OfDownload": "63f519e15726f4c4f830bd958f694c84fecb4e0a4cacc527d2696bb71ef95ada"
+    }
+  },
+  "files": {
+    "LICENSE": {
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "size": 11357
+    },
+    "NOTICE-XNNPACK": {
+      "sha256": "57fd2026ed5c965abde39fb30d52c2401b33e4758bc92566e617d54ca3892dd1",
+      "size": 1800
+    },
+    "litert.iife.min.js": {
+      "sha256": "270781bc0f159b75b639c65c63fe64a943185992ec77971740801c0ab3135d8b",
+      "size": 46259
+    },
+    "litert_wasm_compat_internal.js": {
+      "sha256": "cffb7bebb9411e2160d711ccff00c3921b0031a66a692f58c25ce8204b7ec541",
+      "size": 279036
+    },
+    "litert_wasm_compat_internal.wasm": {
+      "sha256": "4190033238e53ec86b832bad4649851ad111025c226c1688cfae20e1f8fe8926",
+      "size": 10948854
+    },
+    "litert_wasm_internal.js": {
+      "sha256": "43bc8c66b43e04630337c90edcea16b133a9f543d008e496a1550d3a229bc9ac",
+      "size": 278825
+    },
+    "litert_wasm_internal.wasm": {
+      "sha256": "13db768de5c7a087517e46a0172c81102a7983bd159e6e47b0a0b933bae60014",
+      "size": 11131135
+    }
+  }
+}

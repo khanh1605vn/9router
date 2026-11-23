@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gắn nhãn ảnh biển</title>
+<!--
+  Trang dùng ngoại tuyến để gắn nhãn thật cho ảnh biển xuất từ ứng dụng (mục "Lưu ảnh biển để kiểm tra độ chính
+  xác", PLAN §6.5) — tập đánh giá E2 (PLAN §8.3). Chạy qua máy chủ thử của ứng dụng:
+    npm start   rồi mở   http://localhost:5173/tools/camera/label-crops.html
+  Không gửi dữ liệu đi đâu; kết quả được tải về thành tệp JSON khi bấm "Lưu kết quả".
+
+  Tệp vào (JSON):
+    { "version": 1, "crops": [ { "id": "…", "png": "data:image/png;base64,…", "pred": [["P.127[50]", 0.93], …],
+                                 "w": 31, "drive": "…" (tuỳ chọn), "night": false (tuỳ chọn) } ] }
+  Tệp ra (JSON):
+    { "version": 1, "source": "<tên tệp vào>", "labelled": [ { "id", "truth", "pred", "p", "w", "drive", "night" } ] }
+  truth là một nhãn của models/labels.json ("background" = không phải biển, "other-sign" = biển ngoài danh sách).
+-->
+<style>
+  :root { --bg: #f6f7f9; --fg: #1a1d21; --muted: #5d6670; --card: #ffffff; --line: #d9dee4; --accent: #0a57a4; --ok: #1c7c45; --bad: #b3261e; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #15181c; --fg: #e8ebee; --muted: #9aa4ae; --card: #1e2227; --line: #333a42; --accent: #6aa8ea; --ok: #5cc28a; --bad: #f08a80; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 15px/1.45 system-ui, "Segoe UI", Roboto, Arial, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 0 0 4px; }
+  p.lead { color: var(--muted); margin: 0 0 16px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 14px; margin-bottom: 14px; }
+  .row { display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+  .crop { width: 192px; height: 192px; image-rendering: pixelated; border-radius: 6px; border: 1px solid var(--line); background: #000; }
+  .art { width: 96px; height: 96px; }
+  .pred { margin: 0; padding: 0; list-style: none; }
+  .pred li { padding: 2px 0; }
+  .muted { color: var(--muted); }
+  button { font: inherit; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  input[type=text] { font: inherit; padding: 8px; border-radius: 8px; border: 1px solid var(--line); background: var(--card); color: var(--fg); min-width: 220px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .stats td, .stats th { padding: 2px 10px 2px 0; text-align: left; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); }
+  kbd { border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; font-size: 12px; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Gắn nhãn ảnh biển</h1>
+  <p class="lead">Mở tệp ảnh biển xuất từ ứng dụng, xem từng ảnh và chọn nhãn đúng. Mọi xử lý diễn ra trên máy này.</p>
+
+  <section class="card">
+    <div class="row">
+      <label>Tệp ảnh biển (JSON): <input id="file" type="file" accept=".json,application/json"></label>
+      <label id="labelsPick" hidden>Tệp nhãn (models/labels.json): <input id="labelsFile" type="file" accept=".json"></label>
+    </div>
+    <p id="status" class="muted" role="status"></p>
+  </section>
+
+  <section id="work" class="card" hidden>
+    <div class="row">
+      <img id="crop" class="crop" alt="Ảnh biển đang xét">
+      <div>
+        <div id="pos" class="muted"></div>
+        <ul id="pred" class="pred"></ul>
+        <div id="meta" class="muted"></div>
+      </div>
+      <div id="art" class="art" aria-hidden="true"></div>
+    </div>
+    <div class="actions">
+      <button id="accept" class="primary">Đúng như đoán <kbd>Enter</kbd></button>
+      <button id="bg">Không phải biển <kbd>B</kbd></button>
+      <button id="other">Biển ngoài danh sách <kbd>O</kbd></button>
+      <button id="skip">Bỏ qua <kbd>S</kbd></button>
+      <button id="back">Quay lại <kbd>←</kbd></button>
+    </div>
+    <div class="actions">
+      <input id="pick" type="text" list="labelList" placeholder="Nhãn khác, ví dụ P.123a" aria-label="Chọn nhãn khác">
+      <datalist id="labelList"></datalist>
+      <button id="pickBtn">Dùng nhãn này <kbd>L</kbd></button>
+    </div>
+  </section>
+
+  <section id="summary" class="card" hidden>
+    <div class="row">
+      <strong id="done"></strong>
+      <button id="save" class="primary">Lưu kết quả</button>
+    </div>
+    <table class="stats"><tbody id="stats"></tbody></table>
+  </section>
+</main>
+<script type="module">
+import { SIGN_CATALOGUE } from '../../js/signs.js';
+import { signSvg } from '../../js/signart.js';
+
+const MAX_FILE_BYTES = 200 * 1024 * 1024; // tệp xuất lớn nhất được mở
+const MAX_CROPS = 20000; // số ảnh tối đa trong một tệp
+const MAX_PNG_CHARS = 400 * 1024; // một ảnh cắt ≤ 96×96 nên nhỏ hơn nhiều
+const PNG_RE = /^data:image\/png;base64,[A-Za-z0-9+/]+={0,2}$/;
+const ID_RE = /^[\w.:-]{1,64}$/;
+
+const $ = (id) => document.getElementById(id);
+let labels = null; // [{ label, code, value }]
+let labelSet = new Set();
+let crops = [];
+let truth = new Map(); // id → nhãn thật
+let idx = 0;
+let sourceName = '';
+
+const status = (s) => ($('status').textContent = s);
+
+async function loadLabels() {
+  try {
+    const r = await fetch('../../models/labels.json', { cache: 'no-cache' });
+    if (!r.ok) throw new Error(String(r.status));
+    setLabels(await r.json());
+  } catch {
+    $('labelsPick').hidden = false;
+    status('Không đọc được models/labels.json; hãy chọn tệp nhãn.');
+  }
+}
+
+function setLabels(j) {
+  if (!j || !Array.isArray(j.labels)) throw new Error('Tệp nhãn không đúng dạng');
+  labels = j.labels.map((l) => ({ label: String(l.label), code: l.code, value: l.value }));
+  labelSet = new Set(labels.map((l) => l.label));
+  const dl = $('labelList');
+  dl.replaceChildren(...labels.map((l) => Object.assign(document.createElement('option'), { value: l.label })));
+}
+
+function validCrop(c) {
+  if (!c || typeof c !== 'object' || !ID_RE.test(String(c.id))) return null;
+  if (typeof c.png !== 'string' || c.png.length > MAX_PNG_CHARS || !PNG_RE.test(c.png)) return null;
+  const pred = Array.isArray(c.pred)
+    ? c.pred.slice(0, 3).filter((x) => Array.isArray(x) && typeof x[0] === 'string' && Number.isFinite(+x[1])).map((x) => [x[0].slice(0, 32), +x[1]])
+    : [];
+  return {
+    id: String(c.id), png: c.png, pred, w: Number.isFinite(+c.w) ? +c.w : null,
+    drive: typeof c.drive === 'string' ? c.drive.slice(0, 64) : null, night: c.night === true,
+  };
+}
+
+function storeKey() {
+  return `bd-label-crops:${sourceName}:${crops.length}`;
+}
+
+function persist() {
+  try {
+    localStorage.setItem(storeKey(), JSON.stringify([...truth]));
+  } catch {
+    /* lưu tạm trong trình duyệt là tiện ích, không bắt buộc */
+  }
+}
+
+function restore() {
+  try {
+    const v = JSON.parse(localStorage.getItem(storeKey()) || '[]');
+    truth = new Map(v.filter((e) => Array.isArray(e) && labelSet.has(e[1])));
+  } catch {
+    truth = new Map();
+  }
+}
+
+function render() {
+  if (!crops.length) return;
+  idx = Math.max(0, Math.min(crops.length - 1, idx));
+  const c = crops[idx];
+  $('crop').src = c.png;
+  $('pos').textContent = `Ảnh ${idx + 1}/${crops.length}${truth.has(c.id) ? ` · đã gắn: ${truth.get(c.id)}` : ''}`;
+  $('pred').replaceChildren(
+    ...c.pred.map(([l, p], i) => {
+      const li = document.createElement('li');
+      li.textContent = `${i === 0 ? 'Đoán' : 'Hoặc'}: ${l} (${(p * 100).toFixed(0)} %)${labelSet.has(l) ? '' : ' — nhãn lạ'}`;
+      return li;
+    }),
+  );
+  $('meta').textContent = [c.w ? `rộng ${c.w} điểm ảnh` : '', c.night ? 'ban đêm' : '', c.drive ? `chuyến ${c.drive}` : ''].filter(Boolean).join(' · ');
+  const top = labels.find((l) => l.label === c.pred[0]?.[0]);
+  const e = top && top.code ? SIGN_CATALOGUE[top.code] : null;
+  $('art').innerHTML = e ? signSvg(e.art, { size: 96, value: top.value }) : '';
+  $('accept').disabled = !top;
+  summary();
+}
+
+function set(label) {
+  if (!crops.length || !labelSet.has(label)) return;
+  truth.set(crops[idx].id, label);
+  persist();
+  idx = Math.min(crops.length - 1, idx + 1);
+  render();
+}
+
+function summary() {
+  $('summary').hidden = false;
+  $('done').textContent = `Đã gắn ${truth.size}/${crops.length} ảnh`;
+  let right = 0;
+  let n = 0;
+  const per = new Map();
+  for (const c of crops) {
+    if (!truth.has(c.id) || !c.pred.length) continue;
+    const ok = truth.get(c.id) === c.pred[0][0];
+    n++;
+    right += ok ? 1 : 0;
+    const k = c.pred[0][0];
+    const s = per.get(k) || [0, 0];
+    s[0]++;
+    s[1] += ok ? 1 : 0;
+    per.set(k, s);
+  }
+  const rows = [[`Độ chính xác của lần đoán đầu`, n ? `${((100 * right) / n).toFixed(1)} % (${right}/${n})` : '–']];
+  for (const [k, [t, ok]] of [...per].sort((a, b) => b[1][0] - a[1][0]).slice(0, 20)) rows.push([`Đoán ${k}`, `${ok}/${t} đúng`]);
+  $('stats').replaceChildren(
+    ...rows.map(([a, b]) => {
+      const tr = document.createElement('tr');
+      for (const v of [a, b]) tr.appendChild(Object.assign(document.createElement('td'), { textContent: v }));
+      return tr;
+    }),
+  );
+}
+
+$('labelsFile').addEventListener('change', async (ev) => {
+  try {
+    setLabels(JSON.parse(await ev.target.files[0].text()));
+    $('labelsPick').hidden = true;
+    status('Đã nạp tệp nhãn.');
+  } catch (e) {
+    status(`Tệp nhãn lỗi: ${e.message}`);
+  }
+});
+
+$('file').addEventListener('change', async (ev) => {
+  const f = ev.target.files[0];
+  if (!f) return;
+  if (!labels) return status('Cần tệp nhãn trước.');
+  if (f.size > MAX_FILE_BYTES) return status('Tệp quá lớn.');
+  try {
+    const j = JSON.parse(await f.text());
+    const list = Array.isArray(j?.crops) ? j.crops.slice(0, MAX_CROPS) : [];
+    crops = list.map(validCrop).filter(Boolean);
+    const seen = new Set();
+    crops = crops.filter((c) => !seen.has(c.id) && seen.add(c.id));
+    sourceName = f.name.slice(0, 120);
+    restore();
+    idx = crops.findIndex((c) => !truth.has(c.id));
+    if (idx < 0) idx = 0;
+    status(`${crops.length} ảnh hợp lệ${list.length > crops.length ? `, bỏ ${list.length - crops.length} mục sai dạng` : ''}.`);
+    $('work').hidden = !crops.length;
+    render();
+  } catch (e) {
+    status(`Không đọc được tệp: ${e.message}`);
+  }
+});
+
+$('accept').addEventListener('click', () => crops.length && set(crops[idx].pred[0]?.[0]));
+$('bg').addEventListener('click', () => set('background'));
+$('other').addEventListener('click', () => set('other-sign'));
+$('skip').addEventListener('click', () => ((idx = Math.min(crops.length - 1, idx + 1)), render()));
+$('back').addEventListener('click', () => ((idx = Math.max(0, idx - 1)), render()));
+$('pickBtn').addEventListener('click', () => {
+  const v = $('pick').value.trim();
+  if (!labelSet.has(v)) return status(`Không có nhãn "${v}".`);
+  $('pick').value = '';
+  set(v);
+});
+document.addEventListener('keydown', (ev) => {
+  if (ev.target instanceof HTMLInputElement) {
+    if (ev.key === 'Enter' && ev.target.id === 'pick') $('pickBtn').click();
+    return;
+  }
+  if (!crops.length) return;
+  const k = ev.key.toLowerCase();
+  if (ev.key === 'Enter') $('accept').click();
+  else if (k === 'b') $('bg').click();
+  else if (k === 'o') $('other').click();
+  else if (k === 's' || ev.key === 'ArrowRight') $('skip').click();
+  else if (ev.key === 'ArrowLeft') $('back').click();
+  else if (k === 'l') {
+    ev.preventDefault();
+    $('pick').focus();
+  } else return;
+  ev.preventDefault();
+});
+
+$('save').addEventListener('click', () => {
+  const labelled = crops
+    .filter((c) => truth.has(c.id))
+    .map((c) => ({ id: c.id, truth: truth.get(c.id), pred: c.pred[0]?.[0] ?? null, p: c.pred[0]?.[1] ?? null, w: c.w, drive: c.drive, night: c.night }));
+  const blob = new Blob([JSON.stringify({ version: 1, source: sourceName, labelled }, null, 1)], { type: 'application/json' });
+  const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: 'nhan-anh-bien.json' });
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+});
+
+loadLabels();
+</script>
+</body>
+</html>

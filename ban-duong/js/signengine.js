@@ -7,7 +7,7 @@
 
 import { angleDiff, bearing, distance, nearestOnLine, pointAtDistance } from './geo.js';
 import { onewayFor, vertexKey } from './roaddata.js';
-import { categoryEnabled, classifyNode, classifyWay, derived, parseDirection } from './signs.js';
+import { categoryEnabled, classifyNode, classifyWay, derived, parseDirection, SIGN_CATEGORIES } from './signs.js';
 import { spokenDistance } from './tracker.js';
 
 const LENGTH = 320; // chiều dài hành lang phía trước (m)
@@ -1357,6 +1357,55 @@ function curveItems(corr, ctx, out) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Dùng chung với bộ học biển từ camera (signlearn.js). Chỉ đọc: không đổi hành vi của bộ máy.
+// ---------------------------------------------------------------------------------------------
+
+export { locate, pointOn, headingAt, pieceAt, armsAt, FEAT_STEP, FEAT_RADIUS, JUNCTION_NEAR, ON_WAY_LATERAL, OFF_WAY_LATERAL };
+
+/** Các nút giao (đỉnh có từ 3 nhánh) trên hành lang → [{ s, key }] theo thứ tự s (junctionsOn, bộ nhớ tạm riêng). */
+export function junctionsAlong(corr, roads) {
+  if (!corr || !roads || !corr.pieces) return [];
+  return junctionsOn(corr, roads, new Memo());
+}
+
+/** Nút giao đầu tiên trong khoảng [s, s + maxAhead] (m) của hành lang → { s, key, coord } hoặc null. */
+export function junctionAhead(corr, roads, s, maxAhead = JUNCTION_NEAR) {
+  for (const j of junctionsAlong(corr, roads)) {
+    if (j.s < s) continue;
+    if (j.s - s > maxAhead) break;
+    return { s: j.s, key: j.key, coord: j.key.split(',').map(Number) };
+  }
+  return null;
+}
+
+/**
+ * Các mục lấy từ dữ liệu bản đồ trên hành lang, áp dụng cho chiều đi trên đó (nút biển, thay đổi khi sang đoạn
+ * đường khác, cấm rẽ), với mọi nhóm biển đang bật và không xét các mục đã báo → [{ key, kind, code, value, dup,
+ * distance, coord }]. Không có chỗ ngoặt tính từ hình dạng đường (đó là suy đoán của ứng dụng, không phải dữ liệu).
+ */
+export function mapItems(corr, roads, { vehicle = 'car', now = new Date() } = {}) {
+  if (!corr || !roads || !corr.coords || corr.coords.length < 2) return [];
+  const ctx = {
+    settings: Object.fromEntries(SIGN_CATEGORIES.map((c) => [c.setting, true])),
+    vehicle,
+    now,
+    nav: null,
+    speed: 0,
+    memo: new Memo(),
+    wayIds: new Set(corr.pieces.filter((p) => p.way).map((p) => p.way.id)),
+    junctions: [],
+    curveKey: () => null,
+  };
+  const raw = [];
+  featItems(corr, roads, ctx, raw);
+  transitionItems(corr, ctx, raw);
+  restrictionItems(corr, roads, ctx, raw);
+  return raw
+    .filter((it) => it.distance >= 0)
+    .map(({ key, kind, code, value, dup, distance: d, coord }) => ({ key, kind, code, value, dup, distance: d, coord }));
+}
+
+// ---------------------------------------------------------------------------------------------
 // C3. Bộ máy: chọn mục hiện trên thanh cảnh báo và thời điểm đọc
 // ---------------------------------------------------------------------------------------------
 
@@ -1366,6 +1415,21 @@ const EMPTY = Object.freeze({ active: null, upcoming: [], fired: [], say: null }
 const sameWay = (a, b) => a == null || b == null || Math.abs(angleDiff(a, b)) <= REVERSED;
 
 export class SignEngine {
+  // Hành lang dựng ở lần cập nhật gần nhất (null khi không dựng được) và thời điểm lần định vị đó (ms, fix.time).
+  // Chỉ để đọc (bộ học biển đặt biển lên đúng hành lang mà cảnh báo dùng); bộ máy không đọc lại hai giá trị này.
+  #corr = null;
+  #corrTime = null;
+
+  /** Hành lang của lần cập nhật gần nhất ({ coords, cum, pieces, … }, không được sửa) hoặc null. */
+  get lastCorridor() {
+    return this.#corr;
+  }
+
+  /** Thời điểm (ms, fix.time) của lần định vị đã dựng lastCorridor, hoặc null. */
+  get lastCorridorTime() {
+    return this.#corrTime;
+  }
+
   constructor() {
     this.seen = new Map(); // khoá → { coord, time, reach, spoken, dup, brg, junction, anchors? }
     this.lastSpeak = -Infinity;
@@ -1387,6 +1451,8 @@ export class SignEngine {
     this.last = null;
     this.stay = null;
     this.approached.clear();
+    this.#corr = null;
+    this.#corrTime = null;
   }
 
   /**
@@ -1414,6 +1480,8 @@ export class SignEngine {
     }
 
     const corr = buildCorridor(fix, roads, nav, { vehicle, track: this.track, time });
+    this.#corr = corr.coords.length < 2 ? null : corr;
+    this.#corrTime = time;
     if (corr.coords.length < 2) return this.#hold(time, speed);
     // Hành lang theo tuyến cũng được nhớ: rời tuyến khi đang đi chậm thì vẫn biết chiều đi.
     this.track.remember(corr, fix, time, fix.heading != null && speed > MOVING_SPEED);
