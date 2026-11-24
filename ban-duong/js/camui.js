@@ -57,6 +57,8 @@ export const UI_TEXT = Object.freeze({
   measuring: 'Đang đo',
   defaultCamera: 'Camera sau của điện thoại',
   empty: 'Chưa có biển nào được ghi nhận.',
+  // Kho còn biển nhưng không biển nào đang dùng (bị cất, xem heldText): không được nói là "chưa ghi nhận".
+  noneInUse: 'Chưa có biển nào đang dùng.',
   layer: 'Biển camera ghi nhận',
   layerHide: 'Ẩn biển camera ghi nhận trên bản đồ',
   exportTitle: 'Xuất tệp biển đã học',
@@ -135,11 +137,54 @@ export function seenLine(row) {
   return parts.join(' · ');
 }
 
-/** "Biển đã học: 12 (8 đã xác nhận)." */
-export function countText(counts) {
+/** Số biển đang lưu mà không dùng (LearnedSigns#dormant): counts.stored − counts.learned. */
+export const heldCount = (counts) => Math.max(0, (Number(counts?.stored) || 0) - (Number(counts?.learned) || 0));
+
+/** Chưa có danh sách biển được học (labels.json lỗi hay thiếu; CameraController tự tải lại). */
+const labelsDown = (labels) => labels === 'error' || labels === 'missing';
+
+/**
+ * Câu giải thích các biển đang lưu mà không dùng (không hiện, không báo), hoặc null khi không có gì phải nói.
+ * - labels.json lỗi hay thiếu (labels 'error' / 'missing'): biển tốc độ đã lưu chờ tới khi tải được danh sách
+ *   (camctl labelsPending), các biển khác và biển trên bản đồ vẫn được báo, ứng dụng tự tải lại. Câu này luôn hiện
+ *   trong trạng thái đó, kể cả khi chưa có biển tốc độ nào, vì nó nói rõ biển tốc độ chưa được dùng.
+ * - có labels: các biển còn lại thuộc loại bản này chưa học (nhãn learn: false, ví dụ biển tốc độ từ bản dựng cũ).
+ * - đang tải labels lần đầu: các biển còn lại chờ tải xong.
+ */
+export function heldText(counts, labels) {
+  const h = heldCount(counts);
+  if (labelsDown(labels)) {
+    const which = h
+      ? `${num(h)} biển tốc độ do camera ghi nhận tạm chưa dùng (không hiện, không báo; vẫn xuất tệp hoặc xoá được)`
+      : 'biển tốc độ do camera ghi nhận tạm chưa dùng';
+    return `Chưa tải được danh sách biển, nên ${which} cho tới khi tải xong. Biển trên bản đồ và các biển camera ghi nhận khác vẫn được báo. Ứng dụng sẽ tự tải lại.`;
+  }
+  if (!h) return null;
+  if (labels !== 'ok') return `Đang tải danh sách biển; ${num(h)} biển đang lưu chờ tới khi tải xong.`;
+  return `Đang giữ ${num(h)} biển thuộc loại bản này chưa học (không hiện, không báo); vẫn xuất tệp hoặc xoá được.`;
+}
+
+/**
+ * Dòng số biển ở Cài đặt (luôn hiện, kể cả khi camera tắt): "Biển đã học: 12 (8 đã xác nhận)." kèm heldText khi có
+ * biển đang lưu mà không dùng hay khi chưa tải được danh sách biển.
+ */
+export function countText(counts, labels = null) {
   const n = counts?.learned || 0;
-  if (!n) return UI_TEXT.empty;
-  return `Biển đã học: ${num(n)} (${num(counts.confirmed || 0)} đã xác nhận).`;
+  const head = n ? `Biển đã học: ${num(n)} (${num(counts.confirmed || 0)} đã xác nhận).` : heldCount(counts) ? UI_TEXT.noneInUse : UI_TEXT.empty;
+  const held = heldText(counts, labels);
+  return held ? `${head} ${held}` : head;
+}
+
+/** Câu chính của hộp "Xuất tệp biển đã học": số biển trong tệp (mọi biển đang lưu, gồm cả biển đang không dùng). */
+export function exportText(counts) {
+  const n = counts?.stored ?? counts?.learned ?? 0;
+  return `Tệp GeoJSON gồm ${num(n)} biển đang lưu trên máy này (gồm cả biển đã nhập từ tệp, nếu có).`;
+}
+
+/** Câu chính của hộp "Xoá các biển đã học?" (mọi biển đang lưu, gồm cả biển đang không dùng). */
+export function clearText(counts) {
+  const n = counts?.stored ?? counts?.learned ?? 0;
+  return n ? `Xoá hết ${num(n)} biển đang lưu trên máy này (gồm cả biển đã nhập từ tệp, nếu có). Không khôi phục được.` : UI_TEXT.empty;
 }
 
 /** Câu báo kết quả nhập tệp: "Đã thêm 12 biển, bỏ qua 3." (kèm "Kho biển đã đầy …" khi kho đầy). */
@@ -225,6 +270,7 @@ export function settingsView(st) {
     checkDisabled: !parked || !available,
     storeDisabled: !parked,
     exportDisabled: !parked || !((st?.counts?.stored ?? st?.counts?.learned) > 0),
+    count: countText(st?.counts, st?.labels), // dòng số biển (luôn hiện)
     parkedHint: !parked,
     evalShown: Number(st?.evalCount) > 0,
     // Công tắc biển tốc độ chỉ có nghĩa khi labels.json cho học biển tốc độ; không thì một dòng ghi chú thay chỗ.
@@ -452,7 +498,7 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
     $('optCamSpeed').closest('label').hidden = !v.camSpeedShown;
     $('camSpeedNote').hidden = !v.noSpeedNote;
     $('camSpeedNote').textContent = UI_TEXT.noSpeed;
-    $('camLearnedCount').textContent = countText(st.counts);
+    $('camLearnedCount').textContent = v.count;
     $('btnCamList').disabled = v.storeDisabled;
     $('btnCamImport').disabled = v.storeDisabled;
     $('btnCamExport').disabled = v.exportDisabled;
@@ -813,7 +859,7 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
 
   function renderReview(force = false) {
     if (!modalOpen('review')) return;
-    const key = `${st.parked}|${JSON.stringify(st.counts)}`;
+    const key = `${st.parked}|${st.labels}|${JSON.stringify(st.counts)}`;
     if (!force && key === view.key) return;
     view.key = key;
     const rows = ctl.list();
@@ -822,7 +868,9 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
     const scroll = body.closest('.modal-card')?.scrollTop ?? 0;
     const parts = [];
     if (!parked) parts.push(el('p', { class: 'note warn' }, TEXT.parkedOnly));
-    if (!rows.length) parts.push(el('p', { class: 'empty' }, UI_TEXT.empty));
+    if (!rows.length) parts.push(el('p', { class: 'empty' }, heldCount(st.counts) ? UI_TEXT.noneInUse : UI_TEXT.empty));
+    const held = heldText(st.counts, st.labels); // biển đang lưu mà không có trong danh sách, và vì sao
+    if (held) parts.push(el('p', { class: 'note' }, held));
     for (const row of rows.slice(0, REVIEW_MAX_ROWS)) parts.push(reviewRow(row, parked));
     if (rows.length > REVIEW_MAX_ROWS) {
       parts.push(el('p', { class: 'note' }, `Đang hiện ${num(REVIEW_MAX_ROWS)} biển gần nhất trong số ${num(rows.length)} biển.`));
@@ -905,11 +953,12 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
   function openExport() {
     if (!ctl.isParked()) return toast(TEXT.parkedOnly);
     const dates = el('input', { id: 'optCamDates', type: 'checkbox', class: 'switch' });
-    const n = st.counts.stored ?? st.counts.learned;
+    const held = heldCount(st.counts) ? heldText(st.counts, st.labels) : null; // tệp có cả biển đang không dùng
     const body = el(
       'div',
       { class: 'view' },
-      el('p', { class: 'sub' }, `Tệp GeoJSON gồm ${num(n)} biển đang lưu trên máy này (gồm cả biển đã nhập từ tệp, nếu có).`),
+      el('p', { class: 'sub' }, exportText(st.counts)),
+      held ? el('p', { class: 'note' }, held) : null,
       el('p', { class: 'note warn' }, EXPORT_WARNING[0]),
       el('p', { class: 'note' }, EXPORT_WARNING[1]),
       el('label', { class: 'opt' }, el('span', {}, UI_TEXT.withDates, el('small', {}, UI_TEXT.withDatesHint)), dates),
@@ -948,13 +997,14 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
   }
 
   function openClear() {
-    const n = st.counts.stored ?? st.counts.learned;
+    const held = heldCount(st.counts) ? heldText(st.counts, st.labels) : null;
     // Còn ảnh kiểm tra đã lưu: hộp này nói rõ và cho xoá luôn (chọn sẵn), không âm thầm xoá hay bỏ sót.
     const evalBox = st.evalCount > 0 ? el('input', { type: 'checkbox', class: 'switch', checked: true }) : null;
     const body = el(
       'div',
       { class: 'view' },
-      el('p', { class: 'sub' }, n ? `Xoá hết ${num(n)} biển đang lưu trên máy này (gồm cả biển đã nhập từ tệp, nếu có). Không khôi phục được.` : UI_TEXT.empty),
+      el('p', { class: 'sub' }, clearText(st.counts)),
+      held ? el('p', { class: 'note' }, held) : null,
       evalBox ? el('label', { class: 'opt' }, el('span', {}, clearEvalText(st.evalCount)), evalBox) : null,
       el(
         'div',

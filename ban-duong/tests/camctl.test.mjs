@@ -15,6 +15,7 @@ import { VISION_ERROR_CODES, VISION_LIMITS } from '../js/vision.js';
 import { dayNumber, memoryBackend } from '../js/learnedsigns.js';
 import { memoryBackend as evalMemoryBackend } from '../js/evalcrops.js';
 import { PARK_STILL_MS, PARK_RECENT_MS, FAST_P90_MS, IDLE_RELEASE_MS } from '../js/camsched.js';
+import { countText, heldText, settingsView } from '../js/camui.js';
 import {
   CameraController,
   CHECK_FRAMES,
@@ -24,6 +25,9 @@ import {
   EXPORT_WARNING,
   GRAB_RETRY_MS,
   importText,
+  LABELS_RETRY_MAX_MS,
+  LABELS_RETRY_MS,
+  labelsPending,
   LABELS_PATH,
   learnableCount,
   learnableRecord,
@@ -339,6 +343,8 @@ test('hằng số: giá trị đã định', () => {
   assert.deepEqual([...VISION_FATAL], ['unsupported', 'no-models', 'integrity']);
   assert.equal(RANGE_STEP_M, 5);
   assert.equal(PROGRESS_STEP, 0.01);
+  assert.equal(LABELS_RETRY_MS, 30000);
+  assert.equal(LABELS_RETRY_MAX_MS, 600000);
 });
 
 test('readRange: biển 0,7 m rộng 20 px, góc nhìn 70° theo cạnh dài, làm tròn xuống 5 m', () => {
@@ -479,8 +485,12 @@ test('nâng cấp lên labels.json đã cài: biển P.127[80] đã xác nhận 
   const env = makeEnv({ mode: 'browse', labelBytes: bytes, learnedBackend: memoryBackend(rows()) });
   const init = env.ctl.init();
   await env.ctl.learned.load();
-  // Kho đã đọc mà labels.json chưa tới: chưa biết nhãn nào được học, nên không có biển nào (requireLabels).
-  if (env.ctl.state.labels !== 'ok') assert.equal(env.ctl.learned.featsNear([105.85, 21.03], 100).length, 0);
+  // Kho đã đọc mà labels.json chưa tới: chưa biết trị số nào được học, nên biển tốc độ chưa dùng; biển khác thì có
+  // (requireLabels: labelsPending). Bộ học chưa được xét bản ghi nào.
+  if (env.ctl.state.labels !== 'ok') {
+    assert.deepEqual(env.ctl.learned.featsNear([105.85, 21.03], 100).map((f) => f.tags.traffic_sign), ['VN:R.122']);
+    assert.deepEqual(env.ctl.learned.recordsNear([105.85, 21.03], 100), []);
+  }
   await init;
   assert.equal(env.ctl.state.labels, 'ok');
   assert.deepEqual(env.ctl.learned.featsNear([105.85, 21.03], 100).map((f) => f.tags.traffic_sign), ['VN:R.122']);
@@ -1440,6 +1450,212 @@ test('labels.json treo (mạng chập chờn): init() xong sau LOAD_IDLE với l
   assert.equal(env.ctl.state.labels, 'error');
   assert.equal(signal?.aborted, true);
   env.ctl.dispose();
+});
+
+// ---- labels.json lỗi: tự tải lại, và trong lúc chờ chỉ cất biển tốc độ ----
+
+/** Bản ghi đã lưu ở kho (đúng dạng dòng của LearnedSigns), tại [105.85, 21.03]. */
+function storedRow(id, code, value, status = 'confirmed') {
+  const day = dayNumber(1_763_900_000_000);
+  return {
+    id, v: 1, code, value, family: code === 'R.122' ? 'octagon' : 'ring', coord: [105.85, 21.03], facing: 270, wayId: null,
+    junction: null, branch: null, plate: null, status, L: 3.5, hitDays: 2, passes: 2, misses: 0, firstDay: day - 3,
+    lastHitDay: day - 1, until: day + 300, night: false, posErr: 4, src: 'camera', co: [],
+  };
+}
+const HERE = [105.85, 21.03];
+const signsNear = (env) => env.ctl.learned.featsNear(HERE, 100).map((f) => f.tags.traffic_sign).sort();
+
+/** Chờ theo hạn thời gian thật (băm SHA-256 bằng WebCrypto chạy ngoài luồng). */
+async function waitFor(cond) {
+  const deadline = Date.now() + LABELS_WAIT_MS;
+  while (Date.now() < deadline && !cond()) await new Promise((r) => setTimeout(r, 5));
+  return cond();
+}
+
+test('labelsPending: chỉ biển tốc độ tối đa P.127 phải chờ labels.json', () => {
+  assert.equal(labelsPending({ code: 'P.127', value: '80' }), true);
+  assert.equal(labelsPending({ code: 'P.127', value: null }), true);
+  for (const code of ['R.122', 'P.115', 'P.127a', 'DP.127', 'W.207a']) assert.equal(labelsPending({ code, value: null }), false);
+  assert.equal(labelsPending(null), false);
+});
+
+test('labels.json lỗi khi camera tắt, máy vẫn có mạng (không có "online", bộ nhận diện không tải): tự tải lại sau 30 s, gấp đôi tới 10 phút; tải được thì bộ học lại thấy R.122', async () => {
+  const env = makeEnv({ mode: 'browse', learnedBackend: memoryBackend([storedRow('aaaaaaaaaaa2', 'R.122', null)]) });
+  const times = [];
+  let fails = 7;
+  env.fetchImpl = async () => {
+    times.push(env.clock.t);
+    if (fails-- > 0) return new Response('x', { status: 503 });
+    return new Response(LABEL_BYTES.slice(), { status: 200 });
+  };
+  await env.ctl.init();
+  assert.equal(env.ctl.state.enabled, false);
+  assert.equal(env.ctl.state.labels, 'error');
+  assert.equal(env.vision.loads, 0, 'camera tắt: bộ nhận diện không tải, nên không có lần tải lại labels nào từ đó');
+  // Trong lúc chờ: R.122 vẫn được báo; bộ học chưa xét bản ghi nào.
+  assert.deepEqual(signsNear(env), ['VN:R.122']);
+  assert.deepEqual(env.ctl.learned.recordsNear(HERE, 100), []);
+  // Khoảng chờ: 30 s, 1, 2, 4, 8 phút, rồi tối đa 10 phút. Lần tải lại thứ 7 thành công.
+  const waits = [30e3, 60e3, 120e3, 240e3, 480e3, 600e3, 600e3];
+  for (const ms of waits) {
+    const n = times.length;
+    await env.advance(ms - 1);
+    assert.equal(times.length, n, `chưa đủ ${ms} ms thì chưa tải lại`);
+    assert.equal(env.ctl.state.labels, 'error', 'đang chờ tải lại thì vẫn báo lỗi (không chập chờn)');
+    await env.advance(1);
+    assert.equal(times.length, n + 1, `tải lại sau đúng ${ms} ms`);
+  }
+  assert.deepEqual(times.slice(1).map((t, i) => t - times[i]), waits);
+  assert.ok(await waitFor(() => env.ctl.state.labels === 'ok'));
+  assert.equal(env.ctl.learner.labels.size, LABELS.labels.length, 'bộ học được dựng lại với labels.json');
+  assert.deepEqual(signsNear(env), ['VN:R.122']);
+  assert.deepEqual(env.ctl.learned.recordsNear(HERE, 100).map((r) => r.code), ['R.122']);
+  assert.deepEqual(env.ctl.state.counts, { learned: 1, confirmed: 1, candidates: 0, stored: 1 });
+  // Đã có labels: thôi tải lại.
+  await env.advance(2 * 60 * 60 * 1000);
+  assert.equal(times.length, waits.length + 1);
+  assert.equal(env.vision.loads, 0);
+  env.ctl.dispose();
+});
+
+test('labels.json lỗi: trang hiện lại hay có mạng lại thì tải lại ngay, không bao giờ tải song song; "online" đặt lại khoảng chờ', async () => {
+  const env = makeEnv({ mode: 'browse' });
+  const times = [];
+  let hang = null;
+  env.fetchImpl = () => {
+    times.push(env.clock.t);
+    if (hang) return hang;
+    return Promise.reject(new TypeError('Failed to fetch'));
+  };
+  await env.ctl.init();
+  assert.equal(times.length, 1);
+  await env.advance(30e3); // lần tải lại thứ nhất (lỗi), lần tới sau 60 s
+  assert.equal(times.length, 2);
+  await env.advance(10e3);
+  env.doc.hide();
+  await settle();
+  assert.equal(times.length, 2, 'trang ẩn thì không tải');
+  hang = new Promise(() => {}); // mạng treo
+  env.doc.show();
+  await settle();
+  assert.equal(times.length, 3, 'trang hiện lại: tải lại ngay');
+  env.doc.hide();
+  env.doc.show();
+  env.win.dispatchEvent(new Event('online'));
+  await settle();
+  assert.equal(times.length, 3, 'đang tải thì không tải thêm');
+  // Hết hạn chờ LOAD_IDLE: lỗi; lần tới theo khoảng chờ "online" đặt lại (30 s), không phải 2 phút.
+  await env.advance(VISION_LIMITS.LOAD_IDLE + 10);
+  assert.equal(env.ctl.state.labels, 'error');
+  assert.equal(times.length, 3);
+  hang = null;
+  await env.advance(LABELS_RETRY_MS);
+  assert.equal(times.length, 4);
+  env.ctl.dispose();
+});
+
+test('labels.json lỗi: chỉ cất biển tốc độ; R.122 vẫn được báo, P.127[80] đã xác nhận không hiện và không bao giờ tới CameraLimit; tải được thì dùng lại', async () => {
+  const rows = [storedRow('aaaaaaaaaaa1', 'P.127', '80'), storedRow('aaaaaaaaaaa2', 'R.122', null)];
+  // labels.json của bài này (47 nhãn) học P.127[80]: biển vẫn phải chờ, vì lúc lỗi không biết điều đó.
+  const env = makeEnv({ mode: 'browse', learnedBackend: memoryBackend(rows) });
+  env.fetchImpl = () => Promise.reject(new TypeError('Failed to fetch'));
+  await env.ctl.init();
+  const st = env.ctl.state;
+  assert.equal(st.labels, 'error');
+  assert.deepEqual(signsNear(env), ['VN:R.122']);
+  assert.deepEqual(env.ctl.list().map((r) => r.code), ['R.122']);
+  assert.deepEqual(st.counts, { learned: 1, confirmed: 1, candidates: 0, stored: 2 });
+  assert.deepEqual(env.ctl.learned.recordsNear(HERE, 100), []);
+  assert.equal(env.ctl.learned.get('aaaaaaaaaaa1').status, 'confirmed', 'không đổi trạng thái, không trừ điểm');
+  // Tin đi qua của P.127[80] (dù tới từ đâu) không tới CameraLimit khi chưa có labels.
+  const heard = [];
+  const orig = CameraLimit.prototype.onPassed;
+  CameraLimit.prototype.onPassed = function (e) {
+    heard.push(e.record.code);
+    return orig.call(this, e);
+  };
+  try {
+    for (const fn of env.ctl.learner.listeners) fn({ record: env.ctl.learned.get('aaaaaaaaaaa1'), outcome: 'hit', reason: null });
+  } finally {
+    CameraLimit.prototype.onPassed = orig;
+  }
+  assert.deepEqual(heard, []);
+  assert.equal(env.ctl.speedLimit, null);
+  // Dòng số biển ở Cài đặt (luôn hiện, camera đang tắt) nói rõ vì sao và rằng ứng dụng tự tải lại.
+  const line = settingsView(st).count;
+  assert.equal(line, countText(st.counts, 'error'));
+  assert.ok(line.startsWith('Biển đã học: 1 (1 đã xác nhận). Chưa tải được danh sách biển, nên 1 biển tốc độ'));
+  assert.match(line, /Biển trên bản đồ và các biển camera ghi nhận khác vẫn được báo\. Ứng dụng sẽ tự tải lại\.$/);
+  // Có mạng lại: tải được, biển tốc độ được dùng lại (labels này học nó), dòng số biển hết câu lỗi.
+  env.fetchImpl = null;
+  env.win.dispatchEvent(new Event('online'));
+  assert.ok(await waitFor(() => env.ctl.state.labels === 'ok'));
+  assert.deepEqual(signsNear(env), ['VN:P.127[80]', 'VN:R.122']);
+  assert.deepEqual(env.ctl.state.counts, { learned: 2, confirmed: 2, candidates: 0, stored: 2 });
+  assert.equal(heldText(env.ctl.state.counts, env.ctl.state.labels), null);
+  assert.equal(settingsView(env.ctl.state).count, 'Biển đã học: 2 (2 đã xác nhận).');
+  env.ctl.dispose();
+});
+
+test('labels.json sai mã băm với labels đã cài: P.127[80] cũ vẫn bị cất cả khi lỗi lẫn khi tải được; dòng số biển nói đúng từng lúc', async () => {
+  const installed = readFileSync(new URL('../models/labels.json', import.meta.url));
+  const bytes = new Uint8Array(installed.buffer, installed.byteOffset, installed.byteLength);
+  const rows = [storedRow('aaaaaaaaaaa1', 'P.127', '80'), storedRow('aaaaaaaaaaa3', 'P.127', '50', 'candidate')];
+  const env = makeEnv({ mode: 'browse', labelBytes: bytes, learnedBackend: memoryBackend(rows) });
+  let bad = true;
+  env.fetchImpl = async () => new Response(bad ? new Uint8Array(bytes.byteLength) : bytes.slice(), { status: 200 });
+  await env.ctl.init();
+  assert.equal(env.ctl.state.labels, 'error');
+  assert.deepEqual(signsNear(env), []);
+  assert.equal(
+    settingsView(env.ctl.state).count,
+    'Chưa có biển nào đang dùng. Chưa tải được danh sách biển, nên 2 biển tốc độ do camera ghi nhận tạm chưa dùng (không hiện, không báo; vẫn xuất tệp hoặc xoá được) cho tới khi tải xong. Biển trên bản đồ và các biển camera ghi nhận khác vẫn được báo. Ứng dụng sẽ tự tải lại.'
+  );
+  bad = false;
+  await env.advance(LABELS_RETRY_MS);
+  assert.ok(await waitFor(() => env.ctl.state.labels === 'ok'));
+  assert.deepEqual(signsNear(env), [], 'bản này không học biển tốc độ');
+  assert.equal(
+    settingsView(env.ctl.state).count,
+    'Chưa có biển nào đang dùng. Đang giữ 2 biển thuộc loại bản này chưa học (không hiện, không báo); vẫn xuất tệp hoặc xoá được.'
+  );
+  env.ctl.dispose();
+});
+
+test('dispose(): thôi tải lại labels.json (hẹn giờ, "online", trang hiện lại)', async () => {
+  const env = makeEnv({ mode: 'browse' });
+  let calls = 0;
+  env.fetchImpl = () => {
+    calls++;
+    return Promise.reject(new TypeError('Failed to fetch'));
+  };
+  await env.ctl.init();
+  assert.equal(calls, 1);
+  const pending = env.timers.length;
+  env.ctl.dispose();
+  assert.ok(env.timers.length < pending, 'hẹn giờ tải lại bị huỷ');
+  env.win.dispatchEvent(new Event('online'));
+  env.doc.hide();
+  env.doc.show();
+  await env.advance(2 * 60 * 60 * 1000);
+  assert.equal(calls, 1);
+  // Lần tải đang chạy lúc dispose(): xong (lỗi) cũng không hẹn lần tải lại nào.
+  const env2 = makeEnv({ mode: 'browse' });
+  let reject = null;
+  let calls2 = 0;
+  env2.fetchImpl = () => {
+    calls2++;
+    return calls2 === 1 ? Promise.reject(new TypeError('x')) : new Promise((_, r) => (reject = r));
+  };
+  await env2.ctl.init();
+  await env2.advance(LABELS_RETRY_MS);
+  assert.equal(calls2, 2);
+  env2.ctl.dispose();
+  reject(new TypeError('x'));
+  await env2.advance(2 * 60 * 60 * 1000);
+  assert.equal(calls2, 2);
+  assert.equal(env2.timers.length, 0);
 });
 
 test('enable(): trang bị ẩn trong lúc hỏi quyền: không bật, không báo lỗi camera mà nhắc bấm bật lại', async () => {

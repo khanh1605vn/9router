@@ -756,3 +756,40 @@ test('requireLabels: chưa có labels thì mọi bản ghi bị cất; không đ
   await loose.load();
   assert.equal(loose.featsNear(O, 100).length, 1);
 });
+
+test('requireLabels là hàm: chưa có labels thì chỉ cất bản ghi hàm chọn (biển tốc độ), hàm ném lỗi thì cất; có labels thì theo learn: true', async () => {
+  const { store: a, backend } = makeStore();
+  a.observe(obs()); // P.127[50]
+  a.observe(obs({ code: 'R.122', value: null, family: 'octagon', x: 60 }));
+  await settle();
+  const rows = [...backend.map.values()].map((r) => ({ ...r }));
+  assert.equal(rows.length, 2);
+  const seen = [];
+  const speed = (r) => {
+    seen.push(r);
+    return r.code === 'P.127';
+  };
+  const { store } = makeStore({ backend: memoryBackend(rows), labels: null, requireLabels: speed });
+  await store.load();
+  assert.deepEqual(store.featsNear(O, 200).map((f) => f.tags.traffic_sign), ['VN:R.122']);
+  assert.deepEqual(store.list(O).map((r) => r.code), ['R.122']);
+  assert.equal(store.counts().dormant, 1);
+  assert.equal(store.counts().shown, 1);
+  // Bộ học không xét bản ghi nào khi chưa có labels (nó loại mọi lượt bám, nên sẽ trừ điểm oan).
+  assert.deepEqual(store.recordsNear(O, 200), []);
+  // Hàm chỉ nhận { code, value }, không nhận bản ghi bên trong kho.
+  assert.ok(seen.length > 0 && seen.every((r) => Object.keys(r).sort().join() === 'code,value'));
+  // Có labels: chỉ còn quy tắc learn: true (labels của bài này học P.127[50]).
+  const changed = [];
+  store.onChange(() => changed.push(1));
+  store.setLabels(labels);
+  assert.equal(changed.length, 1);
+  assert.equal(store.featsNear(O, 200).length, 2);
+  assert.equal(store.recordsNear(O, 200).length, 2);
+  assert.equal(store.counts().dormant, 0);
+  // Hàm ném lỗi: không biết thì cất.
+  const { store: broken } = makeStore({ backend: memoryBackend(rows), labels: null, requireLabels: () => { throw new Error('x'); } });
+  await broken.load();
+  assert.equal(broken.featsNear(O, 200).length, 0);
+  assert.equal(broken.counts().dormant, 2);
+});

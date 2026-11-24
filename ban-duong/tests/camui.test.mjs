@@ -12,8 +12,12 @@ import {
   chipWarning,
   chipState,
   checkClosedView,
+  clearText,
   countText,
   dayText,
+  exportText,
+  heldCount,
+  heldText,
   downloadMb,
   IMPORT_MAX_BYTES,
   importFileError,
@@ -106,6 +110,50 @@ test('countText: "Biển đã học: N (M đã xác nhận)."', () => {
   assert.equal(countText({ learned: 12, confirmed: 8 }), 'Biển đã học: 12 (8 đã xác nhận).');
   assert.equal(countText({ learned: 1234, confirmed: 0 }), 'Biển đã học: 1.234 (0 đã xác nhận).');
   assert.equal(countText({ learned: 0, confirmed: 0 }), UI_TEXT.empty);
+});
+
+test('biển đang lưu mà không dùng: dòng số biển, danh sách và hộp xuất/xoá nói rõ bao nhiêu biển và vì sao', () => {
+  const HELD = 'Đang giữ 2 biển thuộc loại bản này chưa học (không hiện, không báo); vẫn xuất tệp hoặc xoá được.';
+  // Chỉ còn biển bị cất (labels đã tải; ví dụ biển tốc độ từ bản dựng cũ): không được nói "chưa ghi nhận".
+  const only = { learned: 0, confirmed: 0, candidates: 0, stored: 2 };
+  assert.equal(heldCount(only), 2);
+  assert.equal(heldText(only, 'ok'), HELD);
+  assert.equal(countText(only, 'ok'), `${UI_TEXT.noneInUse} ${HELD}`);
+  assert.notEqual(countText(only, 'ok'), UI_TEXT.empty);
+  assert.equal(settingsView(st({ counts: only, labels: 'ok' })).count, `${UI_TEXT.noneInUse} ${HELD}`);
+  assert.equal(exportText(only), 'Tệp GeoJSON gồm 2 biển đang lưu trên máy này (gồm cả biển đã nhập từ tệp, nếu có).');
+  assert.equal(clearText(only), 'Xoá hết 2 biển đang lưu trên máy này (gồm cả biển đã nhập từ tệp, nếu có). Không khôi phục được.');
+  // Có cả biển đang dùng.
+  const some = { learned: 3, confirmed: 1, candidates: 2, stored: 5 };
+  assert.equal(countText(some, 'ok'), `Biển đã học: 3 (1 đã xác nhận). ${HELD}`);
+  assert.equal(exportText(some), 'Tệp GeoJSON gồm 5 biển đang lưu trên máy này (gồm cả biển đã nhập từ tệp, nếu có).');
+  // Không có biển bị cất: như trước.
+  assert.equal(heldText({ learned: 3, confirmed: 1, stored: 3 }, 'ok'), null);
+  assert.equal(countText({ learned: 3, confirmed: 1, stored: 3 }, 'ok'), 'Biển đã học: 3 (1 đã xác nhận).');
+  assert.equal(countText({ learned: 0, confirmed: 0, stored: 0 }, 'ok'), UI_TEXT.empty);
+  assert.equal(clearText({ learned: 0, stored: 0 }), UI_TEXT.empty);
+  // Đang tải labels lần đầu.
+  assert.equal(heldText({ learned: 1, stored: 2 }, 'loading'), 'Đang tải danh sách biển; 1 biển đang lưu chờ tới khi tải xong.');
+  // labels.json lỗi hay thiếu: luôn nói biển tốc độ tạm chưa dùng, biển bản đồ vẫn báo, ứng dụng tự tải lại.
+  for (const labels of ['error', 'missing']) {
+    assert.equal(
+      heldText({ learned: 4, confirmed: 2, stored: 6 }, labels),
+      'Chưa tải được danh sách biển, nên 2 biển tốc độ do camera ghi nhận tạm chưa dùng (không hiện, không báo; vẫn xuất tệp hoặc xoá được) cho tới khi tải xong. Biển trên bản đồ và các biển camera ghi nhận khác vẫn được báo. Ứng dụng sẽ tự tải lại.'
+    );
+    assert.equal(
+      countText({ learned: 0, confirmed: 0, stored: 0 }, labels),
+      `${UI_TEXT.empty} Chưa tải được danh sách biển, nên biển tốc độ do camera ghi nhận tạm chưa dùng cho tới khi tải xong. Biển trên bản đồ và các biển camera ghi nhận khác vẫn được báo. Ứng dụng sẽ tự tải lại.`
+    );
+    // Dòng này luôn hiện, kể cả khi camera tắt (ô trạng thái thì ẩn).
+    const v = settingsView(st({ enabled: false, labels, counts: { learned: 1, confirmed: 1, stored: 2 } }));
+    assert.equal(v.statusShown, false);
+    assert.match(v.count, /^Biển đã học: 1 \(1 đã xác nhận\)\. Chưa tải được danh sách biển, nên 1 biển tốc độ/);
+  }
+  // TEXT.labels (cũng dùng khi nhập tệp mà chưa có labels) không còn bảo mở lại ứng dụng: việc tải lại là tự động.
+  assert.doesNotMatch(TEXT.labels, /mở lại/);
+  assert.match(TEXT.labels, /tự tải lại/);
+  // Tiếng Việt viết thường kiểu câu, không có chữ in hoa liền nhau.
+  for (const t of [HELD, heldText(some, 'error'), UI_TEXT.noneInUse, TEXT.labels]) assert.doesNotMatch(t, /\p{Lu}{2,}/u);
 });
 
 test('importResultText: "Đã thêm X biển, bỏ qua Y", kho đầy, lỗi tệp', () => {

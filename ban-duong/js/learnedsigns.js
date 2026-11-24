@@ -332,9 +332,10 @@ export class LearnedSigns {
    * @param labels   labels.json (để kiểm tra biển nhập từ tệp: chỉ nhận nhãn được học; và để "cất" bản ghi của nhãn
    *                 không còn được học, xem #dormant)
    * @param requireLabels  bản ghi nào phải chờ labels mới được dùng, khi chưa có labels (chưa tải hay tải lỗi):
-   *                 true: mọi bản ghi; hàm (bản ghi, chỉ đọc) → true: những bản ghi mà hàm chọn (CameraController chọn
-   *                 biển tốc độ: thiếu danh sách học thì không biết trị số có được học không); false (mặc định): không
-   *                 lọc. Đặt (true hay hàm) thì bộ học cũng không được xét bản ghi nào khi chưa có labels (recordsNear).
+   *                 true: mọi bản ghi; hàm ({ code, value }) → true: những bản ghi mà hàm chọn (CameraController chọn
+   *                 biển tốc độ: thiếu danh sách học thì không biết trị số có được học không; hàm ném lỗi thì coi như
+   *                 chọn); false (mặc định): không lọc. Đặt (true hay hàm) thì bộ học cũng không được xét bản ghi nào
+   *                 khi chưa có labels (recordsNear). Có labels rồi thì chỉ còn quy tắc learn: true (#dormant).
    * @param random   () → [0, 1) để tạo mã bản ghi
    */
   constructor({
@@ -370,7 +371,7 @@ export class LearnedSigns {
       const need = this.requireLabels;
       if (typeof need !== 'function') return need;
       try {
-        return Boolean(need(r));
+        return Boolean(need({ code: r.code, value: r.value }));
       } catch {
         return true; // không biết thì cất (an toàn hơn là báo)
       }

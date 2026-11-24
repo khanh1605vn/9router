@@ -58,6 +58,13 @@ export function learnableRecord(labels, rec) {
   return L.some((l) => l && l.learn === true && l.label === label);
 }
 
+/**
+ * Bản ghi (hay nút biển { code, value }) phải chờ labels.json mới được dùng: biển tốc độ tối đa. Thiếu danh sách học thì
+ * không biết trị số nào được học (bản v1 gỡ mọi P.127), nên biển tốc độ đã lưu không hiện, không báo và không đổi giới
+ * hạn trên đồng hồ tốc độ; các biển khác vẫn được báo như trước (LearnedSigns, requireLabels).
+ */
+export const labelsPending = (rec) => rec?.code === CAMERA_LIMIT_CODE;
+
 /** Số loại biển được học (nhãn learn: true) của labels.json, hoặc null khi chưa có labels. */
 export function learnableCount(labels) {
   if (!labels || !Array.isArray(labels.labels)) return null;
@@ -79,6 +86,10 @@ export const VISION_STABLE_FRAMES = 100;
 export const VISION_FATAL = Object.freeze(['unsupported', 'no-models', 'integrity']);
 export const RANGE_STEP_M = 5; // tầm đọc biển ước tính làm tròn xuống bội số này (m)
 export const PROGRESS_STEP = 0.01; // tiến độ tải chỉ báo lại khi đổi từ chừng này (phần) trở lên
+// labels.json lỗi (mạng, mã băm sai): tự tải lại sau LABELS_RETRY_MS, mỗi lần lỗi tiếp thì gấp đôi, tối đa
+// LABELS_RETRY_MAX_MS; cũng tải lại ngay khi có mạng lại ('online') hay khi trang hiện lại. Không bao giờ tải song song.
+export const LABELS_RETRY_MS = 30 * 1000;
+export const LABELS_RETRY_MAX_MS = 10 * 60 * 1000;
 // Ứng dụng mở nhiều ngày liền: xoá ảnh kiểm tra quá hạn ít nhất mỗi chừng này (ms, theo đồng hồ của máy).
 export const EVAL_EXPIRE_MS = 60 * 60 * 1000;
 
@@ -99,7 +110,7 @@ export const TEXT = Object.freeze({
   blank: 'Camera không có hình. Hãy kiểm tra camera có bị che không.',
   dark: 'Hình từ camera quá tối.',
   bright: 'Hình từ camera quá sáng.',
-  labels: 'Chưa tải được danh sách biển. Hãy kết nối mạng rồi mở lại ứng dụng.',
+  labels: 'Chưa tải được danh sách biển. Ứng dụng đang tự tải lại (cần có mạng); hãy thử lại sau ít phút.',
   visionStopped: 'Bộ nhận diện biển bị lỗi nhiều lần nên đã dừng. Sẽ thử lại ở chuyến đi sau.',
   enableHidden: 'Ứng dụng đã bị ẩn khi đang mở camera. Hãy bấm bật lại.',
   keepAwakeOn: 'Đã bật “Giữ màn hình sáng khi lái” vì camera chỉ chạy khi màn hình sáng.',
@@ -230,7 +241,10 @@ export class CameraController {
   #still;
   #battery = null;
   #labels = null;
-  #labelsState = 'idle'; // 'idle' | 'loading' | 'ok' | 'error' | 'missing'
+  #labelsState = 'idle'; // 'idle' | 'loading' | 'ok' | 'error' | 'missing' (đang tải lại sau lỗi thì vẫn là lỗi)
+  #labelsLoad = null; // promise của lần tải labels.json đang chạy (không tải song song)
+  #labelsTimer = null; // hẹn giờ tải lại labels.json
+  #labelsDelay = LABELS_RETRY_MS; // khoảng chờ của lần tải lại tới
   #ready = null;
   #listeners = new Set();
   #lastKey = '';
@@ -331,8 +345,9 @@ export class CameraController {
     if (this.#ready) return this.#ready;
     const o = this.#o;
     // requireLabels: chưa biết nhãn nào được học (labels.json chưa tải hay tải lỗi) thì không hiện, không cảnh báo biển
-    // nào; bản ghi của nhãn đã bị gỡ (learn: false) cũng vậy (LearnedSigns#dormant).
-    this.#learned = new LearnedSigns({ backend: o.learnedBackend, now: o.now, requireLabels: true });
+    // tốc độ (labelsPending), các biển khác vẫn dùng; có labels rồi thì bản ghi của nhãn đã bị gỡ (learn: false) bị cất
+    // (LearnedSigns#dormant). CameraLimit thì chỉ nghe biển learn: true (learnableRecord), nên thiếu labels là không đổi.
+    this.#learned = new LearnedSigns({ backend: o.learnedBackend, now: o.now, requireLabels: labelsPending });
     this.#limit = new CameraLimit();
     this.#sched = new LevelScheduler({ now: o.mono });
     this.#offs.push(
@@ -404,16 +419,63 @@ export class CameraController {
     return this.#sched;
   }
 
-  /** labels.json: tải một lần từ đúng URL Vision dùng (?v=…), kiểm kích thước và SHA-256 theo manifest. */
-  async #loadLabels() {
-    if (this.#labelsState === 'ok' || this.#labelsState === 'loading') return this.#labels;
+  /**
+   * labels.json: tải từ đúng URL Vision dùng (?v=…), kiểm kích thước và SHA-256 theo manifest. Đã có thì thôi; đang tải
+   * thì trả lại đúng lần tải đó. Lỗi thì hẹn tải lại (#scheduleLabelsRetry). Không bao giờ ném lỗi.
+   */
+  #loadLabels() {
+    if (this.#labelsState === 'ok' || this.#disposed) return Promise.resolve(this.#labels);
+    if (this.#labelsLoad) return this.#labelsLoad;
+    this.#clearLabelsRetry();
+    const p = this.#fetchLabels()
+      .catch(() => {
+        this.#labelsState = 'error';
+        return null;
+      })
+      .then((labels) => {
+        if (this.#labelsLoad === p) this.#labelsLoad = null;
+        if (this.#labelsState === 'ok') this.#labelsDelay = LABELS_RETRY_MS;
+        else this.#scheduleLabelsRetry();
+        if (this.#learned) this.#emit();
+        return labels;
+      });
+    this.#labelsLoad = p;
+    return p;
+  }
+
+  /** Hẹn lần tải lại labels.json tới, sau #labelsDelay (gấp đôi sau mỗi lần, tối đa LABELS_RETRY_MAX_MS). */
+  #scheduleLabelsRetry() {
+    if (this.#disposed || this.#labelsTimer != null) return;
+    const ms = this.#labelsDelay;
+    this.#labelsDelay = Math.min(ms * 2, LABELS_RETRY_MAX_MS);
+    this.#labelsTimer = this.#o.setTimeout(() => {
+      this.#labelsTimer = null;
+      this.#retryLabels();
+    }, ms);
+  }
+
+  #clearLabelsRetry() {
+    if (this.#labelsTimer == null) return;
+    this.#o.clearTimeout(this.#labelsTimer);
+    this.#labelsTimer = null;
+  }
+
+  /** labels.json đang lỗi hay thiếu: tải lại ngay (hẹn giờ, 'online', trang hiện lại, bộ nhận diện vừa tải xong). */
+  #retryLabels() {
+    if (this.#disposed || !this.#limit) return;
+    if (this.#labelsState !== 'error' && this.#labelsState !== 'missing') return;
+    this.#loadLabels().then(() => this.#makeLearner());
+  }
+
+  async #fetchLabels() {
     const o = this.#o;
     const entry = o.manifest?.files?.[LABELS_PATH];
     if (!entry || typeof entry.sha256 !== 'string' || !Number.isInteger(entry.size)) {
       this.#labelsState = 'missing';
       return null;
     }
-    this.#labelsState = 'loading';
+    // Lần đầu là 'loading'; tải lại sau lỗi thì giữ 'error' cho tới khi tải được, để giao diện không chập chờn.
+    if (this.#labelsState === 'idle') this.#labelsState = 'loading';
     // Hạn chót (mạng treo, "lie-fi"): không có thì init() và clear() có thể chờ tới khi trình duyệt tự bỏ yêu cầu.
     const ac = typeof AbortController === 'function' ? new AbortController() : null;
     let timer = null;
@@ -438,6 +500,7 @@ export class CameraController {
       await verifyBytes(buf, { path: LABELS_PATH, sha256: entry.sha256, size: entry.size }, o.digest);
       const json = JSON.parse(new TextDecoder().decode(buf));
       if (!P.checkLabels(json).ok) throw new Error('labels');
+      if (this.#disposed) return null;
       this.#labels = json;
       this.#labelsState = 'ok';
       this.#learned?.setLabels(json);
@@ -492,10 +555,16 @@ export class CameraController {
     this.#offs.push(off);
   }
 
-  /** Có mạng lại: tải lại labels.json đã lỗi; bộ nhận diện đã thôi vì không tải được thì thử lại từ đầu. */
+  /**
+   * Có mạng lại: tải lại ngay labels.json đã lỗi (khoảng chờ về lại LABELS_RETRY_MS); bộ nhận diện đã thôi vì không tải
+   * được thì thử lại từ đầu.
+   */
   #onOnline() {
     if (this.#disposed || !this.#limit) return;
-    if (this.#labelsState === 'error') this.#loadLabels().then(() => this.#makeLearner());
+    if (this.#labelsState === 'error' || this.#labelsState === 'missing') {
+      this.#labelsDelay = LABELS_RETRY_MS;
+      this.#retryLabels();
+    }
     if (this.#visionGaveUp && this.#visionError === 'load') {
       this.#visionGaveUp = false;
       this.#visionRetry = 0;
@@ -737,6 +806,8 @@ export class CameraController {
       this.#learner?.pause();
       // Luồng "Kiểm tra camera" là luồng riêng: cũng đóng (PLAN §5.1). Không tự mở lại khi hiện lại (phải bấm).
       this.closeCheck();
+    } else {
+      this.#retryLabels(); // labels.json đang lỗi: thử lại khi người dùng quay lại ứng dụng
     }
     this.refresh();
   }
@@ -832,7 +903,7 @@ export class CameraController {
           this.#visionOkFrames = 0; // số lần thử lại chỉ trả lại sau VISION_STABLE_FRAMES khung tốt
           this.#progress = null;
           v.level = this.#sched.level;
-          this.#loadLabels().then(() => this.#makeLearner()); // labels lỗi lúc khởi động mà nay mạng đã có
+          this.#retryLabels(); // labels lỗi lúc khởi động mà nay mạng đã có
           this.refresh();
           return v;
         },
@@ -1460,6 +1531,7 @@ export class CameraController {
   /** Gỡ mọi trình nghe, đóng camera và bộ nhận diện (kiểm thử). */
   dispose() {
     this.#disposed = true;
+    this.#clearLabelsRetry();
     this.#shutdown();
     this.#cam?.dispose?.();
     for (const off of this.#offs.splice(0)) {
