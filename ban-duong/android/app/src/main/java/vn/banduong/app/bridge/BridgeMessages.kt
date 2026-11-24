@@ -28,6 +28,23 @@ sealed interface InboundMessage {
     data class ObdWrite(val link: String, val data: String) : InboundMessage
 
     data class ObdDisconnect(val link: String) : InboundMessage
+
+    /** Ý định cập nhật ứng dụng (vn.banduong.app.update). Không có URL hay tham số nào khác: máy tự quyết tải gì. */
+    data class Update(val action: UpdateAction) : InboundMessage
+}
+
+enum class UpdateAction(val key: String) {
+    /** Người dùng bấm "Kiểm tra cập nhật". */
+    CHECK("check"),
+
+    /** Người dùng bấm "Cập nhật": tải, xác minh, mở hộp thoại cài đặt của hệ thống. */
+    INSTALL("install"),
+
+    /** "Để sau": ẩn bản này, huỷ tải nếu đang tải. */
+    DISMISS("dismiss"),
+
+    /** Gửi lại trạng thái hiện tại (trang vừa gắn bộ nghe), không gọi mạng. */
+    STATUS("status"),
 }
 
 sealed interface ParseResult {
@@ -87,6 +104,11 @@ object BridgeMessageParser {
             }
             "obdConnect" -> link(obj)?.let { ParseResult.Ok(InboundMessage.ObdConnect(it)) } ?: ParseResult.Rejected("bad-link")
             "obdDisconnect" -> link(obj)?.let { ParseResult.Ok(InboundMessage.ObdDisconnect(it)) } ?: ParseResult.Rejected("bad-link")
+            "update" -> {
+                val a = obj.opt("action") as? String
+                val action = UpdateAction.entries.firstOrNull { it.key == a } ?: return ParseResult.Rejected("bad-action")
+                ParseResult.Ok(InboundMessage.Update(action))
+            }
             "obdWrite" -> {
                 val link = link(obj) ?: return ParseResult.Rejected("bad-link")
                 val data = obj.opt("data") as? String
@@ -210,12 +232,13 @@ object BridgeMessageParser {
 
     /**
      * Chuỗi hiển thị trên màn hình xe: bỏ ký tự điều khiển và ký tự đổi hướng chữ (bidi), gộp khoảng trắng,
-     * cắt còn [BridgeLimits.MAX_TEXT_CHARS] ký tự (không cắt đôi cặp surrogate). Rỗng thì trả null.
+     * cắt còn [max] ký tự (mặc định [BridgeLimits.MAX_TEXT_CHARS], không cắt đôi cặp surrogate). Rỗng thì trả null.
+     * Chuỗi gốc dài hơn 8 lần [max] bị coi là sai (null).
      */
-    fun cleanText(raw: Any?): String? {
+    fun cleanText(raw: Any?, max: Int = L.MAX_TEXT_CHARS): String? {
         val s = raw as? String ?: return null
-        if (s.length > L.MAX_TEXT_CHARS * 8) return null
-        val sb = StringBuilder(minOf(s.length, L.MAX_TEXT_CHARS))
+        if (s.length > max * 8) return null
+        val sb = StringBuilder(minOf(s.length, max))
         var lastSpace = true
         for (ch in s) {
             val c = ch.code
@@ -235,8 +258,8 @@ object BridgeMessageParser {
             lastSpace = false
         }
         var t = sb.toString().trim()
-        if (t.length > L.MAX_TEXT_CHARS) {
-            var end = L.MAX_TEXT_CHARS
+        if (t.length > max) {
+            var end = max
             if (Character.isHighSurrogate(t[end - 1])) end--
             t = t.substring(0, end).trimEnd()
         }

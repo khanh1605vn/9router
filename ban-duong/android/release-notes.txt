@@ -1,0 +1,1 @@
+Tự kiểm tra và cài bản mới ngay trong ứng dụng: khi có phiên bản mới sẽ hiện nút “Cập nhật”, bấm một lần là cài, không cần chép qua USB hay Zalo.

@@ -46,6 +46,20 @@ export function localizeLabels(style) {
 
 const EMPTY = { type: 'FeatureCollection', features: [] };
 
+// Bản đồ nền OpenFreeMap được dựng lại khoảng mỗi tuần; địa chỉ ô gắn mã bản dựng (…/planet/<bản dựng>/{z}/{x}/{y}.pbf)
+// lấy từ TileJSON của nguồn (https://tiles.openfreemap.org/planet, sw.js luôn hỏi mạng trước). Mở ứng dụng là có bản
+// mới; nhưng màn hình xe thường chỉ ngủ chứ không tắt, ứng dụng có thể mở liền nhiều ngày, nên cứ chừng này (ms) lại
+// hỏi TileJSON một lần: có bản dựng mới thì nạp lại nguồn ô ngay, không cần mở lại ứng dụng.
+export const TILEJSON_CHECK = 6 * 3600e3;
+
+/** Danh sách địa chỉ ô trong TileJSON mới (next) khác bản đang dùng (current): chỉ tin mảng chuỗi https không rỗng. */
+export function tileTemplatesDiffer(current, next) {
+  if (!Array.isArray(next) || !next.length || next.length > 8) return false;
+  if (!next.every((u) => typeof u === 'string' && u.startsWith('https://') && u.length < 512)) return false;
+  if (!Array.isArray(current) || current.length !== next.length) return true;
+  return current.some((u, i) => u !== next[i]);
+}
+
 // Lớp biển do camera ghi nhận (chỉ hiện khi người dùng bấm "Xem trên bản đồ" trong danh sách lúc xe đỗ).
 export const LEARNED_ICON_PX = 44; // cỡ hình biển trên bản đồ (px CSS)
 export const LEARNED_QUIET_OPACITY = 0.72; // biển chưa xác nhận vẽ nhạt hơn (cùng với viền nét đứt)
@@ -124,6 +138,44 @@ export class MapView {
     this.learnedGen = 0;
     this.progress = 0;
     this.lastCam = '';
+    this.tileTimer = null;
+  }
+
+  /**
+   * Hỏi lại TileJSON của các nguồn ô vector (không hỏi khi chắc chắn mất mạng); bản dựng ô đổi thì nạp lại nguồn đó
+   * (setUrl: MapLibre tự tải lại TileJSON và các ô đang hiện). Trả về số nguồn đã nạp lại. Không bao giờ ném lỗi.
+   */
+  async refreshTiles(fetchImpl = (...a) => fetch(...a)) {
+    const map = this.map;
+    if (!map || (typeof navigator !== 'undefined' && navigator.onLine === false)) return 0;
+    let sources = {};
+    try {
+      sources = map.getStyle()?.sources || {};
+    } catch {
+      return 0;
+    }
+    let reloaded = 0;
+    for (const [id, def] of Object.entries(sources)) {
+      if (!def || def.type !== 'vector' || typeof def.url !== 'string' || !def.url.startsWith('https://')) continue;
+      try {
+        const src = map.getSource(id);
+        if (!src || typeof src.setUrl !== 'function') continue;
+        const res = await fetchImpl(def.url);
+        if (!res.ok) continue;
+        const tj = await res.json();
+        if (!tileTemplatesDiffer(src.tiles, tj?.tiles)) continue;
+        src.setUrl(def.url);
+        reloaded++;
+      } catch {
+        /* mất mạng giữa chừng hay TileJSON hỏng: giữ nguồn đang dùng, lần sau hỏi lại */
+      }
+    }
+    return reloaded;
+  }
+
+  #watchTiles() {
+    clearInterval(this.tileTimer);
+    this.tileTimer = setInterval(() => void this.refreshTiles(), TILEJSON_CHECK);
   }
 
   async #resolveStyle(dark) {
@@ -197,6 +249,7 @@ export class MapView {
 
     await styleReady;
     this.raf = requestAnimationFrame(this.#frame);
+    this.#watchTiles();
   }
 
   /**

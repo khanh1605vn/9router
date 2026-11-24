@@ -5,11 +5,15 @@ import {
   CELL,
   cellKey,
   cellOf,
+  freshnessText,
   onewayFor,
   OVERPASS_ENDPOINTS,
   overpassFailure,
   parseMaxspeed,
   parseOverpass,
+  REFRESH_AGE,
+  REFRESH_GAP,
+  REFRESH_RETRY,
   RoadData,
 } from '../js/roaddata.js';
 import { destination, distance } from '../js/geo.js';
@@ -457,6 +461,235 @@ test('tải ô: hai ô tải song song, mỗi ô tự thử đủ ba máy chủ 
   assert.equal(roads.endpoint, 2);
   assert.equal(roads.hasData(CENTER), true);
   assert.equal(roads.hasData([(cx + 1.5) * CELL, (cy + 0.5) * CELL]), true);
+});
+
+// ---- Làm mới ngầm (stale-while-revalidate): đồng hồ giả, fetch giả ----
+
+const HOURS = 3600e3;
+
+/** Đồng hồ giả: chỉ thay Date.now, trả lại như cũ khi xong bài. */
+function fakeClock(t) {
+  const realNow = Date.now;
+  const clock = { now: realNow() };
+  Date.now = () => clock.now;
+  t.after(() => {
+    Date.now = realNow;
+  });
+  return clock;
+}
+
+const SIGNAL = [106.7, 10.771]; // nút đèn tín hiệu (nút 2) của sampleResponse
+
+/** Bản ghi bộ đệm đúng phiên bản, tải lúc t: đường có sẵn, chưa có nút biển và điểm cảnh báo (bản trước khi OSM được sửa). */
+const oldRecord = (key, t) => ({ key, v: VERSION, t, base: '2026-07-01T00:00:00Z', ways: parseOverpass(sampleResponse()).ways, points: [], feats: [], restr: [] });
+
+test('làm mới ngầm: ô còn mới (dưới 6 giờ) không tải lại; quá 6 giờ thì tải lại một lần, thay dữ liệu ngay và báo bên nghe', async (t) => {
+  const clock = fakeClock(t);
+  const cache = fakeCache([oldRecord(CENTER_KEY, clock.now - HOURS)]);
+  const { calls, impl } = fakeFetch([{ json: sampleResponse() }]);
+  const roads = new RoadData({ fetchImpl: impl, cache, online: () => true });
+  let updates = 0;
+  roads.onUpdate(() => updates++);
+
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(calls.length, 0, 'ô mới tải 1 giờ trước: dùng luôn, không hỏi Overpass');
+  assert.equal(roads.hasData(CENTER), true);
+  assert.equal(roads.featsNear(SIGNAL, 5).length, 0);
+  assert.equal(roads.freshness(CENTER).t, clock.now - HOURS);
+
+  clock.now += REFRESH_AGE - HOURS - 1000; // còn 1 giây nữa mới đủ 6 giờ
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(calls.length, 0, 'chưa đủ 6 giờ');
+
+  clock.now += 1000;
+  const before = updates;
+  roads.ensureAround(CENTER);
+  assert.equal(roads.pending.has(CENTER_KEY), true, 'đủ 6 giờ: bắt đầu tải lại');
+  assert.equal(roads.hasData(CENTER), true, 'trong lúc tải lại vẫn dùng bản đang có');
+  await settle(roads);
+  assert.equal(calls.length, 1);
+  // Thay ngay trong bộ nhớ: bộ máy cảnh báo hỏi lại là thấy chỗ sửa, không cần mở lại ứng dụng.
+  assert.equal(roads.featsNear(SIGNAL, 5).length, 1);
+  assert.deepEqual(roads.pointsNear(CENTER, 3000).map((p) => p.id), ['n3']);
+  assert.equal(roads.dataTimestamp(), '2026-07-28T02:16:18Z');
+  assert.ok(updates > before, 'báo bên nghe (vẽ lại điểm cảnh báo trên bản đồ)');
+  assert.equal(cache.puts.length, 1);
+  assert.equal(cache.puts[0].t, clock.now, 'bản ghi trên máy mang thời điểm tải mới');
+  assert.equal(roads.freshness(CENTER).t, clock.now);
+
+  clock.now += 5 * HOURS;
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(calls.length, 1, 'vừa làm mới: 5 giờ sau chưa tải lại');
+});
+
+test('làm mới ngầm: ô đang tải thì không gửi thêm truy vấn, chỉ một ô được làm mới mỗi lúc', async (t) => {
+  const clock = fakeClock(t);
+  const [cx, cy] = cellOf(CENTER);
+  const EAST = cellKey(cx + 1, cy);
+  const cache = fakeCache([oldRecord(CENTER_KEY, clock.now - 7 * HOURS), oldRecord(EAST, clock.now - 7 * HOURS)]);
+  const hung = [];
+  const calls = [];
+  const impl = (url, opts) => {
+    calls.push(decodeURIComponent(opts.body));
+    return new Promise((resolve) => hung.push(() => resolve({ ok: true, status: 200, json: async () => sampleResponse() })));
+  };
+  const roads = new RoadData({ fetchImpl: impl, cache, online: () => true });
+  const nearEast = [(cx + 0.9) * CELL, (cy + 0.5) * CELL]; // sát mép Đông: xin cả ô bên cạnh
+  roads.ensureAround(nearEast);
+  await until(() => roads.reading.size === 0 && calls.length === 1);
+  for (let k = 0; k < 20; k++) {
+    clock.now += 1000; // định vị mỗi giây trong lúc máy chủ chưa trả lời
+    roads.ensureAround(nearEast);
+    await new Promise((r) => setImmediate(r));
+  }
+  assert.equal(calls.length, 1, 'không truy vấn trùng cho ô đang tải, không làm mới song song ô thứ hai');
+  assert.equal(roads.pending.size, 1);
+  assert.equal(roads.refreshing, CENTER_KEY);
+  assert.equal(roads.freshness(CENTER).loading, true);
+
+  hung.shift()();
+  await settle(roads);
+  assert.equal(roads.refreshing, null);
+  roads.ensureAround(nearEast);
+  await settle(roads);
+  assert.equal(calls.length, 1, 'vừa làm mới xong: nghỉ REFRESH_GAP rồi mới làm mới ô kế tiếp');
+
+  clock.now += REFRESH_GAP;
+  roads.ensureAround(nearEast);
+  assert.equal(roads.pending.has(EAST), true, 'hết thời gian nghỉ: làm mới ô bên cạnh');
+  assert.ok(calls[1].includes(`bbox:${(cy * CELL).toFixed(5)},${((cx + 1) * CELL).toFixed(5)}`));
+  hung.shift()();
+  await settle(roads);
+  assert.equal(calls.length, 2);
+});
+
+test('làm mới ngầm không chiếm lượt của ô chưa có dữ liệu', async (t) => {
+  const clock = fakeClock(t);
+  const [cx, cy] = cellOf(CENTER);
+  const cache = fakeCache([oldRecord(CENTER_KEY, clock.now - 7 * HOURS)]);
+  const hung = [];
+  const impl = () => new Promise((resolve) => hung.push(() => resolve({ ok: true, status: 200, json: async () => sampleResponse() })));
+  const roads = new RoadData({ fetchImpl: impl, cache, online: () => true });
+  roads.ensureAround(CENTER);
+  await until(() => roads.reading.size === 0 && hung.length === 1);
+  // Đi sang ô phía Bắc chưa từng tải: tải ngay, dù lượt làm mới ô cũ vẫn đang chờ.
+  roads.ensureAround([(cx + 0.5) * CELL, (cy + 1.5) * CELL]);
+  await until(() => roads.reading.size === 0 && hung.length === 2);
+  assert.equal(roads.pending.has(cellKey(cx, cy + 1)), true);
+  while (hung.length) hung.shift()();
+  await settle(roads);
+});
+
+test('mất mạng: ô cũ (kể cả quá 7 ngày) vẫn được dùng ngay, không thử tải; có mạng lại thì tải lại', async (t) => {
+  const clock = fakeClock(t);
+  const cache = fakeCache([{ ...oldRecord(CENTER_KEY, clock.now - 30 * 24 * HOURS), feats: parseOverpass(sampleResponse()).feats }]);
+  let online = false;
+  const { calls, impl } = fakeFetch([{ json: sampleResponse() }]);
+  const roads = new RoadData({ fetchImpl: impl, cache, online: () => online });
+  for (let k = 0; k < 5; k++) {
+    roads.ensureAround(CENTER);
+    await settle(roads);
+    clock.now += 120e3;
+  }
+  assert.equal(calls.length, 0, 'mất mạng: không thử tải lại ô đã có');
+  assert.equal(roads.hasData(CENTER), true, 'bản 30 ngày tuổi vẫn cho giới hạn tốc độ và biển báo');
+  assert.equal(roads.featsNear(SIGNAL, 5).length, 1);
+  assert.equal(roads.status, 'ready');
+  assert.equal(roads.failedAt.size, 0, 'mất mạng không bị tính là tải hỏng');
+
+  online = true;
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(calls.length, 1, 'có mạng lại: tải lại ngay');
+  assert.equal(cache.puts.at(-1).t, clock.now);
+});
+
+test('mất mạng vẫn thử tải ô chưa có dữ liệu (navigator.onLine có thể sai)', async () => {
+  const { calls, impl } = fakeFetch([{ json: sampleResponse() }]);
+  const roads = new RoadData({ fetchImpl: impl, cache: fakeCache(), online: () => false });
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(calls.length, 1);
+  assert.equal(roads.hasData(CENTER), true);
+});
+
+test('làm mới ngầm hỏng: vẫn dùng bản đang có, 10 phút sau mới thử lại ô đó (không phải 60 giây)', async (t) => {
+  const clock = fakeClock(t);
+  const cache = fakeCache([oldRecord(CENTER_KEY, clock.now - 7 * HOURS)]);
+  const down = new TypeError('Failed to fetch');
+  const { calls, impl } = fakeFetch([down, down, down, { json: sampleResponse() }]);
+  const roads = new RoadData({ fetchImpl: impl, cache, online: () => true });
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(calls.length, 3, 'thử đủ ba máy chủ theo thứ tự xoay vòng');
+  assert.equal(roads.status, 'ready');
+  assert.equal(roads.hasData(CENTER), true);
+
+  clock.now += 5 * 60e3;
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(calls.length, 3, 'chưa đủ 10 phút');
+
+  clock.now += REFRESH_RETRY - 5 * 60e3;
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(calls.length, 4);
+  assert.equal(roads.featsNear(SIGNAL, 5).length, 1);
+});
+
+test('làm mới ngầm: máy chủ trả bản không có đường nào hoặc mốc dữ liệu cũ hơn bản đang có thì không thay, thử máy chủ khác', async (t) => {
+  const clock = fakeClock(t);
+  const cache = fakeCache([{ ...oldRecord(CENTER_KEY, clock.now - 7 * HOURS), base: '2026-07-28T00:00:00Z' }]);
+  const lagging = { ...sampleResponse(), osm3s: { timestamp_osm_base: '2026-07-27T20:00:00Z' } };
+  const { calls, impl } = fakeFetch([{ json: { version: 0.6, elements: [] } }, { json: lagging }, { json: sampleResponse() }]);
+  const roads = new RoadData({ fetchImpl: impl, cache, online: () => true });
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.deepEqual(calls.map((c) => c.url), OVERPASS_ENDPOINTS, 'máy chủ 0 trả rỗng, máy chủ 1 chậm giờ, máy chủ 2 dùng được');
+  assert.equal(roads.endpoint, 2);
+  assert.equal(cache.puts.length, 1);
+  assert.equal(roads.dataTimestamp(), '2026-07-28T02:16:18Z');
+  assert.equal(roads.featsNear(SIGNAL, 5).length, 1);
+
+  // Mọi máy chủ đều chỉ có bản cũ hơn: giữ nguyên bản đang có, 10 phút sau mới hỏi lại.
+  clock.now += REFRESH_AGE;
+  const older = { ...sampleResponse(), osm3s: { timestamp_osm_base: '2026-07-01T00:00:00Z' } };
+  const { calls: c2, impl: i2 } = fakeFetch([{ json: older }, { json: older }, { json: older }]);
+  roads.fetch = i2;
+  clock.now += REFRESH_GAP;
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(c2.length, 3);
+  assert.equal(cache.puts.length, 1);
+  assert.equal(roads.featsNear(SIGNAL, 5).length, 1, 'không mất biển báo đang có');
+  assert.equal(roads.status, 'ready');
+});
+
+test('đồng hồ máy bị chỉnh lùi (bản ghi tải "ở tương lai"): vẫn được làm mới', async (t) => {
+  const clock = fakeClock(t);
+  const { calls, impl } = fakeFetch([{ json: sampleResponse() }]);
+  const roads = new RoadData({ fetchImpl: impl, cache: fakeCache([oldRecord(CENTER_KEY, clock.now + 24 * HOURS)]), online: () => true });
+  roads.ensureAround(CENTER);
+  await settle(roads);
+  assert.equal(calls.length, 1);
+});
+
+test('freshness và freshnessText: câu "Dữ liệu đường quanh đây cập nhật lúc …" cho phần cài đặt', () => {
+  const roads = new RoadData();
+  assert.equal(roads.freshness(CENTER), null);
+  const at = new Date(2026, 10, 24, 9, 5).getTime();
+  roads.setCell(CENTER_KEY, { ways: [], points: [], v: VERSION, t: at, base: '2026-11-24T02:04:00Z' });
+  assert.deepEqual(roads.freshness(CENTER), { t: at, base: '2026-11-24T02:04:00Z', loading: false });
+
+  const tail = 'Khi có mạng, dữ liệu tự làm mới sau mỗi 6 giờ.';
+  assert.equal(freshnessText(roads.freshness(CENTER), new Date(2026, 10, 24, 23, 59)), `Dữ liệu đường quanh đây cập nhật lúc 09:05 hôm nay. ${tail}`);
+  assert.equal(freshnessText({ t: at, loading: true }, new Date(2026, 10, 25, 0, 1)), `Dữ liệu đường quanh đây cập nhật lúc 09:05 hôm qua. Đang tải bản mới hơn. ${tail}`);
+  assert.equal(freshnessText({ t: at }, new Date(2026, 11, 3, 8, 0)), `Dữ liệu đường quanh đây cập nhật lúc 09:05 ngày 24/11/2026. ${tail}`);
+  assert.equal(freshnessText({ t: 0 }), `Dữ liệu đường quanh đây là bản đã lưu từ trước. ${tail}`);
+  assert.equal(freshnessText(null), 'Chưa có dữ liệu đường quanh đây. Dữ liệu sẽ được tải khi có mạng.');
 });
 
 // ---- Chỉ mục: đỉnh giao lộ, nút biển báo, quan hệ cấm rẽ ----

@@ -50,6 +50,17 @@
       <button id="btnLearnedList" class="layer-pill-main" type="button"><span data-icon="camera" data-size="18"></span><span>Biển camera ghi nhận</span></button>
       <button id="btnLearnedHide" class="icon-btn quiet" type="button" aria-label="Ẩn biển camera ghi nhận trên bản đồ"><span data-icon="close" data-size="20"></span></button>
     </div>
+    <!-- Có bản mới của ứng dụng Android (js/main.js mountUpdatePrompts điền chữ; chỉ có trong ứng dụng). Hai nút nổi
+         cập nhật chỉ hiện khi xe đứng yên, không dẫn đường, không có cảnh báo (js/appupdate.js QuietGate). -->
+    <div id="appUpdate" class="layer-pill app-update" hidden>
+      <button id="btnAppUpdate" class="layer-pill-main" type="button"><span data-icon="download" data-size="18"></span><span id="appUpdateText">Có phiên bản mới</span></button>
+      <button id="btnAppUpdateLater" class="icon-btn quiet" type="button" aria-label="Để sau"><span data-icon="close" data-size="20"></span></button>
+    </div>
+    <!-- Bản web mới đã sẵn sàng (service worker mới): chỉ tải lại khi người dùng bấm. -->
+    <div id="swUpdate" class="layer-pill app-update" hidden>
+      <button id="btnSwReload" class="layer-pill-main" type="button"><span data-icon="download" data-size="18"></span><span id="swUpdateText">Đã có bản mới, bấm để tải lại</span></button>
+      <button id="btnSwLater" class="icon-btn quiet" type="button" aria-label="Để sau"><span data-icon="close" data-size="20"></span></button>
+    </div>
   </header>
 
   <div id="side">
@@ -255,10 +266,23 @@
       <h3>Chuyến đi gần đây</h3>
       <div id="tripList" class="trip-list"></div>
 
+      <!-- Chỉ hiện trong ứng dụng Android có tự cập nhật (AppUpdate trong js/carbridge.js). -->
+      <div id="appUpdateBox" hidden>
+        <h3>Phiên bản ứng dụng</h3>
+        <p id="appUpdateLine" class="obd-status" role="status"></p>
+        <p id="appUpdateNote" class="note" hidden></p>
+        <div class="row wrap">
+          <button id="btnAppUpdateCheck" class="btn" type="button"><span data-icon="download" data-size="18"></span><span>Kiểm tra cập nhật</span></button>
+          <button id="btnAppUpdateInstall" class="btn primary" type="button" hidden><span>Cập nhật</span></button>
+        </div>
+        <p class="note">Ứng dụng tự kiểm tra bản mới khi mở và mỗi 6 giờ. Bản mới chỉ được cài khi đúng chữ ký của Bạn Đường, và Android luôn hỏi bạn trước khi cài.</p>
+      </div>
+
       <h3>Dữ liệu và lưu ý</h3>
       <p class="note">Bản đồ, tìm đường, giới hạn tốc độ, biển báo và vị trí camera lấy từ dữ liệu mở OpenStreetMap do cộng đồng đóng góp, nên có thể thiếu hoặc chưa cập nhật. Biển báo và hiệu lệnh thực tế trên đường luôn là căn cứ để tuân theo.</p>
       <p class="note">Vị trí của bạn chỉ được gửi tới các dịch vụ bản đồ để tìm đường và tải dữ liệu quanh bạn; cài đặt, địa điểm và điểm đánh dấu được lưu ngay trên thiết bị này.</p>
       <p class="note">© Những người đóng góp cho OpenStreetMap · Bản đồ nền OpenFreeMap · Tìm đường Valhalla và OSRM · Tìm địa điểm Photon và Nominatim · Dữ liệu đường Overpass API.</p>
+      <p id="roadFreshness" class="note"></p>
       <div class="row wrap"><button id="btnClearCache" class="btn" type="button"><span data-icon="trash" data-size="18"></span><span>Xoá dữ liệu đường đã lưu</span></button></div>
     </div>
   </div>

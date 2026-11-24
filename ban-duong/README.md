@@ -117,6 +117,28 @@ Không dùng được trên iPhone, iPad (Safari, Chrome và các trình duyệt
 3. Cho phép vị trí. **Giao diện màn hình ô tô** tự bật khi màn hình cảm ứng nằm ngang và rộng (từ 800 px bề ngang, cao không quá 760 px), nên cũng bật trên phần lớn điện thoại khi xoay ngang; có thể chọn **Bật/Tắt** trong **Cài đặt → Kết nối với ô tô**. Ở giao diện này, thanh chỉ dẫn, cảnh báo và bảng điều khiển nằm thành cột bên trái, bản đồ ở bên phải, nút bấm lớn hơn.
 4. Muốn đọc dữ liệu xe thì làm như phần [Kết nối bộ OBD](#kết-nối-bộ-obd). Bluetooth của màn hình xe tuỳ hãng, có máy không kết nối được bộ BLE.
 
+## Ứng dụng Android: tự cập nhật
+
+Bản cài chính thức của ứng dụng Android (`ban-duong.apk`, thẻ `ban-duong-v…` trong mục Releases của kho) tự kiểm tra bản mới khi mở và mỗi 6 giờ. Khi có bản mới, góc trên màn hình hiện nút **Có phiên bản mới**; bấm một lần là ứng dụng tự tải, kiểm tra rồi mở hộp thoại cài đặt của Android, bạn chỉ cần bấm **Cập nhật** trong hộp thoại đó. Không cần chép tệp qua USB hay Zalo nữa. Cũng có thể bấm **Cài đặt → Phiên bản ứng dụng → Kiểm tra cập nhật**.
+
+- Lần đầu, Android hỏi quyền **Cài ứng dụng không rõ nguồn gốc**: bật **Cho phép từ nguồn này** cho Bạn Đường rồi quay lại, việc cập nhật tự tiếp tục.
+- Nút cập nhật ẩn khi đang dẫn đường hay đang lái, và ứng dụng không mở hộp thoại cài khi xe đang chạy.
+- Ứng dụng chỉ cài bản có đúng chữ ký của Bạn Đường (cùng khoá với bản đang cài), đúng tên gói và mới hơn bản đang dùng.
+- Bản cài thử (`ban-duong-sideload.apk`, ký bằng khoá thử) không tự cập nhật được: nó chỉ báo có bản mới và mở trang tải bản chính thức. Cài bản chính thức một lần (có thể gỡ bản thử sau đó); từ đó về sau bản chính thức tự cập nhật.
+
+### Phát hành bản Android
+
+Tăng `versionCode` và `versionName` trong `android/version.properties`, sửa `android/release-notes.txt` (tối đa 300 ký tự, tiếng Việt), rồi đẩy lên nhánh `master`. GitHub Actions (`.github/workflows/ban-duong-android.yml`) chạy kiểm thử, build, ký bằng khoá phát hành và tạo bản phát hành `ban-duong-v<versionName>` kèm `ban-duong.apk` và `update.json`.
+
+Chuẩn bị một lần:
+
+1. Tạo khoá phát hành và giữ thật kỹ (mất khoá thì các máy đã cài không nhận được bản mới nữa).
+2. Vào **Settings → Environments** của kho, tạo Environment tên `ban-duong-release`. Ở **Deployment branches and tags** chọn chỉ nhánh `master` (nên bật thêm **Required reviewers** nếu có nhiều người cùng ghi vào kho). Thêm 4 secret vào chính Environment này (không thêm ở mức kho): `BANDUONG_KEYSTORE_B64` (tệp khoá mã hoá base64), `BANDUONG_KEYSTORE_PASSWORD`, `BANDUONG_KEY_ALIAS`, `BANDUONG_KEY_PASSWORD`.
+3. Thêm biến (không bí mật, bắt buộc) `BANDUONG_CERT_SHA256` ở **Settings → Secrets and variables → Actions → Variables**: SHA-256 của chứng chỉ ký, lấy bằng `keytool -list -v -keystore <tệp khoá> -alias <bí danh>` (dòng `SHA256:`). Ký nhầm khoá thì workflow dừng, không phát hành.
+4. Bật Actions cho kho, và nên bật bảo vệ nhánh `master` (chỉ gộp qua pull request).
+
+Workflow chỉ phát hành từ `master`; chạy trên nhánh khác (kể cả bấm chạy tay) thì chỉ kiểm thử. Ai có quyền ghi vào `master` và dùng được Environment này là người phát hành được bản cập nhật cho mọi xe. Không bao giờ đưa tệp khoá hay mật khẩu vào kho mã.
+
 ## Nghe giọng nói qua loa xe
 
 1. Ghép đôi điện thoại với xe qua Bluetooth, bật cả phần âm thanh (không chỉ gọi điện).

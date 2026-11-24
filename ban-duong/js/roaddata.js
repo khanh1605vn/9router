@@ -2,7 +2,8 @@
 // cần cảnh báo (camera, trạm thu phí, đường ngang đường sắt), các nút mang biển báo hoặc thông tin
 // tương đương (đèn tín hiệu, vạch qua đường, gờ giảm tốc, biển dừng…) và các quan hệ cấm rẽ.
 // Lớp này chỉ lọc và lưu thẻ thô; việc hiểu ý nghĩa biển báo nằm ở nơi khác.
-// Bản đồ được chia thành các ô ~3,3 km; mỗi ô tải một lần rồi lưu lại trên máy 7 ngày.
+// Bản đồ được chia thành các ô ~3,3 km; mỗi ô tải một lần rồi lưu lại trên máy. Ô đã lưu luôn được dùng ngay
+// (kể cả khi mất mạng, dù cũ tới đâu); có mạng mà ô đã quá 6 giờ thì được tải lại ngầm, xong là thay vào ngay.
 
 import { angleDiff, bearing, distance, projectOnSegment } from './geo.js';
 
@@ -14,8 +15,17 @@ export const OVERPASS_ENDPOINTS = [
 
 export const CELL = 0.03; // kích thước ô (độ)
 const GRID = 0.001; // ô lưới tra cứu đoạn đường và nút biển báo (~110 m)
+// Quá hạn này (hoặc bản ghi kiểu cũ) thì ô được tải lại như trước: hỏng thì 60 giây sau thử lại.
 const TTL = 7 * 24 * 3600e3;
 const RETRY_AFTER = 60e3;
+// Làm mới ngầm: ô đúng phiên bản nhưng tải đã quá REFRESH_AGE thì tải lại khi có mạng, trong lúc vẫn dùng bản đang có.
+// Dữ liệu OSM chỉ đổi khi có người sửa bản đồ, nên 6 giờ là đủ để thấy chỗ sửa trong ngày mà không tải thừa.
+export const REFRESH_AGE = 6 * 3600e3;
+// Làm mới ngầm hỏng (máy chủ bận, mạng chập chờn) thì chờ chừng này mới thử lại ô đó: dữ liệu đang có vẫn dùng được.
+export const REFRESH_RETRY = 10 * 60e3;
+// Hai lượt làm mới (ô đã có dữ liệu) cách nhau ít nhất chừng này, tính từ lúc lượt trước xong: không dồn truy vấn
+// liên tiếp lên Overpass khi nhiều ô cùng tới hạn (mở ứng dụng sau nhiều ngày, xe đứng ở góc bốn ô).
+export const REFRESH_GAP = 30e3;
 const REQUEST_TIMEOUT = 70e3; // máy chủ được chạy 60 giây, cộng thêm thời gian truyền dữ liệu
 const MAX_CELLS = 16;
 // Bản ghi cũ hơn vẫn dùng tạm được nhưng sẽ được tải lại. 3: đường có thêm chiều một chiều riêng của xe máy (om).
@@ -434,8 +444,32 @@ export async function clearRoadCache() {
 
 const IDB_CACHE = { get: dbGet, put: dbPut };
 
-/** Bản ghi (hoặc ô trong bộ nhớ) đúng phiên bản và chưa quá 7 ngày. */
-const isFresh = (rec) => rec.v === CACHE_VERSION && Date.now() - rec.t < TTL;
+/**
+ * Ô trong bộ nhớ cần tải lại chưa: 'stale' (bản ghi kiểu cũ hoặc quá 7 ngày: tải lại như trước), 'aging' (đúng phiên
+ * bản, quá REFRESH_AGE: làm mới ngầm) hoặc null (còn mới). Đồng hồ máy bị chỉnh lùi (t ở tương lai) thì coi như vừa tải
+ * quá hạn làm mới, để không giữ mãi một bản ghi không bao giờ "đủ cũ".
+ */
+function refreshDue(rec, now) {
+  if (rec.v !== CACHE_VERSION) return 'stale';
+  const age = now - rec.t;
+  if (age >= TTL) return 'stale';
+  if (age >= REFRESH_AGE || age < 0) return 'aging';
+  return null;
+}
+
+/**
+ * Bản tải lại có được thay vào ô đang có không. Không nhận khi: ô đang có đường mà bản mới không có đường nào (máy chủ
+ * trả thiếu, không thể cả ô mất hết đường), hoặc cùng phiên bản bộ đệm mà mốc dữ liệu OSM cũ hơn bản đang có (các máy
+ * chủ Overpass cập nhật lệch nhau, có máy chậm vài giờ: không để dữ liệu "lùi" về trước chỗ sửa đã thấy).
+ */
+function acceptRefresh(prev, data) {
+  if (prev.ways.length > 0 && data.ways.length === 0) return false;
+  if (prev.v === CACHE_VERSION && prev.base && data.base && data.base < prev.base) return false;
+  return true;
+}
+
+/** Mặc định: navigator.onLine (false chắc chắn là mất mạng; true chưa chắc có mạng, nên chỉ dùng để bỏ qua). */
+const defaultOnline = () => typeof navigator === 'undefined' || navigator.onLine !== false;
 
 /** Thứ tự ô khi tra cứu: ô đúng phiên bản bộ đệm trước, rồi tới ô tải gần đây hơn (cùng mức thì giữ thứ tự cũ). */
 const fresher = (a, b) => (a.v === CACHE_VERSION ? 0 : 1) - (b.v === CACHE_VERSION ? 0 : 1) || b.t - a.t;
@@ -447,15 +481,19 @@ export class RoadData {
   /**
    * @param fetchImpl  thay cho fetch (kiểm thử)
    * @param cache      { get(key) → Promise<bản ghi|null>, put(bản ghi) } thay cho IndexedDB (kiểm thử)
+   * @param online     () → false khi chắc chắn mất mạng (mặc định navigator.onLine): khi đó không làm mới ô đã có
    */
-  constructor({ fetchImpl, cache } = {}) {
+  constructor({ fetchImpl, cache, online } = {}) {
     this.fetch = fetchImpl || ((...a) => fetch(...a));
     this.cache = cache || IDB_CACHE;
+    this.online = online || defaultOnline;
     this.cells = new Map(); // key → { ways, points, feats, restr, base, v, t, grid, vertices, featGrid, restrFrom, used }
     this.reading = new Map(); // ô đang đọc từ bộ đệm trên máy
     this.cacheChecked = new Set(); // ô đã đọc bộ đệm xong (kể cả khi không có bản ghi)
     this.pending = new Map(); // ô đang tải từ Overpass (tối đa hai)
     this.failedAt = new Map();
+    this.refreshing = null; // khoá ô đang được làm mới (ô đã có dữ liệu), nhiều nhất một ô
+    this.refreshDone = -Infinity; // lúc lượt làm mới gần nhất xong (Date.now), cho REFRESH_GAP
     this.listeners = new Set();
     this.endpoint = 0;
     this.status = 'idle'; // 'idle' | 'loading' | 'ready' | 'error'
@@ -551,6 +589,8 @@ export class RoadData {
         const failure = overpassFailure(json);
         if (failure) throw new Error(failure); // dữ liệu thiếu: không dùng, không lưu
         const data = parseOverpass(json);
+        const prev = this.cells.get(key);
+        if (prev && !acceptRefresh(prev, data)) throw new Error('older or empty'); // thử máy chủ khác, giữ bản đang có
         this.endpoint = index;
         const record = {
           key,
@@ -582,10 +622,13 @@ export class RoadData {
   #want(cx, cy) {
     const key = cellKey(cx, cy);
     const cell = this.cells.get(key);
+    const now = Date.now();
+    let due = null;
     if (cell) {
-      cell.used = Date.now();
-      if (isFresh(cell)) return;
-      // Dữ liệu cũ (bản ghi kiểu cũ hoặc quá 7 ngày) vẫn được dùng trong lúc chờ tải lại.
+      cell.used = now;
+      due = refreshDue(cell, now);
+      if (!due) return;
+      // Dữ liệu đang có (dù cũ bao lâu) vẫn được dùng trong lúc chờ tải lại; tải xong thì thay vào ngay (setCell).
     } else if (!this.cacheChecked.has(key)) {
       // Đọc bộ đệm trên máy trước: chỉ mất vài mili giây nên không tính vào giới hạn truy vấn Overpass.
       if (!this.reading.has(key) && !this.pending.has(key)) {
@@ -595,13 +638,33 @@ export class RoadData {
       }
       return;
     }
-    if (this.pending.has(key)) return;
-    if (Date.now() - (this.failedAt.get(key) || 0) < RETRY_AFTER) return;
+    if (this.pending.has(key)) return; // ô này đang tải: không gửi thêm truy vấn
+    const failed = this.failedAt.get(key);
+    if (failed != null && now >= failed && now - failed < (due === 'aging' ? REFRESH_RETRY : RETRY_AFTER)) return;
     // Overpass giới hạn số truy vấn đồng thời: tối đa hai. Ô đã có dữ liệu (dù cũ) chỉ được tải lại khi
     // không còn lượt tải nào khác, để ô chưa có dữ liệu luôn còn chỗ.
     if (this.pending.size >= (cell ? 1 : 2)) return;
+    if (cell) {
+      // Làm mới ô đã có dữ liệu: chỉ khi có mạng (mất mạng thì cứ dùng bản đang có, không thử vô ích), và nghỉ
+      // REFRESH_GAP sau lượt làm mới trước. Chỉ các ô ensureAround xin (quanh xe, ô sắp đi tới) mới được làm mới.
+      let online = true;
+      try {
+        online = this.online() !== false;
+      } catch {
+        online = true;
+      }
+      if (!online) return;
+      if (now - this.refreshDone < REFRESH_GAP && now >= this.refreshDone) return;
+      this.refreshing = key;
+    }
     if (this.status !== 'ready') this.status = 'loading';
-    const job = this.#fetchCell(cx, cy).finally(() => this.pending.delete(key));
+    const job = this.#fetchCell(cx, cy).finally(() => {
+      this.pending.delete(key);
+      if (this.refreshing === key) {
+        this.refreshing = null;
+        this.refreshDone = Date.now();
+      }
+    });
     this.pending.set(key, job);
   }
 
@@ -785,6 +848,17 @@ export class RoadData {
     return out;
   }
 
+  /**
+   * Độ mới của dữ liệu ô chứa vị trí này, hoặc null khi chưa có: { t: lúc tải về máy (ms, 0 nếu không rõ), base: mốc
+   * dữ liệu OSM của Overpass (chuỗi ISO) hoặc null, loading: đang tải bản mới cho ô này }.
+   */
+  freshness(coord) {
+    const key = cellKey(...cellOf(coord));
+    const cell = this.cells.get(key);
+    if (!cell) return null;
+    return { t: cell.t || 0, base: cell.base, loading: this.pending.has(key) };
+  }
+
   /** Thời điểm dữ liệu OSM mới nhất trong các ô đang có (chuỗi ISO của Overpass) hoặc null. */
   dataTimestamp() {
     let newest = null;
@@ -867,4 +941,31 @@ export class RoadData {
     const { score, ...match } = best;
     return match;
   }
+}
+
+const two = (n) => String(n).padStart(2, '0');
+
+/**
+ * Câu cho phần cài đặt từ RoadData.freshness(): "Dữ liệu đường quanh đây cập nhật lúc 14:05 hôm nay." (giờ của máy).
+ * now: Date (kiểm thử).
+ */
+export function freshnessText(info, now = new Date()) {
+  if (!info) return 'Chưa có dữ liệu đường quanh đây. Dữ liệu sẽ được tải khi có mạng.';
+  const parts = [];
+  const t = Number.isFinite(info.t) && info.t > 0 ? new Date(info.t) : null;
+  if (!t) parts.push('Dữ liệu đường quanh đây là bản đã lưu từ trước.');
+  else {
+    const dayStart = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+    const days = Math.round((dayStart(now) - dayStart(t)) / 864e5);
+    const when =
+      days === 0
+        ? 'hôm nay'
+        : days === 1
+          ? 'hôm qua'
+          : `ngày ${t.getDate()}/${t.getMonth() + 1}/${t.getFullYear()}`;
+    parts.push(`Dữ liệu đường quanh đây cập nhật lúc ${two(t.getHours())}:${two(t.getMinutes())} ${when}.`);
+  }
+  if (info.loading) parts.push('Đang tải bản mới hơn.');
+  parts.push(`Khi có mạng, dữ liệu tự làm mới sau mỗi ${Math.round(REFRESH_AGE / 3600e3)} giờ.`);
+  return parts.join(' ');
 }

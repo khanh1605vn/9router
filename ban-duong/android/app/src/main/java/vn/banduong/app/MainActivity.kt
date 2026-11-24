@@ -11,6 +11,7 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.provider.Settings
 import android.util.Log
 import android.view.MotionEvent
 import android.view.ViewGroup
@@ -32,6 +33,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.car.app.connection.CarConnection
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.Observer
@@ -42,11 +44,15 @@ import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewClientCompat
 import androidx.webkit.WebViewFeature
+import org.json.JSONObject
 import vn.banduong.app.bridge.CarStateStore
 import vn.banduong.app.bridge.NativeBridge
 import vn.banduong.app.obd.AndroidObdLinks
 import vn.banduong.app.obd.ObdController
 import vn.banduong.app.obd.ObdDevicePicker
+import vn.banduong.app.update.UpdateManager
+import vn.banduong.app.update.UpdateService
+import vn.banduong.app.update.UpdateUi
 import vn.banduong.app.web.AppOrigin
 import vn.banduong.app.web.WebAssets
 
@@ -58,15 +64,18 @@ import vn.banduong.app.web.WebAssets
  *  - điều hướng sang nguồn gốc khác mở bằng trình duyệt ngoài (chỉ http/https, chỉ khi người dùng bấm);
  *  - quyền camera và vị trí chỉ cấp cho nguồn gốc của ứng dụng, mỗi lần đều kiểm tra quyền Android;
  *  - cầu nối JS chỉ có trong khung của ứng dụng (addWebMessageListener), xem [NativeBridge];
- *  - bộ OBD Bluetooth: chỉ thiết bị người dùng tự chọn trong hộp chọn của máy, chỉ lệnh đọc được phép ([ObdController]).
+ *  - bộ OBD Bluetooth: chỉ thiết bị người dùng tự chọn trong hộp chọn của máy, chỉ lệnh đọc được phép ([ObdController]);
+ *  - tự cập nhật (bản release): máy tự tìm, tải và xác minh bản mới trên GitHub ([UpdateManager]); người dùng luôn tự
+ *    xác nhận trong hộp thoại cài đặt của hệ thống.
  */
-class MainActivity : ComponentActivity(), NativeBridge.Host {
+class MainActivity : ComponentActivity(), NativeBridge.Host, UpdateUi {
 
     private lateinit var webView: WebView
     private lateinit var assetLoader: WebViewAssetLoader
     private lateinit var bridge: NativeBridge
     private lateinit var obd: ObdController
     private lateinit var obdPicker: ObdDevicePicker
+    private var updater: UpdateManager? = null
 
     // Lần chạm cuối (uptime): hộp chọn bộ OBD chỉ mở ngay sau một lần chạm, như Web Bluetooth.
     private var lastTouchUp = 0L
@@ -129,7 +138,8 @@ class MainActivity : ComponentActivity(), NativeBridge.Host {
             lastTouchUptime = { lastTouchUp },
         )
         obd = ObdController(obdPicker, AndroidObdLinks(applicationContext, Handler(Looper.getMainLooper())))
-        bridge = NativeBridge(this, obd)
+        updater = UpdateService.get(this)?.also { it.ui = this }
+        bridge = NativeBridge(this, obd, updater)
 
         val swOk = setUpServiceWorker()
         webView = WebView(this)
@@ -167,6 +177,7 @@ class MainActivity : ComponentActivity(), NativeBridge.Host {
         updateCarConnected()
 
         if (savedInstanceState == null || !restoreWeb(savedInstanceState)) webView.loadUrl(AppOrigin.START_URL)
+        updater?.start()
     }
 
     private fun restoreWeb(state: Bundle): Boolean {
@@ -241,6 +252,7 @@ class MainActivity : ComponentActivity(), NativeBridge.Host {
         resources.openRawResource(R.raw.bridge_shim).bufferedReader(Charsets.UTF_8).use { it.readText() }
             .replace("__SW_OK__", if (swOk) "true" else "false")
             .replace("__OBD_CAPS__", obdCaps())
+            .replace("__UPDATE_CAPS__", updateCaps())
 
     /** Khả năng Bluetooth của máy cho bộ OBD, dạng JSON cho lớp nối (js/obdnative.js đọc qua window.BanDuongApp). */
     private fun obdCaps(): String {
@@ -248,6 +260,12 @@ class MainActivity : ComponentActivity(), NativeBridge.Host {
         val ble = pm.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH_LE)
         val spp = pm.hasSystemFeature(PackageManager.FEATURE_BLUETOOTH)
         return if (ble || spp) "{\"ble\":$ble,\"spp\":$spp}" else "null"
+    }
+
+    /** Chế độ tự cập nhật cho lớp nối (window.BanDuongApp.update): { mode, current } hoặc null (bản debug). */
+    private fun updateCaps(): String {
+        val u = updater ?: return "null"
+        return JSONObject().put("mode", u.mode.key).put("current", BuildConfig.VERSION_NAME).toString()
     }
 
     private fun requestBluetooth(perms: List<String>, done: (Boolean) -> Unit) {
@@ -390,6 +408,7 @@ class MainActivity : ComponentActivity(), NativeBridge.Host {
         super.onResume()
         resumed = true
         webView.onResume()
+        updater?.onResume()
     }
 
     override fun onPause() {
@@ -414,6 +433,14 @@ class MainActivity : ComponentActivity(), NativeBridge.Host {
             webView.destroy()
         }
         if (isFinishing) CarStateStore.clear(android.os.SystemClock.uptimeMillis())
+        updater?.let { u ->
+            // Activity mới (dựng lại) đã gắn mình vào thì không gỡ của nó.
+            if (u.ui === this) {
+                u.ui = null
+                u.sink = null
+            }
+            if (isFinishing && !isChangingConfigurations) u.stop()
+        }
         super.onDestroy()
     }
 
@@ -427,6 +454,36 @@ class MainActivity : ComponentActivity(), NativeBridge.Host {
     override fun isCarConnected(): Boolean = carConnected
 
     override fun appVersion(): String = BuildConfig.VERSION_NAME
+
+    // ---- UpdateUi ----
+
+    override fun openInstallSettings(): Boolean {
+        toast(R.string.update_allow_install)
+        val intent = Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, "package:$packageName".toUri())
+        return try {
+            startActivity(intent)
+            true
+        } catch (_: ActivityNotFoundException) {
+            // Một số màn hình xe bỏ trang này: mở trang cài đặt chung của ứng dụng.
+            try {
+                startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, "package:$packageName".toUri()))
+                true
+            } catch (_: ActivityNotFoundException) {
+                false
+            }
+        }
+    }
+
+    override fun startConfirm(intent: Intent): Boolean = try {
+        startActivity(intent)
+        true
+    } catch (_: ActivityNotFoundException) {
+        false
+    } catch (_: SecurityException) {
+        false
+    }
+
+    override fun openExternal(url: String) = openExternal(url.toUri())
 
     // ---- tiện ích ----
 

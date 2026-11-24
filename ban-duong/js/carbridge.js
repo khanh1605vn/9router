@@ -744,3 +744,253 @@ export function createCarBridge(options = {}) {
   const ch = nativeChannel(options.target ?? globalThis);
   return ch ? new CarBridge(ch, options) : null;
 }
+
+// ---------- Tự cập nhật ứng dụng (không cần chép tệp qua USB hay Zalo) ----------
+// Chỉ có khi lớp nối gắn window.BanDuongApp.update (bản release/sideload của ứng dụng); trên trình duyệt thường trang tự
+// cập nhật qua service worker và phần này không chạy.
+//   trang → máy: update { action: 'check' | 'install' | 'dismiss' | 'status' }  (không bao giờ có URL: máy tự quyết tải gì)
+//   máy → trang: updateStatus { state, versionName, notes, progress, error, mode, current }
+// Máy tự tìm bản phát hành trên GitHub, tải, kiểm tra SHA-256, tên gói và chữ ký trùng bản đang cài, rồi mở hộp thoại cài
+// đặt của Android; người dùng luôn tự xác nhận trong hộp thoại đó (android/…/update/UpdateManager.kt).
+
+export const UPDATE_STATES = Object.freeze(['idle', 'checking', 'available', 'downloading', 'verifying', 'ready', 'error', 'uptodate']);
+const UPD_STATES = new Set(UPDATE_STATES);
+const UPD_MODES = new Set(['install', 'notify']);
+const UPD_VERSION_RE = /^[0-9]{1,4}(\.[0-9]{1,4}){0,3}$/;
+const UPD_CURRENT_RE = /^[A-Za-z0-9._-]{1,40}$/;
+const UPD_ERROR_RE = /^[a-z][a-z-]{0,31}$/;
+
+export const APP_UPDATE_LIMITS = Object.freeze({
+  maxNotes: 300,
+  installGapMs: 10_500, // máy nhận tối đa 1 lần "install" mỗi 10 giây
+});
+
+/** Ứng dụng có tự cập nhật không: { mode: 'install'|'notify', current } hoặc null. Mọi lỗi khi đọc đều coi như không. */
+export function nativeUpdateSupport(env = globalThis) {
+  try {
+    const ch = env?.BanDuongNative;
+    if (!ch || typeof ch.postMessage !== 'function') return null;
+    const u = env?.BanDuongApp?.update;
+    if (!u || typeof u !== 'object' || !UPD_MODES.has(u.mode)) return null;
+    const current = typeof u.current === 'string' && UPD_CURRENT_RE.test(u.current) ? u.current : null;
+    return { mode: u.mode, current };
+  } catch {
+    return null;
+  }
+}
+
+/** Bỏ ký tự điều khiển, ký tự đổi hướng chữ và độ rộng 0; gộp khoảng trắng; cắt còn max ký tự. */
+function cleanNotes(raw, max = APP_UPDATE_LIMITS.maxNotes) {
+  if (typeof raw !== 'string' || raw.length > max * 8) return null;
+  // eslint-disable-next-line no-control-regex
+  const s = raw.replace(/[\u0000-\u001f\u007f-\u009f​-‏‪-‮⁦-⁩﻿]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  if (s.length <= max) return s;
+  let end = max;
+  const c = s.charCodeAt(end - 1);
+  if (c >= 0xd800 && c <= 0xdbff) end--;
+  return s.slice(0, end).trimEnd();
+}
+
+/** Thông điệp updateStatus từ máy → trạng thái đã kiểm tra, hoặc null nếu sai dạng. */
+export function parseUpdateStatus(msg) {
+  if (!msg || typeof msg !== 'object' || msg.v !== BRIDGE_V || msg.type !== 'updateStatus') return null;
+  if (!UPD_STATES.has(msg.state)) return null;
+  const progress = typeof msg.progress === 'number' && Number.isFinite(msg.progress) ? Math.min(1, Math.max(0, msg.progress)) : null;
+  return {
+    state: msg.state,
+    versionName: typeof msg.versionName === 'string' && UPD_VERSION_RE.test(msg.versionName) ? msg.versionName : null,
+    notes: cleanNotes(msg.notes),
+    progress,
+    error: typeof msg.error === 'string' && UPD_ERROR_RE.test(msg.error) ? msg.error : null,
+    mode: UPD_MODES.has(msg.mode) ? msg.mode : null,
+    current: typeof msg.current === 'string' && UPD_CURRENT_RE.test(msg.current) ? msg.current : null,
+  };
+}
+
+const UPD_ERROR_TEXT = {
+  network: 'Không kết nối được máy chủ cập nhật. Hãy kiểm tra mạng rồi thử lại.',
+  'rate-limited': 'Máy chủ cập nhật đang bận. Ứng dụng sẽ tự thử lại sau.',
+  'too-large': 'Bản cập nhật không hợp lệ nên đã bị bỏ. Hãy thử lại sau.',
+  'bad-release': 'Bản cập nhật không hợp lệ nên đã bị bỏ. Hãy thử lại sau.',
+  'bad-apk': 'Bản cập nhật không hợp lệ nên đã bị bỏ. Hãy thử lại sau.',
+  'version-mismatch': 'Bản cập nhật không hợp lệ nên đã bị bỏ. Hãy thử lại sau.',
+  checksum: 'Tệp tải về bị lỗi hoặc không đầy đủ nên đã bị xoá. Hãy thử lại.',
+  'package-mismatch': 'Tệp tải về không phải bản chính thức của Bạn Đường nên không được cài.',
+  'signature-mismatch': 'Tệp tải về không có chữ ký đúng của Bạn Đường nên không được cài.',
+  incompatible: 'Bản mới cần phiên bản Android mới hơn máy này.',
+  'install-permission': 'Hãy bật “Cho phép từ nguồn này” cho Bạn Đường, rồi quay lại ứng dụng. Việc cập nhật sẽ tự tiếp tục.',
+  'install-failed': 'Chưa cài được bản mới. Hãy thử lại.',
+  'install-aborted': 'Đã huỷ cài đặt. Bấm “Cập nhật” để cài lại.',
+  storage: 'Máy không đủ chỗ trống để tải bản mới.',
+  // Máy chỉ cài khi thấy xe đứng yên (tốc độ GPS hoặc OBD dưới 8 km/h); chưa bắt được định vị cũng bị từ chối.
+  driving: 'Hãy dừng xe an toàn, chờ định vị bắt được rồi bấm “Cập nhật”.',
+};
+
+const updPct = (p) => `${Math.round((p ?? 0) * 100)}%`;
+
+/**
+ * Chữ và nút cho trạng thái: { line, note, action, actionLabel, pill, pillText, canDismiss, busy }.
+ * action: 'install' (cập nhật / tải bản chính thức) hoặc null. pill: có hiện nút nổi "Có phiên bản mới" không.
+ */
+export function describeUpdate(status, support) {
+  const mode = status?.mode || support?.mode || 'install';
+  const current = status?.current || support?.current || null;
+  const v = status?.versionName;
+  const notify = mode === 'notify';
+  const installLabel = notify ? 'Tải bản chính thức' : 'Cập nhật';
+  const out = { line: '', note: status?.notes || null, action: null, actionLabel: installLabel, pill: false, pillText: '', canDismiss: false, busy: false };
+  const here = current ? `Phiên bản đang dùng: ${current}.` : '';
+  switch (status?.state) {
+    case 'checking':
+      out.line = 'Đang kiểm tra bản mới…';
+      out.busy = true;
+      out.note = null;
+      break;
+    case 'uptodate':
+      out.line = current ? `Bạn đang dùng bản mới nhất (${current}).` : 'Bạn đang dùng bản mới nhất.';
+      out.note = null;
+      break;
+    case 'available':
+      out.line = notify
+        ? `Có phiên bản mới ${v}. Bản đang dùng là bản cài thử nên không tự cập nhật được: hãy tải và cài bản chính thức một lần.`
+        : `Có phiên bản mới ${v}.`;
+      out.action = 'install';
+      out.pill = true;
+      out.pillText = `Có phiên bản mới ${v}`;
+      out.canDismiss = true;
+      break;
+    case 'downloading':
+      out.line = `Đang tải bản ${v}… ${updPct(status.progress)}`;
+      out.busy = true;
+      out.pill = true;
+      out.pillText = `Đang tải bản mới ${updPct(status.progress)}`;
+      out.canDismiss = true;
+      break;
+    case 'verifying':
+      out.line = 'Đang kiểm tra tệp tải về…';
+      out.busy = true;
+      out.pill = true;
+      out.pillText = 'Đang kiểm tra bản mới…';
+      break;
+    case 'ready':
+      if (status.error === 'install-aborted') {
+        out.line = UPD_ERROR_TEXT['install-aborted'];
+        out.action = 'install';
+        out.pill = true;
+        out.pillText = `Cài bản mới ${v}`;
+        out.canDismiss = true;
+      } else {
+        out.line = 'Hãy xác nhận trong hộp thoại cài đặt của Android.';
+        out.pill = true;
+        out.pillText = 'Đang chờ xác nhận cài đặt';
+        out.busy = true;
+      }
+      break;
+    case 'error': {
+      out.line = UPD_ERROR_TEXT[status.error] || 'Chưa cập nhật được. Hãy thử lại sau.';
+      // Lỗi khi đang cài một bản đã biết: vẫn cho bấm lại; lỗi khi kiểm tra: chỉ hiện trong phần cài đặt.
+      if (v) {
+        out.action = 'install';
+        out.actionLabel = notify ? installLabel : 'Thử lại';
+        out.pill = true;
+        out.pillText = `Cập nhật bản ${v}`;
+        out.canDismiss = true;
+      }
+      break;
+    }
+    default:
+      out.line = here || 'Bấm “Kiểm tra cập nhật” để tìm bản mới.';
+      out.note = null;
+  }
+  return out;
+}
+
+/**
+ * Nói chuyện với bộ cập nhật của máy. start() nghe NATIVE_EVENT và xin máy gửi lại trạng thái; check/install/dismiss gửi
+ * đúng một ý định. install bị giãn ít nhất APP_UPDATE_LIMITS.installGapMs giữa hai lần (máy cũng tự giới hạn).
+ */
+export class AppUpdate {
+  #ch;
+  #target;
+  #now;
+  #listener = null;
+  #status = null;
+  #lastInstall = -Infinity;
+  #fns = new Set();
+
+  constructor(channel, { target = globalThis, now = () => Date.now(), support = null } = {}) {
+    this.#ch = channel;
+    this.#target = target;
+    this.#now = now;
+    this.support = support;
+  }
+
+  get status() {
+    return this.#status;
+  }
+
+  /** fn(status) mỗi khi máy báo trạng thái mới → hàm huỷ. */
+  onChange(fn) {
+    this.#fns.add(fn);
+    return () => this.#fns.delete(fn);
+  }
+
+  start() {
+    if (this.#listener) return;
+    this.#listener = (e) => this.handleNative(e?.detail);
+    this.#target.addEventListener?.(NATIVE_EVENT, this.#listener);
+    this.#send('status');
+  }
+
+  stop() {
+    if (this.#listener) this.#target.removeEventListener?.(NATIVE_EVENT, this.#listener);
+    this.#listener = null;
+  }
+
+  handleNative(msg) {
+    const s = parseUpdateStatus(msg);
+    if (!s) return;
+    this.#status = s;
+    for (const fn of this.#fns) {
+      try {
+        fn(s);
+      } catch {
+        /* giao diện lỗi không làm hỏng cầu nối */
+      }
+    }
+  }
+
+  check() {
+    return this.#send('check');
+  }
+
+  /** Trả false nếu vừa bấm (chưa đủ installGapMs). */
+  install() {
+    const now = this.#now();
+    if (now - this.#lastInstall < APP_UPDATE_LIMITS.installGapMs) return false;
+    this.#lastInstall = now;
+    return this.#send('install');
+  }
+
+  dismiss() {
+    return this.#send('dismiss');
+  }
+
+  #send(action) {
+    try {
+      this.#ch.postMessage(JSON.stringify({ v: BRIDGE_V, type: 'update', action }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/** AppUpdate khi chạy trong ứng dụng Android có tự cập nhật; trình duyệt thường hoặc bản debug → null. */
+export function createAppUpdate(options = {}) {
+  const env = options.env ?? globalThis;
+  const support = nativeUpdateSupport(env);
+  if (!support) return null;
+  return new AppUpdate(env.BanDuongNative, { target: env, ...options, support });
+}

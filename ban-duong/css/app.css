@@ -642,6 +642,11 @@ html.car-ui .cam-pick select { height: 56px; }
 /* Lớp biển camera ghi nhận đang hiện trên bản đồ */
 .layer-pill { align-self: flex-start; display: flex; align-items: center; border-radius: 24px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm); }
 .layer-pill-main { min-height: 44px; padding: 0 4px 0 14px; display: inline-flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; }
+/* Nút "Có phiên bản mới" của ứng dụng Android */
+.app-update .layer-pill-main > span:first-child { color: var(--sign-green); }
+.app-update .layer-pill-main:disabled { opacity: 1; cursor: default; }
+.app-update { max-width: 100%; }
+.app-update .layer-pill-main { min-height: 48px; padding-right: 8px; text-align: left; }
 
 /* Màn hình hẹp (360 px): thu gọn hàng nút ở bảng dưới để không tràn mép. */
 @media (max-width: 380px) {
@@ -723,6 +728,7 @@ html.car-ui .chips,
 html.car-ui .row.actions { flex-wrap: wrap; }
 html.car-ui .btn.small { min-height: 56px; min-width: 56px; border-radius: 28px; padding: 0 16px; }
 html.car-ui .layer-pill-main { min-height: 56px; }
+html.car-ui .app-update .layer-pill-main { min-height: 60px; font-size: 16px; padding-left: 18px; }
 html.car-ui .lrow-actions { gap: 8px; }
 html.car-ui .cam-badge { width: 22px; height: 22px; }
 /* Biển giới hạn lớn hơn trên màn hình ô tô để dòng "Camera" (nguồn của giới hạn) đọc được khi liếc: đĩa trắng 62 px

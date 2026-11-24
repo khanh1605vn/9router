@@ -1,10 +1,19 @@
 // Service worker: giúp ứng dụng mở được khi mất mạng và giữ lại các ô bản đồ đã xem.
-// Đổi VERSION mỗi lần phát hành để máy người dùng nhận bản mới.
+// Đổi VERSION mỗi lần phát hành để máy người dùng nhận bản mới, và đổi luôn SHELL_VERSION trong js/appupdate.js cho
+// giống (tests/appupdate.test.mjs kiểm tra hai chỗ khớp nhau).
 
-const VERSION = 'v9';
+const VERSION = 'v10';
 const SHELL = `banduong-shell-${VERSION}`;
 const TILES = 'banduong-tiles-v1';
 const TILE_LIMIT = 800;
+// Ô bản đồ raster tile.openstreetmap.org: địa chỉ không gắn phiên bản, ảnh đổi khi bản đồ được sửa. Bản đã lưu dùng
+// ngay, nhưng quá TILE_MAX_AGE thì được tải lại ngầm (lần sau mới thấy ảnh mới). Thời điểm lưu ghi trong một tiêu đề
+// riêng (STAMP), vì tiêu đề Date của câu trả lời khác nguồn không đọc được. Bản lưu từ trước khi có STAMP coi như đã cũ.
+const TILE_MAX_AGE = 7 * 24 * 3600e3;
+const STAMP = 'x-banduong-stored';
+// Số lượt tải lại ngầm cùng lúc tối đa (cuộn bản đồ qua nhiều ô cũ không dồn hàng trăm yêu cầu lên máy chủ ô bản đồ).
+const REVALIDATE_MAX = 4;
+const revalidating = new Set(); // địa chỉ đang được tải lại ngầm
 
 // Tệp mô hình nhận diện biển và LiteRT (khoảng 12 MB mỗi bản dựng): chỉ tải khi người dùng bật camera, nên KHÔNG nằm
 // trong SHELL_FILES. Bộ nhớ đệm riêng, không bị xoá khi đổi VERSION (activate chỉ xoá banduong-shell-*).
@@ -54,6 +63,7 @@ const SHELL_FILES = [
   'js/signlearn.js',
   'js/learnedsigns.js',
   'js/carbridge.js',
+  'js/appupdate.js',
   'vendor/maplibre-gl/maplibre-gl.js',
   'vendor/maplibre-gl/maplibre-gl.css',
   'icons/icon.svg',
@@ -81,6 +91,18 @@ self.addEventListener('activate', (event) => {
   );
 });
 
+// Trang hỏi "bạn là bản nào?" (js/appupdate.js, SwUpdateWatcher) qua MessageChannel: khi service worker mới nắm trang,
+// trang chỉ mời tải lại nếu mã nó đang chạy khác bản này. Chỉ trả đúng chuỗi VERSION, không đọc gì khác từ thông điệp.
+self.addEventListener('message', (event) => {
+  const port = event.ports && event.ports[0];
+  if (!port || !event.data || event.data.type !== 'banduong:version') return;
+  try {
+    port.postMessage({ type: 'banduong:version', version: VERSION });
+  } catch {
+    /* trang đã đóng cổng */
+  }
+});
+
 /** Ưu tiên mạng để luôn có bản mới; mất mạng thì dùng bản đã lưu. */
 async function networkFirst(request, cacheName, ignoreSearch = false) {
   const cache = await caches.open(cacheName);
@@ -95,18 +117,71 @@ async function networkFirst(request, cacheName, ignoreSearch = false) {
   }
 }
 
-/** Ưu tiên bản đã lưu (ô bản đồ, phông chữ: nội dung không đổi theo địa chỉ). */
-async function cacheFirst(request, cacheName) {
+/** Giới hạn dung lượng: bỏ bớt các mục cũ nhất. */
+async function trim(cache) {
+  const keys = await cache.keys();
+  if (keys.length > TILE_LIMIT) await Promise.all(keys.slice(0, 80).map((k) => cache.delete(k)));
+}
+
+/** Lưu bản sao kèm thời điểm lưu (STAMP). Phải đọc hết thân để dựng lại câu trả lời với tiêu đề mới. */
+async function putStamped(cache, request, copy) {
+  const buf = await copy.arrayBuffer();
+  const headers = new Headers(copy.headers);
+  headers.set(STAMP, String(Date.now()));
+  await cache.put(request, new Response(buf, { status: copy.status, statusText: copy.statusText, headers }));
+}
+
+/** Bản đã lưu quá maxAge chưa (không có hay không đọc được STAMP: coi như đã quá; đồng hồ bị chỉnh lùi cũng vậy). */
+function expired(hit, maxAge) {
+  const at = Number(hit.headers.get(STAMP));
+  if (!Number.isFinite(at) || at <= 0) return true;
+  const age = Date.now() - at;
+  return age < 0 || age >= maxAge;
+}
+
+/** event.waitUntil không bao giờ làm hỏng câu trả lời (sự kiện đã hết hạn thì bỏ qua việc chạy nền). */
+function keepAlive(event, p) {
+  try {
+    event.waitUntil(p);
+  } catch {
+    /* bỏ qua */
+  }
+}
+
+/** Tải lại ngầm một mục đã cũ; lỗi hay câu trả lời không ok thì giữ nguyên bản đang có. */
+async function revalidate(cache, request) {
+  const url = request.url;
+  if (revalidating.has(url) || revalidating.size >= REVALIDATE_MAX) return;
+  revalidating.add(url);
+  try {
+    const response = await fetch(request);
+    if (response.ok) {
+      await putStamped(cache, request, response);
+      await trim(cache);
+    }
+  } catch {
+    /* mất mạng hay máy chủ lỗi: dùng tiếp bản đã lưu, lần sau thử lại */
+  } finally {
+    revalidating.delete(url);
+  }
+}
+
+/**
+ * Ưu tiên bản đã lưu (ô bản đồ, phông chữ). Không có maxAge: nội dung không đổi theo địa chỉ, giữ mãi. Có maxAge: bản
+ * đã lưu quá hạn vẫn trả ngay (không bắt người dùng chờ, mất mạng vẫn có bản đồ) và được tải lại ngầm.
+ */
+async function cacheFirst(event, request, cacheName, maxAge = null) {
   const cache = await caches.open(cacheName);
   const hit = await cache.match(request);
-  if (hit) return hit;
+  if (hit) {
+    if (maxAge != null && expired(hit, maxAge)) keepAlive(event, revalidate(cache, request));
+    return hit;
+  }
   const response = await fetch(request);
   if (response.ok) {
-    cache.put(request, response.clone()).then(async () => {
-      const keys = await cache.keys();
-      // Giới hạn dung lượng: bỏ bớt các mục cũ nhất.
-      if (keys.length > TILE_LIMIT) await Promise.all(keys.slice(0, 80).map((k) => cache.delete(k)));
-    });
+    const copy = response.clone();
+    const store = maxAge != null ? putStamped(cache, request, copy) : cache.put(request, copy);
+    keepAlive(event, store.then(() => trim(cache)).catch(() => {}));
   }
   return response;
 }
@@ -193,11 +268,16 @@ self.addEventListener('fetch', (event) => {
     // Ô bản đồ, phông chữ, biểu tượng có địa chỉ gắn phiên bản → lưu lâu dài.
     // Tệp kiểu bản đồ và danh mục ô thay đổi hằng tuần → luôn hỏi mạng trước.
     const immutable = /\.(pbf|png|jpg|webp)$/.test(url.pathname) || url.pathname.startsWith('/sprites/');
-    event.respondWith(immutable ? cacheFirst(request, TILES) : networkFirst(request, TILES));
+    event.respondWith(immutable ? cacheFirst(event, request, TILES) : networkFirst(request, TILES));
     return;
   }
-  if (url.hostname === 'tile.openstreetmap.org' || url.hostname === 'fonts.gstatic.com') {
-    event.respondWith(cacheFirst(request, TILES));
+  if (url.hostname === 'tile.openstreetmap.org') {
+    event.respondWith(cacheFirst(event, request, TILES, TILE_MAX_AGE));
+    return;
+  }
+  if (url.hostname === 'fonts.gstatic.com') {
+    // Phông chữ: địa chỉ gắn phiên bản, không bao giờ đổi.
+    event.respondWith(cacheFirst(event, request, TILES));
     return;
   }
   if (url.hostname === 'fonts.googleapis.com') {

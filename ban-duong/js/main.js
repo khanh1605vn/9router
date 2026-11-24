@@ -6,7 +6,7 @@ import { LocationService } from './location.js';
 import { MapView } from './mapview.js';
 import { fetchRoutes, RouteError } from './routing.js';
 import { CameraSayGate, RouteTracker } from './tracker.js';
-import { clearRoadCache, RoadData } from './roaddata.js';
+import { clearRoadCache, freshnessText, RoadData } from './roaddata.js';
 import { AlertEngine, describePoint, overSpeedSay, signSpeech, SpeedMonitor } from './alerts.js';
 import { PRIORITY, voice } from './voice.js';
 import { reverseGeocode, searchPlaces } from './search.js';
@@ -32,7 +32,9 @@ import {
 import {
   alertsFrom,
   cameraStatus,
+  createAppUpdate,
   createCarBridge,
+  describeUpdate,
   maneuverFrom,
   obdStatus,
   positionFrom,
@@ -41,6 +43,7 @@ import {
   roadsNear,
   routeWindow,
 } from './carbridge.js';
+import { planPrompts, QuietGate, SHELL_VERSION, SW_RELOAD_TEXT, SwUpdateWatcher } from './appupdate.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -196,6 +199,7 @@ function setMode(mode) {
   updateWakeLock();
   syncLayout();
   camctl.refresh(); // vào/ra chế độ lái: mở hoặc đóng camera nhận diện biển
+  updatePrompts?.refresh(); // lời mời cập nhật ẩn khi đang lái
 }
 
 // Mỗi bảng/hộp thoại mở ra được ghi một mục vào lịch sử trình duyệt để nút Quay lại của điện thoại
@@ -340,7 +344,15 @@ async function updateWakeLock() {
 
 const reportPoints = () => store.reports.map((r) => ({ id: r.id, kind: 'report', type: r.type, coord: r.coord }));
 
+/** Câu "Dữ liệu đường quanh đây cập nhật lúc …" trong phần cài đặt (quanh xe; chưa có GPS thì quanh tâm bản đồ). */
+function renderRoadFreshness() {
+  const el = $('roadFreshness');
+  const coord = state.fix?.coord || (map.map ? map.center : null);
+  if (el && coord) el.textContent = freshnessText(roads.freshness(coord));
+}
+
 function refreshPoints() {
+  if (!$('settingsPanel').hidden) renderRoadFreshness();
   const list = [
     ...roads.allPoints().map((p) => ({ ...p, icon: describePoint(p).icon })),
     ...reportPoints().map((p) => ({ ...p, icon: REPORT_TYPES[p.type].icon })),
@@ -560,6 +572,7 @@ function renderAlert(pointResult, signResult = null) {
   if (bar.hidden) {
     bar.hidden = false;
     syncLayout();
+    updatePrompts?.refresh(); // cảnh báo hiện: lời mời cập nhật nhường chỗ ngay
   }
 }
 
@@ -1484,6 +1497,116 @@ function onCarData(client, snap) {
 // carBridge?.… không làm gì.
 const carBridge = createCarBridge();
 const carRoads = carBridge ? new RoadsMemo() : null;
+// Tự cập nhật ứng dụng Android (carbridge.js, AppUpdate): chỉ có trong bản cài của ứng dụng; trình duyệt thường là null.
+const appUpdate = createAppUpdate();
+// Bản web mới (service worker mới đã nắm trang): mời tải lại thay vì để mã cũ và tệp mới lẫn nhau. Có cả trong ứng dụng.
+// Service worker mới cùng bản với mã trang (SHELL_VERSION) thì không mời: trang đã chạy mã mới.
+const swWatch = 'serviceWorker' in navigator ? new SwUpdateWatcher(navigator.serviceWorker, { pageVersion: SHELL_VERSION }) : null;
+// Lời mời cập nhật chỉ hiện khi xe đứng yên, không dẫn đường, không có cảnh báo (appupdate.js, QuietGate). Trong ứng dụng
+// Android phải thấy tốc độ thật dưới ngưỡng mới hiện: chưa có GPS/OBD thì không biết xe có đang chạy không.
+const quietGate = new QuietGate({ requireSpeed: Boolean(carBridge || appUpdate) });
+let updatePrompts = null;
+
+/** Tốc độ còn mới (km/h): ưu tiên số của xe (OBD), rồi GPS; không có thì null. */
+function currentKmh() {
+  const now = Date.now();
+  const snap = car.snap;
+  if (snap?.speed != null && Number.isFinite(snap.speed) && now - snap.speedTime < SPEED_STALE_MS) return snap.speed;
+  const fix = state.fix;
+  if (fix && Number.isFinite(fix.speed) && now - state.lastFixAt <= SPEED_STALE_MS) return fix.speed * 3.6;
+  return null;
+}
+
+/**
+ * Gắn giao diện cập nhật:
+ * - nút nổi trên cùng của ứng dụng Android (#appUpdate: #btnAppUpdate, #appUpdateText, #btnAppUpdateLater);
+ * - nút nổi "Đã có bản mới, bấm để tải lại" của bản web (#swUpdate: #btnSwReload, #btnSwLater);
+ * - phần "Phiên bản ứng dụng" trong Cài đặt (#appUpdateBox: #appUpdateLine, #appUpdateNote, #btnAppUpdateCheck,
+ *   #btnAppUpdateInstall), chỉ trong ứng dụng.
+ * Chữ luôn qua textContent. Nút nổi không bao giờ lấy tiêu điểm và chỉ hiện khi xe đứng yên: trong lúc chạy, lời mời
+ * được giữ lại tới lần dừng sau. Trả { refresh() }: gọi mỗi giây và khi đổi chế độ, cảnh báo.
+ */
+function mountUpdatePrompts(updater, sw) {
+  let quiet = false;
+  let pillKey = null;
+  const box = $('appUpdateBox');
+  if (box && updater) box.hidden = false;
+  const swText = $('swUpdateText');
+  if (swText) swText.textContent = SW_RELOAD_TEXT;
+
+  const renderPills = () => {
+    const d = updater ? describeUpdate(updater.status, updater.support) : null;
+    const plan = planPrompts({ nativePill: Boolean(d?.pill), swVisible: Boolean(sw?.visible), quiet });
+    const key = `${plan.native}|${plan.sw}|${d?.pillText}|${d?.action}|${d?.actionLabel}|${d?.canDismiss}`;
+    if (key === pillKey) return;
+    pillKey = key;
+    const pill = $('appUpdate');
+    if (pill) pill.hidden = !plan.native;
+    if (d) {
+      const pillText = $('appUpdateText');
+      if (pillText) pillText.textContent = d.pillText;
+      const pillBtn = $('btnAppUpdate');
+      if (pillBtn) {
+        pillBtn.disabled = !d.action;
+        pillBtn.setAttribute('aria-label', d.action ? `${d.pillText}. Bấm để ${d.actionLabel.toLocaleLowerCase('vi')}.` : d.pillText);
+      }
+      const later = $('btnAppUpdateLater');
+      if (later) later.hidden = !d.canDismiss;
+    }
+    const swPill = $('swUpdate');
+    if (swPill) swPill.hidden = !plan.sw;
+  };
+
+  const renderBox = () => {
+    if (!updater) return;
+    const d = describeUpdate(updater.status, updater.support);
+    const line = $('appUpdateLine');
+    if (line) line.textContent = d.line;
+    const note = $('appUpdateNote');
+    if (note) {
+      note.textContent = d.note ? `Có gì mới: ${d.note}` : '';
+      note.hidden = !d.note;
+    }
+    const check = $('btnAppUpdateCheck');
+    if (check) check.disabled = d.busy;
+    const inst = $('btnAppUpdateInstall');
+    if (inst) {
+      inst.hidden = !d.action;
+      const label = inst.querySelector('span:last-child') || inst;
+      label.textContent = d.actionLabel;
+    }
+  };
+
+  const refresh = () => {
+    quiet = quietGate.update({ driving: isDriving(), kmh: currentKmh(), alert: !$('alertBar').hidden });
+    renderPills();
+    // Hỏi bản web mới chỉ khi xe đứng yên, trang đang hiện và có mạng: bản mới không thay giữa chuyến.
+    sw?.tick({ allowCheck: quiet && !document.hidden && navigator.onLine !== false });
+  };
+
+  if (updater) {
+    // Máy tự từ chối mở hộp thoại cài khi xe đang chạy (mã "driving"); nút nổi thì chỉ hiện lúc xe đứng yên.
+    const install = () => updater.install();
+    $('btnAppUpdate')?.addEventListener('click', install);
+    $('btnAppUpdateInstall')?.addEventListener('click', install);
+    $('btnAppUpdateLater')?.addEventListener('click', () => updater.dismiss());
+    $('btnAppUpdateCheck')?.addEventListener('click', () => updater.check());
+    updater.onChange(() => {
+      renderBox();
+      renderPills();
+    });
+  }
+  if (sw) {
+    $('btnSwReload')?.addEventListener('click', () => {
+      if (!sw.reload({ quiet })) toast('Hãy dừng xe rồi bấm tải lại.');
+    });
+    $('btnSwLater')?.addEventListener('click', () => sw.dismiss());
+    sw.onChange(renderPills);
+  }
+  renderBox();
+  renderPills();
+  return { refresh };
+}
 
 // Bộ OBD thôi hỏi xe khi trang bị ẩn (đỡ tốn pin), trừ khi đang chiếu lên màn hình xe: lúc đó điện thoại thường khoá
 // màn hình hoặc mở ứng dụng khác, mà màn hình xe vẫn cần tốc độ.
@@ -1586,6 +1709,7 @@ function renderSettings() {
     ? `Bạn đang có ${n} điểm đánh dấu trên thiết bị này. Xuất tệp để sao lưu hoặc gửi cho người khác; nhập tệp để thêm điểm từ người khác.`
     : 'Bạn chưa đánh dấu điểm nào. Bấm nút tam giác cảnh báo trên bản đồ khi đi qua nơi cần nhớ.';
   $('btnExport').disabled = n === 0;
+  renderRoadFreshness();
 
   const hint = $('voiceState').querySelector('small');
   hint.textContent =
@@ -1802,6 +1926,9 @@ function bind() {
 async function boot() {
   bind();
   carBridge?.start(); // chỉ khi chạy trong ứng dụng Android
+  updatePrompts = mountUpdatePrompts(appUpdate, swWatch);
+  appUpdate?.start();
+  swWatch?.start(); // trước register(): biết trang đã có service worker nắm từ trước chưa
 
   applyAudio();
   applyCarUi();
@@ -1858,6 +1985,7 @@ async function boot() {
     markSpeedStale();
     camctl.tick();
     carBridge?.publish(carFeed); // tốc độ cũ, trạng thái camera và OBD; giữ nhịp tối thiểu cho màn hình xe
+    updatePrompts?.refresh(); // lời mời cập nhật: hiện khi xe dừng đủ lâu, ẩn khi chạy
   }, 1000);
 
   setInterval(() => {
@@ -1866,7 +1994,10 @@ async function boot() {
   }, 5 * 60e3);
 
   if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
+    navigator.serviceWorker
+      .register('sw.js')
+      .then((reg) => swWatch?.attach(reg))
+      .catch(() => {});
   }
 }
 

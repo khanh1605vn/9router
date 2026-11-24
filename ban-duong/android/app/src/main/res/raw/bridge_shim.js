@@ -5,11 +5,13 @@
 //  - navigator.wakeLock: WebView không có Screen Wake Lock, nên thay bằng bản gửi { type: 'keepScreenOn' } cho máy.
 //  - Nếu máy không chặn được yêu cầu của service worker, chặn đăng ký service worker (trang vẫn chạy bình thường).
 //  - window.BanDuongApp (chỉ đọc): khả năng của ứng dụng mà trang cần biết ngay lúc nạp, trước thông điệp "native".
-//    Hiện chỉ có obd: { ble, spp } (Bluetooth của máy cho bộ OBD, xem js/obdnative.js) hoặc null.
+//    obd: { ble, spp } (Bluetooth của máy cho bộ OBD, xem js/obdnative.js) hoặc null.
+//    update: { mode: 'install'|'notify', current } (tự cập nhật, xem js/appupdate.js) hoặc null (bản debug).
 (() => {
   'use strict';
   const SW_OK = __SW_OK__;
   const OBD = __OBD_CAPS__;
+  const UPDATE = __UPDATE_CAPS__;
   const nb = window.BanDuongNative;
   if (!nb || typeof nb.postMessage !== 'function' || window.__banDuongShim) return;
   Object.defineProperty(window, '__banDuongShim', { value: true });
@@ -38,7 +40,11 @@
   // ---- Khả năng của ứng dụng ----
   try {
     const obd = OBD && (OBD.ble === true || OBD.spp === true) ? Object.freeze({ ble: OBD.ble === true, spp: OBD.spp === true }) : null;
-    Object.defineProperty(window, 'BanDuongApp', { value: Object.freeze({ v: 1, obd }) });
+    const update =
+      UPDATE && (UPDATE.mode === 'install' || UPDATE.mode === 'notify') && typeof UPDATE.current === 'string'
+        ? Object.freeze({ mode: UPDATE.mode, current: UPDATE.current.slice(0, 40) })
+        : null;
+    Object.defineProperty(window, 'BanDuongApp', { value: Object.freeze({ v: 1, obd, update }) });
   } catch {
     /* đã có: bỏ qua */
   }

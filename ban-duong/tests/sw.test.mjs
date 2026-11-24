@@ -91,7 +91,7 @@ function netResponse(body, { status = 200, type = 'basic', url, redirected = fal
 }
 
 /** Nạp sw.js trong node:vm với self, caches, fetch và clients giả. */
-function loadSw({ fetchImpl } = {}) {
+function loadSw({ fetchImpl, now } = {}) {
   const listeners = {};
   const fetched = [];
   const caches = new FakeCaches();
@@ -119,7 +119,16 @@ function loadSw({ fetchImpl } = {}) {
   };
   ctx.self = ctx;
   vm.createContext(ctx);
-  vm.runInContext(`${SW_SOURCE}\n;self.__sw = { SHELL_FILES, VERSION, SHELL, ML, ML_HASH_LEN };`, ctx, { filename: 'sw.js' });
+  if (now) {
+    // Đồng hồ giả bên trong sw.js (Date của node:vm là của riêng ngữ cảnh đó).
+    ctx.__now = now;
+    vm.runInContext('Date.now = () => __now();', ctx);
+  }
+  vm.runInContext(
+    `${SW_SOURCE}\n;self.__sw = { SHELL_FILES, VERSION, SHELL, ML, ML_HASH_LEN, TILE_MAX_AGE, STAMP, REVALIDATE_MAX };`,
+    ctx,
+    { filename: 'sw.js' }
+  );
 
   /** Phát một sự kiện fetch; trả { handled, response, settled } khi mọi waitUntil đã xong. */
   async function dispatchFetch(url, init = {}) {
@@ -155,15 +164,15 @@ function loadSw({ fetchImpl } = {}) {
     await p;
   }
 
-  return { sw: ctx.__sw, caches, fetched, calls, dispatchFetch, dispatchLifecycle };
+  return { sw: ctx.__sw, caches, fetched, calls, listeners, dispatchFetch, dispatchLifecycle };
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
 
 test('VERSION đã tăng và tên bộ nhớ đệm ML cố định, không gắn VERSION', () => {
   const { sw } = loadSw();
-  assert.equal(sw.VERSION, 'v9');
-  assert.equal(sw.SHELL, 'banduong-shell-v9');
+  assert.equal(sw.VERSION, 'v10');
+  assert.equal(sw.SHELL, 'banduong-shell-v10');
   assert.equal(sw.ML, 'banduong-ml-1');
   assert.ok(!sw.ML.startsWith('banduong-shell-'));
 });
@@ -184,7 +193,7 @@ test('tệp ML: ưu tiên bộ nhớ đệm, khoá bằng cả địa chỉ gồ
   assert.ok(first.handled);
   assert.deepEqual(new Uint8Array(await first.response.arrayBuffer()), body);
   assert.deepEqual([...t.caches.get('banduong-ml-1').map.keys()], [url]);
-  assert.equal(t.caches.get('banduong-shell-v9'), undefined, 'không được lọt vào bộ nhớ đệm vỏ ứng dụng');
+  assert.equal(t.caches.get('banduong-shell-v10'), undefined, 'không được lọt vào bộ nhớ đệm vỏ ứng dụng');
 
   // Lần sau: không hỏi mạng nữa.
   const second = await t.dispatchFetch(url);
@@ -321,7 +330,7 @@ test('vỏ ứng dụng: như trước, ưu tiên mạng; mất mạng thì dùn
   assert.ok(r.handled);
   assert.equal(await r.response.text(), 'body of /ban-duong/js/main.js');
   await new Promise((res) => setTimeout(res, 0));
-  assert.ok(t.caches.get('banduong-shell-v9').map.has(`${SCOPE}js/main.js`));
+  assert.ok(t.caches.get('banduong-shell-v10').map.has(`${SCOPE}js/main.js`));
 
   online = false;
   const off = await t.dispatchFetch(`${SCOPE}js/main.js?x=1`);
@@ -337,7 +346,7 @@ test('vỏ ứng dụng: câu trả lời không ok không được lưu', async
   const t = loadSw({ fetchImpl: (req) => netResponse('nope', { status: 404, url: req.url }) });
   await t.dispatchFetch(`${SCOPE}js/missing.js`);
   await new Promise((res) => setTimeout(res, 0));
-  assert.equal(t.caches.get('banduong-shell-v9').map.size, 0);
+  assert.equal(t.caches.get('banduong-shell-v10').map.size, 0);
 });
 
 test('ô bản đồ vẫn ưu tiên bộ nhớ đệm như trước', async () => {
@@ -350,10 +359,114 @@ test('ô bản đồ vẫn ưu tiên bộ nhớ đệm như trước', async () 
   assert.ok(t.caches.get('banduong-tiles-v1').map.has(url));
 });
 
+// ---- Ô bản đồ raster tile.openstreetmap.org: dùng bản đã lưu, quá 7 ngày thì tải lại ngầm ----
+
+const OSM_TILE = 'https://tile.openstreetmap.org/15/26094/15376.png';
+const DAY = 864e5;
+
+/** sw.js với đồng hồ giả và máy chủ ô bản đồ giả trả lần lượt các thân trong bodies (Error: mất mạng). */
+function tileSw(bodies) {
+  const clock = { now: Date.UTC(2026, 10, 24, 8) };
+  const t = loadSw({
+    now: () => clock.now,
+    fetchImpl: (req) => {
+      const b = bodies.shift();
+      if (b instanceof Error) throw b;
+      if (typeof b === 'number') return netResponse('', { status: b, type: 'cors', url: req.url });
+      return netResponse(b, { type: 'cors', url: req.url });
+    },
+  });
+  return { t, clock };
+}
+
+const text = async (r) => (r ? r.response.text() : null);
+
+test('ô OSM: lưu kèm thời điểm lưu, trong 7 ngày dùng bản đã lưu, không hỏi mạng', async () => {
+  const { t, clock } = tileSw(['v1']);
+  assert.equal(await text(await t.dispatchFetch(OSM_TILE)), 'v1');
+  const stored = t.caches.get('banduong-tiles-v1').map.get(OSM_TILE);
+  assert.equal(stored.headers.get(t.sw.STAMP), String(clock.now));
+  clock.now += t.sw.TILE_MAX_AGE - 1000;
+  assert.equal(await text(await t.dispatchFetch(OSM_TILE)), 'v1');
+  assert.equal(t.fetched.length, 1);
+});
+
+test('ô OSM quá 7 ngày: trả ngay bản cũ, tải lại ngầm, lần sau có bản mới', async () => {
+  const { t, clock } = tileSw(['v1', 'v2']);
+  await t.dispatchFetch(OSM_TILE);
+  clock.now += t.sw.TILE_MAX_AGE;
+  assert.equal(await text(await t.dispatchFetch(OSM_TILE)), 'v1', 'không bắt người dùng chờ mạng');
+  assert.equal(t.fetched.length, 2, 'đã tải lại ngầm');
+  const stored = t.caches.get('banduong-tiles-v1').map.get(OSM_TILE);
+  assert.equal(stored.headers.get(t.sw.STAMP), String(clock.now));
+  assert.equal(await text(await t.dispatchFetch(OSM_TILE)), 'v2');
+  assert.equal(t.fetched.length, 2, 'bản mới còn hạn: không tải nữa');
+});
+
+test('ô OSM lưu từ bản trước (chưa có thời điểm lưu) hay đồng hồ máy bị chỉnh lùi: coi như đã cũ, tải lại ngầm', async () => {
+  const { t, clock } = tileSw(['v2', 'v3']);
+  const cache = await t.caches.open('banduong-tiles-v1');
+  await cache.put(OSM_TILE, new Response('v1', { status: 200 }));
+  assert.equal(await text(await t.dispatchFetch(OSM_TILE)), 'v1');
+  assert.equal(t.fetched.length, 1);
+  assert.equal(await text(await t.dispatchFetch(OSM_TILE)), 'v2');
+
+  clock.now -= 3 * DAY; // giờ máy bị chỉnh lùi: bản vừa lưu "ở tương lai"
+  await t.dispatchFetch(OSM_TILE);
+  assert.equal(t.fetched.length, 2);
+});
+
+test('ô OSM: tải lại ngầm hỏng (mất mạng, 503) thì giữ nguyên bản cũ', async () => {
+  const { t, clock } = tileSw(['v1', new TypeError('offline'), 503]);
+  await t.dispatchFetch(OSM_TILE);
+  clock.now += 10 * DAY;
+  assert.equal(await text(await t.dispatchFetch(OSM_TILE)), 'v1');
+  assert.equal(await text(await t.dispatchFetch(OSM_TILE)), 'v1');
+  assert.equal(t.fetched.length, 3);
+  const stored = t.caches.get('banduong-tiles-v1').map.get(OSM_TILE);
+  assert.equal(await stored.clone().text(), 'v1');
+});
+
+test('ô OSM: tải lại ngầm không trùng địa chỉ và không quá REVALIDATE_MAX lượt cùng lúc', async () => {
+  const hung = [];
+  const clock = { now: Date.UTC(2026, 10, 24, 8) };
+  const t = loadSw({
+    now: () => clock.now,
+    fetchImpl: (req) => new Promise((resolve) => hung.push(() => resolve(netResponse('new', { type: 'cors', url: req.url })))),
+  });
+  const cache = await t.caches.open('banduong-tiles-v1');
+  const urls = Array.from({ length: 6 }, (_, i) => `https://tile.openstreetmap.org/15/${26090 + i}/15376.png`);
+  for (const u of urls) await cache.put(u, new Response('old', { status: 200 })); // chưa có thời điểm lưu: đã cũ
+  const done = [];
+  for (const u of [urls[0], urls[0], ...urls]) done.push(t.dispatchFetch(u));
+  for (let k = 0; k < 20; k++) await new Promise((r) => setImmediate(r));
+  assert.equal(t.fetched.length, t.sw.REVALIDATE_MAX);
+  assert.equal(new Set(t.fetched).size, t.sw.REVALIDATE_MAX);
+  while (hung.length) hung.shift()();
+  const results = await Promise.all(done);
+  for (const r of results) assert.equal(await r.response.text(), 'old', 'mọi yêu cầu đều được trả ngay bản đã lưu');
+});
+
+test('OpenFreeMap: ô .pbf (địa chỉ gắn bản dựng) và phông chữ không bao giờ tải lại; TileJSON và kiểu bản đồ luôn hỏi mạng trước', async () => {
+  const { t, clock } = tileSw(['pbf', 'font', 'tj1', 'tj2']);
+  const pbf = 'https://tiles.openfreemap.org/planet/20261118_001001_pt/15/26094/15376.pbf';
+  const font = 'https://fonts.gstatic.com/s/roboto/v30/KFOmCnqEu92Fr1Mu4mxK.woff2';
+  await t.dispatchFetch(pbf);
+  await t.dispatchFetch(font);
+  clock.now += 60 * DAY;
+  assert.equal(await text(await t.dispatchFetch(pbf)), 'pbf');
+  assert.equal(await text(await t.dispatchFetch(font)), 'font');
+  assert.equal(t.fetched.length, 2);
+  const tj = 'https://tiles.openfreemap.org/planet';
+  assert.equal(await text(await t.dispatchFetch(tj)), 'tj1');
+  assert.equal(await text(await t.dispatchFetch(tj)), 'tj2');
+  assert.equal(t.fetched.length, 4);
+});
+
 test('cài đặt: chỉ nạp trước SHELL_FILES, không có tệp ML, tests/ hay tools/', async () => {
   const t = loadSw();
   await t.dispatchLifecycle('install');
-  const added = t.caches.get('banduong-shell-v9').added;
+  const added = t.caches.get('banduong-shell-v10').added;
   assert.deepEqual(added, t.sw.SHELL_FILES);
   assert.equal(t.caches.get('banduong-ml-1'), undefined);
   for (const f of added) {
@@ -364,11 +477,11 @@ test('cài đặt: chỉ nạp trước SHELL_FILES, không có tệp ML, tests/
 
 test('kích hoạt: chỉ xoá banduong-shell-* cũ, giữ banduong-ml-1 và ô bản đồ', async () => {
   const t = loadSw();
-  for (const name of ['banduong-shell-v4', 'banduong-shell-v5', 'banduong-shell-v6', 'banduong-shell-v7', 'banduong-shell-v8', 'banduong-shell-v9', 'banduong-ml-1', 'banduong-tiles-v1']) {
+  for (const name of ['banduong-shell-v4', 'banduong-shell-v5', 'banduong-shell-v6', 'banduong-shell-v7', 'banduong-shell-v8', 'banduong-shell-v9', 'banduong-shell-v10', 'banduong-ml-1', 'banduong-tiles-v1']) {
     await t.caches.open(name);
   }
   await t.dispatchLifecycle('activate');
-  assert.deepEqual((await t.caches.keys()).sort(), ['banduong-ml-1', 'banduong-shell-v9', 'banduong-tiles-v1']);
+  assert.deepEqual((await t.caches.keys()).sort(), ['banduong-ml-1', 'banduong-shell-v10', 'banduong-tiles-v1']);
   assert.equal(t.calls.claim, 1);
 });
 
@@ -473,4 +586,18 @@ test('tệp giai đoạn 2 trong SHELL_FILES đã có trên đĩa', (t) => {
   // Khi còn thiếu, sw.js mới không cài được (addAll hỏng) và máy người dùng giữ bản cũ: phải có trước khi phát hành.
   if (missing.length) t.todo(`chưa có: ${missing.join(', ')}`);
   assert.deepEqual(missing, []);
+});
+
+test('trả lời "bạn là bản nào?" của trang qua cổng MessageChannel, chỉ với đúng thông điệp', () => {
+  const t = loadSw();
+  const replies = [];
+  const port = { postMessage: (m) => replies.push(m) };
+  t.listeners.message({ data: { type: 'banduong:version' }, ports: [port] });
+  assert.deepEqual(JSON.parse(JSON.stringify(replies)), [{ type: 'banduong:version', version: t.sw.VERSION }]); // đối tượng của ngữ cảnh vm
+  t.listeners.message({ data: { type: 'khác' }, ports: [port] });
+  t.listeners.message({ data: null, ports: [port] });
+  t.listeners.message({ data: { type: 'banduong:version' }, ports: [] });
+  assert.equal(replies.length, 1);
+  // Cổng đã đóng: không ném ra ngoài.
+  t.listeners.message({ data: { type: 'banduong:version' }, ports: [{ postMessage() { throw new Error('closed'); } }] });
 });

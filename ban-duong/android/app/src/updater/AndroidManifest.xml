@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Chỉ ghép vào bản release (app/build.gradle.kts, sourceSets["release"]): tự cập nhật từ GitHub Releases. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Mở hộp thoại cài đặt của hệ thống cho bản mới đã tải và xác minh. Người dùng luôn phải tự bấm "Cập nhật"
+         trong hộp thoại đó; ứng dụng không có quyền cài lặng lẽ. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
+    <application>
+        <!-- Nhận kết quả của phiên PackageInstaller. Không exported: chỉ PendingIntent của chính ứng dụng gọi được. -->
+        <receiver
+            android:name=".update.InstallResultReceiver"
+            android:exported="false" />
+    </application>
+</manifest>

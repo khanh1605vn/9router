@@ -12,6 +12,7 @@ import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import vn.banduong.app.obd.ObdController
+import vn.banduong.app.update.UpdateCommands
 import vn.banduong.app.web.AppOrigin
 
 /**
@@ -21,12 +22,14 @@ import vn.banduong.app.web.AppOrigin
  *
  * Trang web chỉ làm được những việc sau: chào (hello), gửi trạng thái lái xe (state) cho màn hình ô tô, bật/tắt giữ
  * màn hình sáng, và dùng bộ OBD người dùng đã tự chọn trong hộp chọn của máy ([ObdController]: obdPick,
- * obdConnect, obdWrite với lệnh trong danh sách được phép, obdDisconnect). Không có lệnh nào khác; thông điệp sai
- * hoặc quá nhiều đều bị bỏ.
+ * obdConnect, obdWrite với lệnh trong danh sách được phép, obdDisconnect), và báo ý định cập nhật ứng dụng
+ * ([UpdateCommands]: check, install, dismiss, status; không có URL: máy tự quyết tải gì). Không có lệnh nào khác;
+ * thông điệp sai hoặc quá nhiều đều bị bỏ.
  */
 class NativeBridge(
     private val host: Host,
     private val obd: ObdController? = null,
+    private val update: UpdateCommands? = null,
     private val nowMs: () -> Long = System::currentTimeMillis,
     private val uptimeMs: () -> Long = SystemClock::uptimeMillis,
     clockNanos: () -> Long = System::nanoTime,
@@ -45,9 +48,16 @@ class NativeBridge(
     private val controlLimiter = RateLimiter(BridgeLimits.CONTROL_RATE_PER_SEC, clockNanos = clockNanos)
     private val obdControlLimiter = RateLimiter(BridgeLimits.OBD_CONTROL_RATE_PER_SEC, clockNanos = clockNanos)
     private val obdWriteLimiter = RateLimiter(BridgeLimits.OBD_WRITE_RATE_PER_SEC, clockNanos = clockNanos)
+    private val updateLimiter = RateLimiter(BridgeLimits.UPDATE_RATE_PER_SEC, clockNanos = clockNanos)
+    private val installLimiter = RateLimiter(
+        ratePerSec = 1.0 / BridgeLimits.UPDATE_INSTALL_INTERVAL_S,
+        burst = 1.0,
+        clockNanos = clockNanos,
+    )
 
     init {
         obd?.sink = { post(it) }
+        update?.sink = { post(it) }
     }
 
     private var reply: JavaScriptReplyProxy? = null
@@ -99,6 +109,7 @@ class NativeBridge(
                     if (!controlLimiter.tryAcquire()) return drop("rate-control")
                     reply = replyProxy
                     post(OutboundMessages.native(host.isCarConnected(), host.appVersion()))
+                    update?.resend()
                 }
                 is InboundMessage.KeepScreenOn -> {
                     if (!controlLimiter.tryAcquire()) return drop("rate-control")
@@ -113,6 +124,18 @@ class NativeBridge(
                         is InboundMessage.ObdConnect -> c.connect(m.link)
                         is InboundMessage.ObdDisconnect -> c.disconnect(m.link)
                         else -> Unit
+                    }
+                }
+                is InboundMessage.Update -> {
+                    val u = update ?: return drop("update-off")
+                    if (!updateLimiter.tryAcquire()) return drop("rate-update")
+                    if (m.action == UpdateAction.INSTALL && !installLimiter.tryAcquire()) return drop("rate-install")
+                    if (reply == null) reply = replyProxy
+                    when (m.action) {
+                        UpdateAction.CHECK -> u.check(manual = true)
+                        UpdateAction.INSTALL -> u.install()
+                        UpdateAction.DISMISS -> u.dismiss()
+                        UpdateAction.STATUS -> u.resend()
                     }
                 }
                 is InboundMessage.ObdWrite -> {

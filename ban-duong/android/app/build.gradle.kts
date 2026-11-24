@@ -1,3 +1,4 @@
+import java.util.Properties
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -7,6 +8,34 @@ plugins {
 
 // Cờ tường minh, mặc định tắt: bản debug nhận mọi máy chủ màn hình xe (chỉ để thử với máy chủ giả lập).
 val allowAllCarHosts: Boolean = providers.gradleProperty("allowAllCarHosts").orNull == "true"
+
+// Phiên bản: nguồn sự thật duy nhất là android/version.properties (phát hành bản mới = tăng hai số trong tệp đó).
+val versionProps: Properties = Properties().apply {
+    val text = providers.fileContents(rootProject.layout.projectDirectory.file("version.properties")).asText.get()
+    load(text.reader())
+}
+val appVersionCode: Int = versionProps.getProperty("versionCode")?.trim()?.toIntOrNull()
+    ?.takeIf { it in 1..2_100_000_000 }
+    ?: error("version.properties: versionCode phải là số nguyên 1 … 2100000000")
+val appVersionName: String = versionProps.getProperty("versionName")?.trim()
+    ?.takeIf { Regex("^[0-9]{1,4}(\\.[0-9]{1,4}){0,3}$").matches(it) }
+    ?: error("version.properties: versionName phải có dạng 1.2.3")
+
+// Khoá ký bản release: chỉ lấy từ biến môi trường (GitHub Actions giải mã secret ra tệp tạm) hoặc thuộc tính Gradle
+// ngoài kho mã (~/.gradle/gradle.properties). Thiếu bất kỳ giá trị nào thì bản release để không ký như trước; bản
+// debug/sideload không bao giờ phụ thuộc vào khoá này.
+fun signingValue(env: String, prop: String): String? =
+    (providers.environmentVariable(env).orNull ?: providers.gradleProperty(prop).orNull)?.takeIf { it.isNotEmpty() }
+val releaseStoreFile: String? = signingValue("BANDUONG_KEYSTORE_FILE", "banduong.keystore.file")
+val releaseStorePassword: String? = signingValue("BANDUONG_KEYSTORE_PASSWORD", "banduong.keystore.password")
+val releaseKeyAlias: String? = signingValue("BANDUONG_KEY_ALIAS", "banduong.key.alias")
+val releaseKeyPassword: String? = signingValue("BANDUONG_KEY_PASSWORD", "banduong.key.password")
+val hasReleaseSigning: Boolean = releaseStoreFile != null && releaseStorePassword != null &&
+    releaseKeyAlias != null && releaseKeyPassword != null && File(releaseStoreFile).isFile
+
+// Kênh cập nhật trong ứng dụng: bản phát hành trên GitHub của kho công khai này, thẻ ban-duong-v<versionName>.
+val updateRepo = "khanh1605vn/9router"
+val updateTagPrefix = "ban-duong-v"
 
 // Thư mục ứng dụng web (ban-duong/), nằm ngay trên thư mục android/.
 val webRootDir: File = rootProject.projectDir.parentFile
@@ -77,10 +106,29 @@ android {
         applicationId = "vn.banduong.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = appVersionCode
+        versionName = appVersionName
         // Màn hình xe chỉ nhận máy chủ Android Auto chính thức (xem BanDuongCarAppService).
         buildConfigField("boolean", "ALLOW_ALL_CAR_HOSTS", "false")
+        // Tự cập nhật (vn.banduong.app.update): kho và tiền tố thẻ do máy cố định, trang web không đổi được.
+        buildConfigField("String", "UPDATE_REPO", "\"$updateRepo\"")
+        buildConfigField("String", "UPDATE_TAG_PREFIX", "\"$updateTagPrefix\"")
+        // "off": không kiểm tra; "notify": chỉ báo có bản mới (không cài được vì khác khoá ký);
+        // "install": kiểm tra, tải, xác minh và cài (bản release ký bằng khoá phát hành).
+        buildConfigField("String", "UPDATE_MODE", "\"off\"")
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = File(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+                enableV2Signing = true
+                enableV3Signing = true
+            }
+        }
     }
 
     buildTypes {
@@ -95,7 +143,11 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            // Cố ý KHÔNG khai báo signingConfig: bản release chỉ được ký ngoài kho mã.
+            // Khoá phát hành chỉ có khi build trên GitHub Actions (secret) hoặc máy đã cấu hình ngoài kho mã;
+            // không có thì ra app-release-unsigned.apk như trước.
+            if (hasReleaseSigning) signingConfig = signingConfigs.getByName("release")
+            // Bản phát hành cài lên xe và tự cập nhật từ GitHub: cùng khoá ký, cùng applicationId vn.banduong.app.
+            buildConfigField("String", "UPDATE_MODE", "\"install\"")
         }
         // Bản để cài lên điện thoại thật và chạy trên xe: như release (R8, không debuggable, không gỡ lỗi WebView từ
         // xa) nhưng ký bằng khoá debug của máy build, nên cài được ngay mà không cần khoá phát hành.
@@ -106,7 +158,15 @@ android {
             applicationIdSuffix = ".sideload"
             versionNameSuffix = "-sideload"
             matchingFallbacks += listOf("release")
+            // Khác applicationId và khác khoá ký với bản phát hành nên Android không cho cập nhật thẳng: chỉ báo có
+            // bản mới và mở trang tải bản chính thức (cài một lần, sau đó bản chính thức tự cập nhật).
+            buildConfigField("String", "UPDATE_MODE", "\"notify\"")
         }
+    }
+
+    sourceSets {
+        // Quyền cài gói (REQUEST_INSTALL_PACKAGES) và bộ nhận kết quả cài chỉ có ở bản release, không có ở debug/sideload.
+        getByName("release").manifest.srcFile("src/updater/AndroidManifest.xml")
     }
 
     buildFeatures {

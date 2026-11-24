@@ -10,6 +10,8 @@
     <string name="permission_camera_denied">Chưa có quyền camera nên chưa nhận diện được biển báo. Bạn có thể bật lại trong Cài đặt của điện thoại.</string>
     <string name="webview_too_old">Thành phần WebView trên máy đã cũ, một số tính năng có thể không chạy. Hãy cập nhật Android System WebView trên Cửa hàng Play.</string>
 
+    <string name="update_allow_install">Để cài bản mới, hãy bật “Cho phép từ nguồn này” cho Bạn Đường rồi quay lại ứng dụng.</string>
+
     <!-- Màn hình ô tô (Android Auto) -->
     <string name="car_title">Bạn Đường</string>
     <string name="car_waiting_title">Chưa có dữ liệu</string>

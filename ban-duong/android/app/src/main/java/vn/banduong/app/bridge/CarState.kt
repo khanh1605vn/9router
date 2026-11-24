@@ -126,12 +126,19 @@ object BridgeLimits {
     /** obdWrite tối đa 10 mỗi giây (ObdClient gửi tối đa 6 lệnh/giây, cộng chuỗi ngắt 'X' + CR). */
     const val OBD_WRITE_RATE_PER_SEC = 10.0
 
+    /** Thông điệp "update" (check, install, dismiss, status) cộng lại tối đa 4 mỗi giây. */
+    const val UPDATE_RATE_PER_SEC = 4.0
+
+    /** "update" với action "install": tối đa 1 lần mỗi 10 giây (mỗi lần có thể mở hộp thoại của hệ thống). */
+    const val UPDATE_INSTALL_INTERVAL_S = 10.0
+
     /**
      * Thông điệp ngắn (≤ ký tự này: mọi thông điệp điều khiển và OBD) đi qua cổng chung riêng, rộng hơn; thông điệp
      * dài (state có tuyến đường…) đi qua cổng chung 8/giây như trước. Cả hai đều trước khi phân tích JSON.
      */
     const val SMALL_MESSAGE_CHARS = 256
-    const val SMALL_GATE_RATE_PER_SEC = STATE_RATE_PER_SEC + CONTROL_RATE_PER_SEC + OBD_CONTROL_RATE_PER_SEC + OBD_WRITE_RATE_PER_SEC
+    const val SMALL_GATE_RATE_PER_SEC =
+        STATE_RATE_PER_SEC + CONTROL_RATE_PER_SEC + OBD_CONTROL_RATE_PER_SEC + OBD_WRITE_RATE_PER_SEC + UPDATE_RATE_PER_SEC
 
     /** Mã yêu cầu obdPick: số nguyên 1 … 10⁹. */
     const val MAX_OBD_REQ = 1_000_000_000

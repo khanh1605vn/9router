@@ -1,0 +1,317 @@
+# Bạn Đường (ban-duong/android): build, ký và phát hành APK để ứng dụng trên xe tự cập nhật.
+#
+# Phát hành bản mới = tăng versionCode và versionName trong ban-duong/android/version.properties (và sửa
+# ban-duong/android/release-notes.txt), rồi đẩy lên master. Workflow này tạo bản phát hành GitHub có thẻ
+# ban-duong-v<versionName> với hai tệp: ban-duong.apk và update.json. Ứng dụng chỉ đọc đúng những bản phát hành đó
+# (vn.banduong.app.update.ReleaseSelector); các bản phát hành khác của kho (9router) không bị đụng tới.
+#
+# Bảo mật:
+#  - chỉ phát hành từ master: push chỉ nghe master, và job phát hành tự dừng nếu ref không phải refs/heads/master (kể cả
+#    khi bấm chạy tay workflow_dispatch trên nhánh khác);
+#  - khoá ký nằm trong secrets của Environment "ban-duong-release" (BANDUONG_KEYSTORE_B64, BANDUONG_KEYSTORE_PASSWORD,
+#    BANDUONG_KEY_ALIAS, BANDUONG_KEY_PASSWORD), Environment đó chỉ cho nhánh master (Deployment branches) nên job chạy
+#    từ nhánh khác không đọc được secrets; chỉ bước build release thấy mật khẩu; tệp khoá giải mã vào $RUNNER_TEMP và bị
+#    xoá cuối job;
+#  - quyền tối thiểu: job kiểm thử chỉ đọc; chỉ job phát hành có contents: write (GITHUB_TOKEN, không PAT), và GH_TOKEN
+#    chỉ đặt ở các bước gọi gh, không ở bước Gradle (plugin/thư viện bên thứ ba);
+#  - job phát hành không dùng bộ nhớ đệm Gradle chung, và kiểm tra gradle-wrapper.jar trước khi chạy ./gradlew;
+#  - biến BANDUONG_CERT_SHA256 (bắt buộc) chốt chứng chỉ ký: ký nhầm khoá thì dừng, không phát hành;
+#  - không chạy trên pull_request / pull_request_target: mã từ fork không bao giờ chạm tới secrets;
+#  - actions ghim theo SHA commit (chú thích ghi bản tương ứng).
+name: Bạn Đường Android
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - ban-duong/android/version.properties
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Mỗi lần chỉ một bản phát hành, không huỷ giữa chừng.
+concurrency:
+  group: ban-duong-android-release
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Kiểm thử
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+
+      - name: Kiểm thử ứng dụng web (npm test)
+        working-directory: ban-duong
+        run: npm test
+
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: gradle
+
+      - name: Kiểm tra gradle-wrapper.jar
+        uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+
+      - name: Kiểm thử JVM (Gradle)
+        working-directory: ban-duong/android
+        run: ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest
+
+  release:
+    name: Build, ký và phát hành
+    needs: test
+    # Chỉ master. Environment giữ secrets khoá ký; đặt Deployment branches = master (và tuỳ chọn người duyệt) trong
+    # Settings › Environments › ban-duong-release.
+    if: github.ref == 'refs/heads/master'
+    environment: ban-duong-release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: write
+    steps:
+      - name: Chỉ phát hành từ master
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/master" ]; then
+            echo "::error::Chỉ phát hành từ nhánh master (đang ở $GITHUB_REF) / releases are published from master only"
+            exit 1
+          fi
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Đọc phiên bản
+        id: ver
+        run: |
+          set -euo pipefail
+          f=ban-duong/android/version.properties
+          code=$(sed -n 's/^versionCode=\([0-9]\{1,10\}\)[[:space:]]*$/\1/p' "$f")
+          name=$(sed -n 's/^versionName=\([0-9][0-9.]*\)[[:space:]]*$/\1/p' "$f")
+          if [ -z "$code" ] || [ -z "$name" ] || ! [[ "$name" =~ ^[0-9]{1,4}(\.[0-9]{1,4}){0,3}$ ]]; then
+            echo "::error::version.properties sai dạng (cần versionCode=<số> và versionName=1.2.3) / malformed version.properties"
+            exit 1
+          fi
+          tag="ban-duong-v$name"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Phiên bản $name (versionCode $code), thẻ $tag"
+
+      - name: Bỏ qua nếu thẻ đã có
+        id: exists
+        env:
+          TAG: ${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags "https://github.com/${GITHUB_REPOSITORY}.git" "refs/tags/${TAG}" >/dev/null; then
+            echo "Thẻ ${TAG} đã có: không phát hành lại / tag already exists, skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Kiểm tra số phiên bản tăng dần
+        if: steps.exists.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODE: ${{ steps.ver.outputs.code }}
+          NAME: ${{ steps.ver.outputs.name }}
+        run: |
+          set -euo pipefail
+          # Kho dùng chung với bản phát hành của 9router: đọc nhiều để chắc có bản Bạn Đường gần nhất.
+          prev=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 1000 --exclude-drafts --exclude-pre-releases \
+            --json tagName --jq '.[].tagName' | grep -E '^ban-duong-v[0-9]+(\.[0-9]+){0,3}$' | sort -V | tail -n 1 || true)
+          if [ -z "$prev" ]; then echo "Chưa có bản phát hành nào trước đó."; exit 0; fi
+          dir=$(mktemp -d)
+          gh release download "$prev" --repo "$GITHUB_REPOSITORY" --pattern update.json --dir "$dir"
+          prev_code=$(jq -er '.versionCode | select(type == "number")' "$dir/update.json")
+          prev_name=${prev#ban-duong-v}
+          newest=$(printf '%s\n%s\n' "$prev_name" "$NAME" | sort -V | tail -n 1)
+          if [ "$CODE" -le "$prev_code" ] || [ "$newest" != "$NAME" ] || [ "$NAME" = "$prev_name" ]; then
+            echo "::error::Phiên bản phải lớn hơn bản trước ($prev_name, versionCode $prev_code) / version must increase"
+            exit 1
+          fi
+
+      # Không dùng bộ nhớ đệm Gradle ở job có khoá ký: tải lại từ đầu, không nhận gì từ lần chạy khác.
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4.9.1
+        if: steps.exists.outputs.skip == 'false'
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Kiểm tra gradle-wrapper.jar
+        if: steps.exists.outputs.skip == 'false'
+        uses: gradle/actions/wrapper-validation@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+
+      - name: Kiểm tra biến chứng chỉ ký
+        if: steps.exists.outputs.skip == 'false'
+        env:
+          EXPECTED_CERT: ${{ vars.BANDUONG_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          c=$(printf '%s' "${EXPECTED_CERT:-}" | tr 'A-F' 'a-f' | tr -d ': ')
+          if ! [[ "$c" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Thiếu hoặc sai biến BANDUONG_CERT_SHA256 (SHA-256 chứng chỉ ký, 64 chữ số hex). Xem ban-duong/README.md, mục “Phát hành bản Android”. / Missing or malformed repository variable BANDUONG_CERT_SHA256"
+            exit 1
+          fi
+
+      - name: Giải mã khoá ký
+        if: steps.exists.outputs.skip == 'false'
+        env:
+          KS_B64: ${{ secrets.BANDUONG_KEYSTORE_B64 }}
+          KS_PASS: ${{ secrets.BANDUONG_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.BANDUONG_KEY_ALIAS }}
+          KEY_PASS: ${{ secrets.BANDUONG_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          missing=""
+          [ -n "${KS_B64}" ] || missing="$missing BANDUONG_KEYSTORE_B64"
+          [ -n "${KS_PASS}" ] || missing="$missing BANDUONG_KEYSTORE_PASSWORD"
+          [ -n "${KEY_ALIAS}" ] || missing="$missing BANDUONG_KEY_ALIAS"
+          [ -n "${KEY_PASS}" ] || missing="$missing BANDUONG_KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::Thiếu secret khoá ký:$missing. Vào Settings › Secrets and variables › Actions của kho để thêm (xem ban-duong/README.md, mục “Phát hành bản Android”). / Missing signing secrets:$missing"
+            exit 1
+          fi
+          # Secret đã được GitHub che; che thêm giá trị bí danh để không lộ qua log của công cụ.
+          echo "::add-mask::${KEY_ALIAS}"
+          umask 077
+          ks="$RUNNER_TEMP/banduong-release.jks"
+          if ! printf '%s' "$KS_B64" | tr -d ' \r\n' | base64 --decode > "$ks" 2>/dev/null || [ ! -s "$ks" ]; then
+            echo "::error::BANDUONG_KEYSTORE_B64 không phải base64 hợp lệ / BANDUONG_KEYSTORE_B64 is not valid base64"
+            exit 1
+          fi
+          if ! keytool -list -keystore "$ks" -storepass:env KS_PASS -alias "$KEY_ALIAS" >/dev/null 2>&1; then
+            echo "::error::Không mở được khoá ký (sai mật khẩu kho khoá hoặc bí danh) / cannot open keystore (wrong store password or alias)"
+            exit 1
+          fi
+          # keytool -list không dùng mật khẩu khoá: mở đúng khoá riêng như Gradle sẽ làm (KeyStore.getKey), để sai
+          # BANDUONG_KEY_PASSWORD báo lỗi rõ ở đây chứ không thành lỗi ký khó hiểu trong Gradle.
+          chk="$RUNNER_TEMP/KeyCheck.java"
+          cat > "$chk" <<'JAVA'
+          import java.io.File;
+          import java.security.KeyStore;
+          import java.security.PrivateKey;
+          public class KeyCheck {
+              public static void main(String[] a) throws Exception {
+                  KeyStore ks = KeyStore.getInstance(new File(a[0]), System.getenv("KS_PASS").toCharArray());
+                  Object k = ks.getKey(System.getenv("KEY_ALIAS"), System.getenv("KEY_PASS").toCharArray());
+                  if (!(k instanceof PrivateKey)) System.exit(2);
+              }
+          }
+          JAVA
+          if ! java "$chk" "$ks" >/dev/null 2>&1; then
+            rm -f "$chk"
+            echo "::error::Sai mật khẩu khoá (BANDUONG_KEY_PASSWORD) hoặc bí danh không phải khoá riêng / wrong key password or alias is not a private key"
+            exit 1
+          fi
+          rm -f "$chk"
+          echo "BANDUONG_KEYSTORE_FILE=$ks" >> "$GITHUB_ENV"
+
+      - name: Build bản release đã ký
+        if: steps.exists.outputs.skip == 'false'
+        working-directory: ban-duong/android
+        env:
+          # Chỉ bước này thấy mật khẩu (app/build.gradle.kts đọc từ biến môi trường).
+          BANDUONG_KEYSTORE_PASSWORD: ${{ secrets.BANDUONG_KEYSTORE_PASSWORD }}
+          BANDUONG_KEY_ALIAS: ${{ secrets.BANDUONG_KEY_ALIAS }}
+          BANDUONG_KEY_PASSWORD: ${{ secrets.BANDUONG_KEY_PASSWORD }}
+        run: ./gradlew --no-daemon --stacktrace :app:assembleRelease
+
+      - name: Xác minh APK và viết update.json
+        if: steps.exists.outputs.skip == 'false'
+        id: out
+        env:
+          CODE: ${{ steps.ver.outputs.code }}
+          NAME: ${{ steps.ver.outputs.name }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          # Biến của kho (không bí mật, bắt buộc) chứa SHA-256 chứng chỉ ký, để chặn nhầm khoá.
+          EXPECTED_CERT: ${{ vars.BANDUONG_CERT_SHA256 }}
+        run: |
+          set -euo pipefail
+          export LC_ALL=C.UTF-8
+          apk=ban-duong/android/app/build/outputs/apk/release/app-release.apk
+          if [ ! -f "$apk" ]; then
+            echo "::error::Không có app-release.apk đã ký / signed app-release.apk not found"
+            exit 1
+          fi
+          bt=$(ls -d "$ANDROID_HOME"/build-tools/*/ | sort -V | tail -n 1)
+          "${bt}apksigner" verify --verbose --print-certs "$apk" | tee "$RUNNER_TEMP/certs.txt"
+          cert=$(sed -n 's/^Signer #1 certificate SHA-256 digest: \([0-9a-f]\{64\}\)$/\1/p' "$RUNNER_TEMP/certs.txt")
+          [ -n "$cert" ] || { echo "::error::Không đọc được chứng chỉ ký / no signer certificate"; exit 1; }
+          if grep -q '^Signer #2' "$RUNNER_TEMP/certs.txt"; then echo "::error::APK có nhiều chữ ký / multiple signers"; exit 1; fi
+          if [ "$cert" != "$(printf '%s' "${EXPECTED_CERT:-}" | tr 'A-F' 'a-f' | tr -d ': ')" ]; then
+            echo "::error::Chứng chỉ ký khác BANDUONG_CERT_SHA256: ứng dụng đã cài sẽ không nhận bản này / signing certificate mismatch"
+            exit 1
+          fi
+          badging=$("${bt}aapt2" dump badging "$apk")
+          pkg=$(printf '%s\n' "$badging" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")
+          vcode=$(printf '%s\n' "$badging" | sed -n "s/^package: .* versionCode='\([0-9]*\)'.*/\1/p")
+          vname=$(printf '%s\n' "$badging" | sed -n "s/^package: .* versionName='\([^']*\)'.*/\1/p")
+          minsdk=$(printf '%s\n' "$badging" | sed -n "s/^minSdkVersion:'\([0-9]*\)'.*/\1/p")
+          if [ "$pkg" != "vn.banduong.app" ] || [ "$vcode" != "$CODE" ] || [ "$vname" != "$NAME" ] || [ -z "$minsdk" ]; then
+            echo "::error::APK không khớp: gói $pkg, versionCode $vcode, versionName $vname / APK metadata mismatch"
+            exit 1
+          fi
+          notes=$(tr '\r\n\t' '   ' < ban-duong/android/release-notes.txt | sed 's/  */ /g; s/^ //; s/ $//')
+          if [ -z "$notes" ] || [ "$(printf '%s' "$notes" | wc -m)" -gt 300 ]; then
+            echo "::error::release-notes.txt phải có 1–300 ký tự / release notes must be 1–300 characters"
+            exit 1
+          fi
+          out="$RUNNER_TEMP/release"
+          mkdir -p "$out"
+          cp "$apk" "$out/ban-duong.apk"
+          sha=$(sha256sum "$out/ban-duong.apk" | cut -d' ' -f1)
+          size=$(stat -c %s "$out/ban-duong.apk")
+          if [ "$size" -gt 83886080 ]; then echo "::error::APK quá 80 MiB / APK larger than 80 MiB"; exit 1; fi
+          jq -n --argjson versionCode "$CODE" --arg versionName "$NAME" --arg sha256 "$sha" --argjson size "$size" \
+            --argjson minSdk "$minsdk" --arg notes "$notes" --arg tag "$TAG" \
+            '{versionCode: $versionCode, versionName: $versionName, sha256: $sha256, size: $size, minSdk: $minSdk, notes: $notes, tag: $tag}' \
+            > "$out/update.json"
+          cat "$out/update.json"
+          {
+            echo "$notes"
+            echo
+            echo "- versionCode: $CODE"
+            echo "- SHA-256 (ban-duong.apk): \`$sha\`"
+            echo "- Chứng chỉ ký (SHA-256): \`$cert\`"
+            echo
+            echo "Ứng dụng Bạn Đường đã cài tự thấy bản này (Cài đặt › Phiên bản ứng dụng › Kiểm tra cập nhật)."
+          } > "$out/notes.md"
+          echo "dir=$out" >> "$GITHUB_OUTPUT"
+
+      - name: Tạo bản phát hành
+        if: steps.exists.outputs.skip == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          NAME: ${{ steps.ver.outputs.name }}
+          OUT: ${{ steps.out.outputs.dir }}
+        run: |
+          set -euo pipefail
+          # Bản nháp còn sót từ lần chạy hỏng trước (chưa có thẻ): xoá để tạo lại.
+          if [ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null || true)" = "true" ]; then
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
+          fi
+          # Tạo nháp kèm đủ hai tệp rồi mới công khai: ứng dụng không bao giờ thấy bản phát hành thiếu tệp.
+          # --latest=false: không giành nhãn "Latest" của 9router.
+          gh release create "$TAG" "$OUT/ban-duong.apk" "$OUT/update.json" \
+            --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --latest=false \
+            --title "Bạn Đường $NAME" --notes-file "$OUT/notes.md"
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+
+      - name: Xoá khoá ký
+        if: always()
+        run: rm -f "$RUNNER_TEMP/banduong-release.jks"
