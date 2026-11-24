@@ -1,6 +1,7 @@
 // Kết nối với ô tô qua bộ đọc OBD-II (chip ELM327 hoặc tương thích):
 // - Bluetooth Low Energy qua Web Bluetooth (Chrome/Edge/Samsung Internet trên Android, Chrome máy tính);
 // - Bluetooth thường (SPP) qua Web Serial, sau khi đã ghép đôi bộ đọc trong cài đặt Bluetooth của máy.
+// - Trong ứng dụng Android Bạn Đường (WebView không có hai thứ trên): cả hai loại qua máy, xem obdnative.js.
 // ObdClient nói chuyện với bộ đọc qua một "transport" thay được, nên kiểm thử dùng bộ ELM327 giả.
 // Riêng tư: dữ liệu của xe chỉ dùng trên máy, không gửi đi đâu; không đọc số VIN.
 // Chỉ chạm vào navigator/document bên trong hàm, để module vẫn nạp được trong Node khi kiểm thử.
@@ -20,6 +21,14 @@ import {
   pidBytesAll,
   pidCommand,
 } from './elm327.js';
+import { createNativeObd, isNativeObdDevice, nativeObdSupport } from './obdnative.js';
+
+// Cổng OBD của ứng dụng Android: tạo lần đầu cần tới; null trên trình duyệt thường.
+let nativeObd;
+function nativePort() {
+  if (nativeObd === undefined) nativeObd = createNativeObd(globalThis, { makeError: (m) => new ObdError(m) });
+  return nativeObd;
+}
 
 // ---------------------------------------------------------------------------------------------
 // Hỗ trợ của trình duyệt
@@ -27,9 +36,12 @@ import {
 /**
  * Trình duyệt này dùng được Bluetooth (BLE) / Web Serial hay không, và lý do nếu không.
  * @param env đối tượng toàn cục (mặc định globalThis), truyền vào để kiểm thử
- * @returns { ble, serial, secure, reason: 'insecure' | 'ios' | 'webview' | 'firefox' | null }
+ * @returns { ble, serial, secure, reason: 'insecure' | 'ios' | 'webview' | 'firefox' | 'nobt' | null, native? }
  */
 export function detectSupport(env = globalThis) {
+  // Trong ứng dụng Android: Bluetooth do máy làm, không cần Web Bluetooth/Web Serial.
+  const app = nativeObdSupport(env);
+  if (app) return { ble: app.ble, serial: app.spp, secure: true, reason: app.ble ? null : 'nobt', native: true };
   const nav = env?.navigator;
   const loc = env?.location;
   const ua = String(nav?.userAgent || '');
@@ -107,6 +119,8 @@ const canWrite = (p) => Boolean(p && (p.write || p.writeWithoutResponse));
  * @returns Promise<BluetoothDevice>
  */
 export function requestBleDevice(all = false, nav = globalThis.navigator) {
+  const app = nativePort();
+  if (app) return app.pick('ble', all);
   const bt = nav?.bluetooth;
   if (!bt?.requestDevice) return Promise.reject(new Error('Trình duyệt này không hỗ trợ Bluetooth trên web.'));
   const optionalServices = [...BLE_SERVICES];
@@ -189,6 +203,7 @@ async function writeBle(ch, text) {
  * Tên chung (khi thiết bị không có tên) viết thường vì luôn đứng giữa câu: "Đang kết nối với bộ OBD Bluetooth…".
  */
 export function createBleTransport(device) {
+  if (isNativeObdDevice(device)) return device.port.transport(device);
   let handlers = null;
   let rx = null;
   let tx = null;
@@ -259,6 +274,8 @@ export const SPP_UUID = '00001101-0000-1000-8000-00805f9b34fb';
 
 /** Mở hộp chọn cổng (bộ đọc Bluetooth thường đã ghép đôi). Gọi đồng bộ trong hàm xử lý bấm. */
 export function requestSerialPort(nav = globalThis.navigator) {
+  const app = nativePort();
+  if (app) return app.pick('spp');
   const serial = nav?.serial;
   if (!serial?.requestPort) return Promise.reject(new Error('Trình duyệt này không hỗ trợ cổng nối tiếp (Web Serial).'));
   return serial.requestPort({ filters: [{ bluetoothServiceClassId: SPP_UUID }] });
@@ -269,6 +286,8 @@ export function requestSerialPort(nav = globalThis.navigator) {
  * @returns Promise<transport | null>
  */
 export async function reopenSerial(nav = globalThis.navigator) {
+  // Ứng dụng Android: không tự nối lại thiết bị nào; người dùng chọn lại trong hộp chọn của máy mỗi lần mở ứng dụng.
+  if (nativePort()) return null;
   const serial = nav?.serial;
   if (!serial?.getPorts) return null;
   let ports = [];
@@ -293,6 +312,7 @@ export async function reopenSerial(nav = globalThis.navigator) {
  * Tên viết thường vì luôn đứng giữa câu: "Đang kết nối với bộ OBD Bluetooth thường…".
  */
 export function createSerialTransport(port) {
+  if (isNativeObdDevice(port)) return port.port.transport(port);
   let handlers = null;
   let reader = null;
   let writer = null;

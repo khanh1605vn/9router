@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Mũi tên dẫn đường, cùng hình với icons/icon.svg của ứng dụng web. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#FFFFFF"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="2.8"
+        android:strokeLineJoin="round"
+        android:pathData="M54,32 L71.7,76 L54,66.9 L36.3,76 Z" />
+</vector>

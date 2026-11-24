@@ -29,6 +29,18 @@ import {
   requestBleDevice,
   requestSerialPort,
 } from './obd.js';
+import {
+  alertsFrom,
+  cameraStatus,
+  createCarBridge,
+  maneuverFrom,
+  obdStatus,
+  positionFrom,
+  RoadsMemo,
+  ROADS_RADIUS_M,
+  roadsNear,
+  routeWindow,
+} from './carbridge.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -77,6 +89,11 @@ const state = {
   routeAbort: null,
   searchAbort: null,
   lastSavedPos: 0,
+  // Cho màn hình Android Auto (js/carbridge.js): số đang hiện trên đồng hồ, vị trí đang hiện, mục trên thanh cảnh báo.
+  speedFeed: null, // { kmh, source: 'gps'|'obd', sp (SpeedMonitor.update), at (ms) }
+  shown: null, // lần định vị đang hiện (đã bám tuyến khi dẫn đường)
+  alertFeed: null, // { point: AlertEngine.update().active, signs: SignEngine.update() }
+  camFeed: 'off', // trạng thái camera nhận diện biển theo hợp đồng (cameraStatus), cập nhật qua camctl.onChange
 };
 
 const locator = new LocationService();
@@ -405,7 +422,8 @@ function openReport() {
 
 // ---------- Tốc độ và cảnh báo ----------
 
-function renderSpeed(fix, sp) {
+function renderSpeed(fix, sp, source = 'gps') {
+  state.speedFeed = { kmh: fix.speed * 3.6, source, sp, at: Date.now() };
   $('speedo').hidden = false;
   $('speedValue').textContent = String(Math.round(fix.speed * 3.6));
   const box = $('speedBox');
@@ -493,6 +511,7 @@ function renderAlert(pointResult, signResult = null) {
   const bar = $('alertBar');
   const p = pointResult?.active || null;
   const s = signResult?.active || null;
+  state.alertFeed = p || signResult ? { point: p, signs: signResult } : null;
   let show = null;
   if (p && (!s || p.distance <= s.distance)) {
     show = { key: `p:${p.point.id}`, distance: p.distance, reach: p.reach, info: p.info };
@@ -886,6 +905,7 @@ function onFix(fix) {
     }
     if (p.arrived) {
       map.setPuck(shown);
+      state.shown = shown;
       setTimeout(() => state.mode === 'nav' && endNav(true), 1200);
       return;
     }
@@ -893,6 +913,7 @@ function onFix(fix) {
   }
 
   map.setPuck(shown);
+  state.shown = shown;
   roads.ensureAround(fix.coord, fix.speed > 2 ? fix.heading : null);
 
   const s = store.settings;
@@ -913,7 +934,7 @@ function onFix(fix) {
     camera: camctl.speedLimit, // chỉ hạ, không bao giờ nâng giới hạn
     camSpeed: s.camSpeed,
   });
-  renderSpeed(speedFix, sp);
+  renderSpeed(speedFix, sp, kmh == null ? 'gps' : 'obd');
 
   if (driving) {
     // Đường ngang đường sắt nay do bộ máy biển báo đọc, nên không đưa vào bộ cảnh báo điểm nữa.
@@ -967,6 +988,7 @@ function onFix(fix) {
       }
     }
   }
+  carBridge?.publish(carFeed);
 }
 
 // ---------- Địa điểm, tìm kiếm, chọn tuyến ----------
@@ -1177,6 +1199,7 @@ const UNSUPPORTED = {
   webview: 'Trang đang mở bên trong ứng dụng khác (Zalo, Facebook…), nơi không có Bluetooth. Hãy mở trang bằng Chrome.',
   firefox: 'Firefox không hỗ trợ Bluetooth trên web. Hãy dùng Chrome hoặc Samsung Internet trên Android.',
   other: 'Trình duyệt này không hỗ trợ Bluetooth trên web. Hãy dùng Chrome hoặc Samsung Internet trên Android.',
+  nobt: 'Điện thoại này không hỗ trợ Bluetooth Low Energy.',
 };
 
 const carReady = () => car.client != null && car.state === 'ready';
@@ -1347,7 +1370,7 @@ async function startObd(transport, { serial = false, quiet = false } = {}) {
     renderObdPanel();
   });
   client.onData((snap) => onCarData(client, snap));
-  client.setPaused(document.hidden);
+  client.setPaused(obdShouldPause());
   client.start();
   renderObdPanel();
 }
@@ -1449,8 +1472,53 @@ function onCarData(client, snap) {
     camera: camctl.speedLimit,
     camSpeed: s.camSpeed,
   });
-  renderSpeed(f, sp);
+  renderSpeed(f, sp, 'obd');
   speakSpeed(sp);
+  carBridge?.publish(carFeed);
+}
+
+// ---------- Màn hình Android Auto ----------
+
+// Chỉ có khi trang chạy trong ứng dụng Android (đối tượng kênh do ứng dụng gắn vào); trên trình duyệt thường là null và mọi lệnh
+// carBridge?.… không làm gì.
+const carBridge = createCarBridge();
+const carRoads = carBridge ? new RoadsMemo() : null;
+
+// Bộ OBD thôi hỏi xe khi trang bị ẩn (đỡ tốn pin), trừ khi đang chiếu lên màn hình xe: lúc đó điện thoại thường khoá
+// màn hình hoặc mở ứng dụng khác, mà màn hình xe vẫn cần tốc độ.
+const obdShouldPause = () => document.hidden && !carBridge?.carConnected;
+function applyObdPause() {
+  car.client?.setPaused(obdShouldPause());
+}
+carBridge?.onChange(applyObdPause);
+
+/**
+ * Dữ liệu thô cho thông điệp "state" lên màn hình xe (carbridge.js tự kiểm tra và giới hạn). Cầu nối chỉ gọi hàm này
+ * khi tới lượt gửi (tối đa 4 lần/giây). Tốc độ, giới hạn và cảnh báo là đúng những gì đồng hồ tốc độ, thanh cảnh báo
+ * vàng và dải biển đang hiện.
+ */
+function carFeed() {
+  const now = Date.now();
+  const fix = state.fix;
+  const sf = state.speedFeed;
+  const fresh = Boolean(fix && sf && now - sf.at <= SPEED_STALE_MS);
+  const shown = fix ? state.shown || fix : null;
+  const nav = state.mode === 'nav' && state.route ? state.route : null;
+  return {
+    speed: fresh ? sf.kmh : null,
+    speedSource: fresh ? sf.source : null,
+    limit: fix ? (sf?.sp?.limit ?? null) : null,
+    overSpeed: fresh && sf.sp?.level === 'over',
+    position: shown ? positionFrom(shown, fix.accuracy, state.lastFixAt) : null,
+    alerts: isDriving() && state.alertFeed ? alertsFrom(state.alertFeed.point, state.alertFeed.signs) : [],
+    maneuver: nav ? maneuverFrom(nav, state.progress) : null,
+    route: nav ? routeWindow(nav, state.progress?.s ?? 0) : [],
+    nearbyRoads: shown
+      ? carRoads.get(shown.coord, now, () => roadsNear(roads.waysNear(shown.coord, ROADS_RADIUS_M), shown.coord))
+      : [],
+    camera: state.camFeed,
+    obd: obdStatus(car.state, car.client != null),
+  };
 }
 
 // ---------- Cài đặt ----------
@@ -1644,7 +1712,7 @@ function bind() {
   });
   document.addEventListener('visibilitychange', () => {
     updateWakeLock();
-    car.client?.setPaused(document.hidden); // trang bị ẩn thì thôi hỏi xe để đỡ tốn pin
+    applyObdPause(); // trang bị ẩn thì thôi hỏi xe để đỡ tốn pin, trừ khi đang chiếu lên màn hình xe
   });
 
   $('alertBar').addEventListener('click', showSignDetail);
@@ -1732,6 +1800,8 @@ function bind() {
 
 async function boot() {
   bind();
+  carBridge?.start(); // chỉ khi chạy trong ứng dụng Android
+
   applyAudio();
   applyCarUi();
   state.dark = wantDark();
@@ -1768,6 +1838,10 @@ async function boot() {
     if (what === 'reports') refreshPoints();
   });
   camctl.init(); // không mở camera: chỉ đọc kho biển đã học và labels.json
+  if (carBridge) {
+    state.camFeed = cameraStatus(camctl.state);
+    camctl.onChange((st) => (state.camFeed = cameraStatus(st)));
+  }
   initCamUi(camctl, { store, map, openModal, closeOverlays, toast }); // mục Cài đặt, nút camera, danh sách biển đã học
   // Bộ chạy thử trên trình duyệt (tests/browser) đặt sẵn globalThis.__BD_TEST__ để đọc bộ điều phối camera.
   if (globalThis.__BD_TEST__ && typeof globalThis.__BD_TEST__ === 'object') globalThis.__BD_TEST__.controller = camctl;
@@ -1782,6 +1856,7 @@ async function boot() {
   setInterval(() => {
     markSpeedStale();
     camctl.tick();
+    carBridge?.publish(carFeed); // tốc độ cũ, trạng thái camera và OBD; giữ nhịp tối thiểu cho màn hình xe
   }, 1000);
 
   setInterval(() => {

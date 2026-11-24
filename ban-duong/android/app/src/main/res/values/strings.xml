@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Bạn Đường</string>
+
+    <!-- Màn hình điện thoại -->
+    <string name="web_load_error">Không mở được giao diện ứng dụng. Hãy thoát ra rồi mở lại Bạn Đường.</string>
+    <string name="web_renderer_restarted">Giao diện vừa được khởi động lại.</string>
+    <string name="no_browser">Không tìm thấy trình duyệt để mở liên kết này.</string>
+    <string name="permission_location_denied">Bạn Đường cần quyền vị trí để dẫn đường và cảnh báo tốc độ. Bạn có thể bật lại trong Cài đặt của điện thoại.</string>
+    <string name="permission_camera_denied">Chưa có quyền camera nên chưa nhận diện được biển báo. Bạn có thể bật lại trong Cài đặt của điện thoại.</string>
+    <string name="webview_too_old">Thành phần WebView trên máy đã cũ, một số tính năng có thể không chạy. Hãy cập nhật Android System WebView trên Cửa hàng Play.</string>
+
+    <!-- Màn hình ô tô (Android Auto) -->
+    <string name="car_title">Bạn Đường</string>
+    <string name="car_waiting_title">Chưa có dữ liệu</string>
+    <string name="car_waiting">Khi đã dừng xe an toàn, hãy mở ứng dụng Bạn Đường trên điện thoại để bắt đầu.</string>
+    <string name="car_stale_title">Mất dữ liệu từ điện thoại</string>
+    <string name="car_stale">Chưa nhận được dữ liệu mới. Khi đã dừng xe an toàn, hãy mở ứng dụng Bạn Đường trên điện thoại.</string>
+    <string name="car_speed">%1$d km/h</string>
+    <string name="car_speed_unknown">Chưa có tốc độ</string>
+    <string name="car_limit">giới hạn %1$d km/h</string>
+    <string name="car_limit_unknown">chưa có giới hạn</string>
+    <string name="car_speed_line">%1$s · %2$s</string>
+    <string name="car_over_speed_line">Quá tốc độ: %1$s · %2$s</string>
+    <string name="car_alert_line">%1$s · còn %2$s</string>
+    <string name="car_maneuver_line">%1$s · còn %2$s</string>
+    <string name="car_no_alert">Không có cảnh báo phía trước</string>
+    <string name="car_gps_only">Chỉ có tốc độ GPS, chưa có cảnh báo. Khi đã dừng xe an toàn, hãy mở ứng dụng Bạn Đường trên điện thoại.</string>
+    <string name="car_destination">Điểm đến</string>
+    <string name="car_alert_toast">%1$s, còn %2$s</string>
+    <string name="car_alert_subtitle">Còn %1$s</string>
+    <string name="car_distance_m">%1$d m</string>
+    <string name="car_distance_km">%1$s km</string>
+    <string name="car_action_zoom_auto">Tự động</string>
+    <string name="car_action_zoom_near">Gần</string>
+    <string name="car_action_zoom_far">Xa</string>
+    <string name="car_action_heading_up">Hướng xe</string>
+    <string name="car_action_north_up">Hướng bắc</string>
+    <string name="car_unit_kmh">km/h</string>
+    <string name="car_map_stale">Dữ liệu đã cũ</string>
+    <string name="car_map_gps_only">Chỉ có GPS, chưa có cảnh báo</string>
+    <string name="car_map_speed_unknown" translatable="false">–</string>
+
+    <!-- Hộp chọn bộ OBD (WebView không có Web Bluetooth / Web Serial nên máy tự làm). -->
+    <string name="obd_pick_title_ble">Chọn bộ OBD Bluetooth</string>
+    <string name="obd_pick_title_spp">Chọn bộ OBD Bluetooth thường</string>
+    <string name="obd_pick_scanning">Đang tìm thiết bị ở gần…</string>
+    <string name="obd_pick_scan_done">Đã dừng tìm. Đóng rồi mở lại để tìm tiếp.</string>
+    <string name="obd_pick_none_ble">Chưa thấy bộ OBD nào. Hãy cắm bộ OBD vào xe, bật khoá điện rồi thử lại, hoặc bấm “Hiện mọi thiết bị”.</string>
+    <string name="obd_pick_location_off">Chưa thấy thiết bị nào. Trên Android 11 trở xuống, cần bật Vị trí của điện thoại để tìm thiết bị Bluetooth.</string>
+    <string name="obd_pick_paired">Các thiết bị đã ghép đôi với điện thoại:</string>
+    <string name="obd_pick_none_spp">Không thấy bộ OBD trong các thiết bị đã ghép đôi. Bấm “Hiện mọi thiết bị” để xem tất cả.</string>
+    <string name="obd_pick_show_all">Hiện mọi thiết bị</string>
+    <string name="obd_pick_show_obd">Chỉ hiện bộ OBD</string>
+    <string name="obd_pick_cancel">Huỷ</string>
+    <string name="obd_pick_unnamed">Thiết bị không tên</string>
+    <string name="obd_pick_item">%1$s · …%2$s</string>
+</resources>

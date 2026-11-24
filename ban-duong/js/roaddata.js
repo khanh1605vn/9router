@@ -738,6 +738,37 @@ export class RoadData {
     return out;
   }
 
+  /**
+   * Các đường có ít nhất một đoạn trong hình vuông cạnh 2 × radius (m) quanh vị trí (để vẽ bản đồ trên màn hình ô tô,
+   * js/carbridge.js). Một đường có mặt ở nhiều ô chỉ lấy bản của ô mới nhất. radius tối đa 2 km.
+   */
+  waysNear(coord, radius) {
+    const r = Math.min(2000, Math.max(0, radius));
+    const dLat = r / 110000;
+    const dLon = dLat / Math.max(0.05, Math.cos((coord[1] * Math.PI) / 180));
+    const x0 = Math.floor((coord[0] - dLon) / GRID);
+    const x1 = Math.floor((coord[0] + dLon) / GRID);
+    const y0 = Math.floor((coord[1] - dLat) / GRID);
+    const y1 = Math.floor((coord[1] + dLat) / GRID);
+    const owner = new Map(); // id đường → ô có bản được dùng
+    const out = [];
+    for (const cell of this.#neighbours(coord)) {
+      for (let x = x0; x <= x1; x++) {
+        for (let y = y0; y <= y1; y++) {
+          const bucket = cell.grid.get(`${x}:${y}`);
+          if (!bucket) continue;
+          for (let b = 0; b < bucket.length; b += 2) {
+            const way = cell.ways[bucket[b]];
+            if (owner.has(way.id)) continue;
+            owner.set(way.id, cell);
+            out.push(way);
+          }
+        }
+      }
+    }
+    return out;
+  }
+
   /** Các quan hệ cấm rẽ bắt đầu từ đường này (theo id đường OSM). */
   restrictionsFrom(wayId) {
     const seen = new Set();

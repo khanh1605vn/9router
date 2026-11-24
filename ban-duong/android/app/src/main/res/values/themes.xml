@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Giao diện do trang web vẽ; vỏ Android chỉ cần nền cùng màu để không chớp trắng khi mở. -->
+    <style name="Theme.BanDuong" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/brand_blue</item>
+        <item name="android:colorPrimary">@color/brand_blue</item>
+        <item name="android:colorAccent">@color/brand_blue</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+    </style>
+</resources>

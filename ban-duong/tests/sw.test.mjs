@@ -162,8 +162,8 @@ function loadSw({ fetchImpl } = {}) {
 
 test('VERSION đã tăng và tên bộ nhớ đệm ML cố định, không gắn VERSION', () => {
   const { sw } = loadSw();
-  assert.equal(sw.VERSION, 'v7');
-  assert.equal(sw.SHELL, 'banduong-shell-v7');
+  assert.equal(sw.VERSION, 'v9');
+  assert.equal(sw.SHELL, 'banduong-shell-v9');
   assert.equal(sw.ML, 'banduong-ml-1');
   assert.ok(!sw.ML.startsWith('banduong-shell-'));
 });
@@ -184,7 +184,7 @@ test('tệp ML: ưu tiên bộ nhớ đệm, khoá bằng cả địa chỉ gồ
   assert.ok(first.handled);
   assert.deepEqual(new Uint8Array(await first.response.arrayBuffer()), body);
   assert.deepEqual([...t.caches.get('banduong-ml-1').map.keys()], [url]);
-  assert.equal(t.caches.get('banduong-shell-v7'), undefined, 'không được lọt vào bộ nhớ đệm vỏ ứng dụng');
+  assert.equal(t.caches.get('banduong-shell-v9'), undefined, 'không được lọt vào bộ nhớ đệm vỏ ứng dụng');
 
   // Lần sau: không hỏi mạng nữa.
   const second = await t.dispatchFetch(url);
@@ -321,7 +321,7 @@ test('vỏ ứng dụng: như trước, ưu tiên mạng; mất mạng thì dùn
   assert.ok(r.handled);
   assert.equal(await r.response.text(), 'body of /ban-duong/js/main.js');
   await new Promise((res) => setTimeout(res, 0));
-  assert.ok(t.caches.get('banduong-shell-v7').map.has(`${SCOPE}js/main.js`));
+  assert.ok(t.caches.get('banduong-shell-v9').map.has(`${SCOPE}js/main.js`));
 
   online = false;
   const off = await t.dispatchFetch(`${SCOPE}js/main.js?x=1`);
@@ -337,7 +337,7 @@ test('vỏ ứng dụng: câu trả lời không ok không được lưu', async
   const t = loadSw({ fetchImpl: (req) => netResponse('nope', { status: 404, url: req.url }) });
   await t.dispatchFetch(`${SCOPE}js/missing.js`);
   await new Promise((res) => setTimeout(res, 0));
-  assert.equal(t.caches.get('banduong-shell-v7').map.size, 0);
+  assert.equal(t.caches.get('banduong-shell-v9').map.size, 0);
 });
 
 test('ô bản đồ vẫn ưu tiên bộ nhớ đệm như trước', async () => {
@@ -353,7 +353,7 @@ test('ô bản đồ vẫn ưu tiên bộ nhớ đệm như trước', async () 
 test('cài đặt: chỉ nạp trước SHELL_FILES, không có tệp ML, tests/ hay tools/', async () => {
   const t = loadSw();
   await t.dispatchLifecycle('install');
-  const added = t.caches.get('banduong-shell-v7').added;
+  const added = t.caches.get('banduong-shell-v9').added;
   assert.deepEqual(added, t.sw.SHELL_FILES);
   assert.equal(t.caches.get('banduong-ml-1'), undefined);
   for (const f of added) {
@@ -364,11 +364,11 @@ test('cài đặt: chỉ nạp trước SHELL_FILES, không có tệp ML, tests/
 
 test('kích hoạt: chỉ xoá banduong-shell-* cũ, giữ banduong-ml-1 và ô bản đồ', async () => {
   const t = loadSw();
-  for (const name of ['banduong-shell-v4', 'banduong-shell-v5', 'banduong-shell-v6', 'banduong-shell-v7', 'banduong-ml-1', 'banduong-tiles-v1']) {
+  for (const name of ['banduong-shell-v4', 'banduong-shell-v5', 'banduong-shell-v6', 'banduong-shell-v7', 'banduong-shell-v8', 'banduong-shell-v9', 'banduong-ml-1', 'banduong-tiles-v1']) {
     await t.caches.open(name);
   }
   await t.dispatchLifecycle('activate');
-  assert.deepEqual((await t.caches.keys()).sort(), ['banduong-ml-1', 'banduong-shell-v7', 'banduong-tiles-v1']);
+  assert.deepEqual((await t.caches.keys()).sort(), ['banduong-ml-1', 'banduong-shell-v9', 'banduong-tiles-v1']);
   assert.equal(t.calls.claim, 1);
 });
 

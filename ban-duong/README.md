@@ -173,6 +173,7 @@ Tính năng này **tắt sẵn** và đang thử nghiệm. Bật trong **Cài đ
 | `js/signengine.js` | Xét đoạn đường phía trước, chọn biển cần báo và thời điểm đọc |
 | `js/elm327.js` | Giao thức bộ đọc ELM327: danh sách lệnh được phép, giải mã dữ liệu, mã lỗi |
 | `js/obd.js` | Kết nối bộ OBD qua Web Bluetooth hoặc Web Serial, phiên đọc dữ liệu, nhắc tình trạng xe |
+| `js/obdnative.js` | Bộ OBD trong ứng dụng Android (WebView không có Web Bluetooth/Web Serial): hộp chọn thiết bị và kết nối Bluetooth do máy làm, trang chỉ gửi lệnh đọc trong danh sách được phép; trên trình duyệt thường không làm gì |
 | `js/voice.js` | Giọng đọc và âm báo |
 | `js/search.js` | Tìm địa điểm |
 | `js/store.js` | Cài đặt, địa điểm, điểm đánh dấu, nhật ký (lưu trên thiết bị) |
@@ -183,6 +184,7 @@ Tính năng này **tắt sẵn** và đang thử nghiệm. Bật trong **Cài đ
 | `js/vision.js`, `js/vision-worker.js`, `js/visionproto.js`, `js/mlmanifest.js` | Chạy mô hình nhận diện trong worker; kiểm SHA-256 của mọi tệp mô hình trước khi dùng |
 | `js/signtrack.js`, `js/signlearn.js`, `js/learnedsigns.js` | Bám biển qua các khung hình, đặt biển lên bản đồ, kho biển đã học (IndexedDB trên máy), xuất và nhập GeoJSON |
 | `js/evalcrops.js` | Ảnh biển để kiểm tra độ chính xác (chỉ khi người dùng bật) |
+| `js/carbridge.js` | Cầu nối với ứng dụng Android (màn hình Android Auto): gửi tốc độ, giới hạn, cảnh báo, chỉ dẫn rẽ, đoạn tuyến và đường quanh xe, đã kiểm tra và giới hạn theo hợp đồng; trên trình duyệt thường không làm gì |
 | `models/` | Mô hình nhận diện đã huấn luyện, danh sách nhãn, [thẻ mô hình](models/MODEL_CARD.md), ghi công ảnh Open Images (`ATTRIBUTION-openimages.csv`) |
 | `vendor/litert/` | LiteRT.js 2.6.0 (giấy phép Apache-2.0; bản WebAssembly có XNNPACK, giấy phép BSD; kèm `LICENSE` và `NOTICE-XNNPACK` trong thư mục) |
 | `tools/camera/` | Quy trình tạo dữ liệu và huấn luyện mô hình (không chạy trong ứng dụng), xem `tools/camera/README.md` |
