@@ -329,18 +329,48 @@ export class LearnedSigns {
   /**
    * @param backend  nơi lưu (memoryBackend() khi kiểm thử)
    * @param now      () → ms (đồng hồ của máy, dùng để tính số thứ tự ngày)
-   * @param labels   labels.json (để kiểm tra biển nhập từ tệp: chỉ nhận nhãn được học)
+   * @param labels   labels.json (để kiểm tra biển nhập từ tệp: chỉ nhận nhãn được học; và để "cất" bản ghi của nhãn
+   *                 không còn được học, xem #dormant)
+   * @param requireLabels  true: khi chưa có labels thì mọi bản ghi đều bị cất (không hiện, không cảnh báo) cho tới
+   *                 khi biết nhãn nào được học (CameraController dùng); false (mặc định): chưa có labels thì không lọc
    * @param random   () → [0, 1) để tạo mã bản ghi
    */
-  constructor({ backend = idbBackend(LEARNED_DB), now = () => Date.now(), labels = null, random = defaultRandom() } = {}) {
+  constructor({
+    backend = idbBackend(LEARNED_DB),
+    now = () => Date.now(),
+    labels = null,
+    requireLabels = false,
+    random = defaultRandom(),
+  } = {}) {
     this.backend = backend;
     this.now = now;
     this.random = random;
+    this.requireLabels = requireLabels === true;
     this.setLabels(labels);
   }
 
   setLabels(labels) {
+    const before = this.labels;
     this.labels = labels ? labelIndex(labels) : null;
+    // Bộ nhãn đổi thì tập bản ghi bị cất cũng đổi: báo cho bên nghe (bản đồ, số đếm, cảnh báo).
+    if (this.#loading && before !== this.labels) this.#emit();
+  }
+
+  /**
+   * Bản ghi "bị cất": nhãn của nó không có learn: true trong labels.json đang dùng (nhãn đã bị gỡ khỏi danh sách học,
+   * ví dụ mọi P.127 ở bản v1, DECISION.md), hoặc chưa có labels khi requireLabels. Bản ghi bị cất vẫn được giữ nguyên
+   * (không đổi trạng thái, không bị trừ điểm, vẫn có trong tệp xuất và bị "Xoá" xoá như mọi bản ghi) nhưng không hiện,
+   * không cảnh báo, không đọc, không vào bộ học (featsNear, recordsNear, list, match) nên không đổi giới hạn tốc độ.
+   * Bản sau học lại nhãn đó thì bản ghi tự dùng lại.
+   */
+  #dormant(r) {
+    if (!this.labels) return this.requireLabels;
+    return this.labels.get(labelOf(r.code, r.value))?.learn !== true;
+  }
+
+  /** Bản ghi đang dùng: chưa xác nhận hoặc đã xác nhận, và không bị cất. */
+  #active(r) {
+    return SHOWN.has(r.status) && !this.#dormant(r);
   }
 
   /** Đọc mọi bản ghi từ nơi lưu (một lần; gọi lại trả về cùng lời hứa). Bản ghi hỏng bị bỏ qua. */
@@ -370,10 +400,17 @@ export class LearnedSigns {
     return this.#records.size;
   }
 
-  /** Đếm theo trạng thái → { total, shown, candidate, confirmed, retired, suppressed }. */
+  /**
+   * Đếm theo trạng thái → { total, shown, candidate, confirmed, retired, suppressed, dormant }. Bản ghi chưa xác nhận
+   * hay đã xác nhận mà bị cất (#dormant) chỉ được đếm ở dormant, không ở shown, candidate hay confirmed.
+   */
   counts() {
-    const out = { total: this.#records.size, shown: 0, candidate: 0, confirmed: 0, retired: 0, suppressed: 0 };
+    const out = { total: this.#records.size, shown: 0, candidate: 0, confirmed: 0, retired: 0, suppressed: 0, dormant: 0 };
     for (const r of this.#records.values()) {
+      if (SHOWN.has(r.status) && this.#dormant(r)) {
+        out.dormant++;
+        continue;
+      }
       out[r.status]++;
       if (SHOWN.has(r.status)) out.shown++;
     }
@@ -484,7 +521,7 @@ export class LearnedSigns {
     this.expire();
     const out = [];
     for (const r of this.#near(coord, radius)) {
-      if (!SHOWN.has(r.status) || this.#superseded(r)) continue;
+      if (!this.#active(r) || this.#superseded(r)) continue;
       let f = this.#feats.get(r.id);
       if (!f) this.#feats.set(r.id, (f = featOf(r)));
       out.push(f);
@@ -504,6 +541,7 @@ export class LearnedSigns {
     const mine = rec.lastHitDay ?? -Infinity;
     for (const o of this.#near(rec.coord, Math.hypot(MATCH_ALONG, MATCH_LATERAL) + 1)) {
       if (o === rec || o.status !== 'confirmed' || o.code !== rec.code || (o.value ?? null) === (rec.value ?? null)) continue;
+      if (this.#dormant(o)) continue; // biển bị cất không che biển đang dùng
       if (!facingClose(o.facing, rec.facing)) continue;
       if (o.wayId != null && rec.wayId != null && o.wayId !== rec.wayId) continue; // biển của đường khác
       const { along, lateral } = offsets(rec.coord, o.coord, (rec.facing + 180) % 360);
@@ -516,7 +554,7 @@ export class LearnedSigns {
 
   /** Bản sao các bản ghi chưa xác nhận và đã xác nhận trong bán kính radius (m) (bộ học dùng để xét lượt đi qua). */
   recordsNear(coord, radius) {
-    return this.#near(coord, radius).filter((r) => SHOWN.has(r.status)).map(snapshot);
+    return this.#near(coord, radius).filter((r) => this.#active(r)).map(snapshot);
   }
 
   /** Bản sao một bản ghi theo id (có hoặc không có tiền tố 'L'), hoặc null. */
@@ -533,7 +571,7 @@ export class LearnedSigns {
   list({ near = null } = {}) {
     const rows = [];
     for (const r of this.#records.values()) {
-      if (!SHOWN.has(r.status)) continue;
+      if (!this.#active(r)) continue;
       rows.push({
         id: r.id,
         label: labelOf(r.code, r.value),
@@ -585,7 +623,7 @@ export class LearnedSigns {
           best = d;
           res.match = r;
         }
-      } else if (SHOWN.has(r.status)) res.conflicts.push(r);
+      } else if (this.#active(r)) res.conflicts.push(r);
     }
     return res;
   }
@@ -896,7 +934,8 @@ export class LearnedSigns {
   // ---- Xuất / nhập (PLAN §6.4) ----
 
   /**
-   * GeoJSON FeatureCollection các biển chưa xác nhận và đã xác nhận. Không có ngày, trừ khi withDates.
+   * GeoJSON FeatureCollection các biển chưa xác nhận và đã xác nhận (gồm cả biển bị cất, #dormant: tệp là dữ liệu của
+   * người dùng). Không có ngày, trừ khi withDates.
    * direction: hướng mặt biển nhìn về (độ), ghi rõ trong ban_duong:direction_meaning.
    * Các biển xếp theo toạ độ (kinh độ, vĩ độ), không theo thứ tự đã thấy: thứ tự trong tệp không lộ đường đã đi.
    */

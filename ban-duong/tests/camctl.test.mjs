@@ -5,6 +5,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { CameraLimit } from '../js/alerts.js';
 import { SIGN_CATALOGUE } from '../js/signs.js';
 import { buildLabels } from '../tools/camera/lib.mjs';
 import { DEFAULT_SETTINGS } from '../js/store.js';
@@ -24,6 +26,7 @@ import {
   importText,
   LABELS_PATH,
   learnableCount,
+  learnableRecord,
   learnedCaption,
   PAUSE_POLL_MS,
   PROGRESS_STEP,
@@ -61,8 +64,8 @@ const RUNTIME = [
 ];
 const MODELS = ['models/sign-det.int8.tflite', 'models/sign-cls.int8.tflite'];
 
-function manifest({ models = true, labelHash = sha(LABEL_BYTES) } = {}) {
-  const files = { [LABELS_PATH]: { sha256: labelHash, size: LABEL_BYTES.byteLength } };
+function manifest({ models = true, labelBytes = LABEL_BYTES, labelHash = sha(labelBytes) } = {}) {
+  const files = { [LABELS_PATH]: { sha256: labelHash, size: labelBytes.byteLength } };
   for (const p of [...RUNTIME, ...(models ? MODELS : [])]) files[p] = { sha256: FAKE_HASH, size: 1000 };
   return { version: 1, files };
 }
@@ -195,7 +198,7 @@ class FakeVision {
   }
 }
 
-function makeEnv({ perm = 'granted', mode = 'drive', settings = {}, models = true, labelHash, support = { ok: true, reason: null }, vision = null, cameraFactory = null, visionFactory, evalBackend = evalMemoryBackend() } = {}) {
+function makeEnv({ perm = 'granted', mode = 'drive', settings = {}, models = true, labelHash, labelBytes = LABEL_BYTES, learnedBackend = memoryBackend(), support = { ok: true, reason: null }, vision = null, cameraFactory = null, visionFactory, evalBackend = evalMemoryBackend() } = {}) {
   const env = { perm, mode, stationary: null, timers: [], clock: { t: 1000 }, logs: [], tracks: [], grabs: 0 };
   let timerId = 0;
   env.setTimeout = (fn, ms) => {
@@ -290,15 +293,15 @@ function makeEnv({ perm = 'granted', mode = 'drive', settings = {}, models = tru
     fetch: async (url, opts) => {
       env.fetches.push(url);
       if (env.fetchImpl) return env.fetchImpl(url, opts);
-      return new Response(LABEL_BYTES.slice(), { status: 200 });
+      return new Response(labelBytes.slice(), { status: 200 });
     },
-    manifest: manifest({ models, labelHash }),
+    manifest: manifest({ models, labelBytes, labelHash }),
     base: 'https://app.test/',
     now: () => 1_763_900_000_000 + env.clock.t,
     mono: () => env.clock.t,
     setTimeout: env.setTimeout,
     clearTimeout: env.clearTimeout,
-    learnedBackend: memoryBackend(),
+    learnedBackend,
     evalBackend,
     support: () => support,
     cameraFactory,
@@ -453,6 +456,71 @@ test('speedLearnable / learnableCount: chỉ P.127[n] có learn: true mới là 
   }
 });
 
+test('learnableRecord: chỉ nhãn learn: true của labels.json đang dùng; chưa có labels thì không', () => {
+  const installed = JSON.parse(readFileSync(new URL('../models/labels.json', import.meta.url), 'utf8'));
+  assert.equal(learnableRecord(LABELS, { code: 'P.127', value: '80' }), true);
+  assert.equal(learnableRecord(installed, { code: 'P.127', value: '80' }), false);
+  assert.equal(learnableRecord(installed, { code: 'P.115', value: null }), false);
+  assert.equal(learnableRecord(installed, { code: 'R.122' }), true);
+  for (const bad of [null, undefined, {}, { labels: 'x' }]) assert.equal(learnableRecord(bad, { code: 'R.122' }), false);
+  assert.equal(learnableRecord(installed, null), false);
+});
+
+test('nâng cấp lên labels.json đã cài: biển P.127[80] đã xác nhận từ bản dựng cũ không hiện, không cảnh báo, không tới CameraLimit; vẫn xuất và xoá được', async () => {
+  const installed = readFileSync(new URL('../models/labels.json', import.meta.url));
+  const bytes = new Uint8Array(installed.buffer, installed.byteOffset, installed.byteLength);
+  const day = dayNumber(1_763_900_000_000);
+  const row = (id, code, value, status) => ({
+    id, v: 1, code, value, family: 'ring', coord: [105.85, 21.03], facing: 270, wayId: null, junction: null, branch: null,
+    plate: null, status, L: 3.5, hitDays: 2, passes: 2, misses: 0, firstDay: day - 3, lastHitDay: day - 1, until: day + 300,
+    night: false, posErr: 4, src: 'camera', co: [],
+  });
+  const rows = () => [row('aaaaaaaaaaa1', 'P.127', '80', 'confirmed'), row('aaaaaaaaaaa2', 'R.122', null, 'confirmed')];
+  const env = makeEnv({ mode: 'browse', labelBytes: bytes, learnedBackend: memoryBackend(rows()) });
+  const init = env.ctl.init();
+  await env.ctl.learned.load();
+  // Kho đã đọc mà labels.json chưa tới: chưa biết nhãn nào được học, nên không có biển nào (requireLabels).
+  if (env.ctl.state.labels !== 'ok') assert.equal(env.ctl.learned.featsNear([105.85, 21.03], 100).length, 0);
+  await init;
+  assert.equal(env.ctl.state.labels, 'ok');
+  assert.deepEqual(env.ctl.learned.featsNear([105.85, 21.03], 100).map((f) => f.tags.traffic_sign), ['VN:R.122']);
+  assert.deepEqual(env.ctl.learned.recordsNear([105.85, 21.03], 100).map((r) => r.code), ['R.122']);
+  assert.deepEqual(env.ctl.list().map((r) => r.label), ['R.122']);
+  assert.deepEqual(env.ctl.state.counts, { learned: 1, confirmed: 1, candidates: 0, stored: 2 });
+  assert.equal(env.ctl.state.camSpeed, true, 'cài đặt camSpeed giữ nguyên (công tắc bị ẩn, không còn tác dụng)');
+  assert.equal(env.ctl.state.speedLearnable, false);
+  // Có tin đi qua của bản ghi cũ (ví dụ một tin còn sót): không tới CameraLimit; biển được học thì tới.
+  const stale = env.ctl.learned.get('aaaaaaaaaaa1');
+  assert.equal(stale.status, 'confirmed');
+  const heard = [];
+  const orig = CameraLimit.prototype.onPassed;
+  CameraLimit.prototype.onPassed = function (e) {
+    heard.push(e.record.code);
+    return orig.call(this, e);
+  };
+  try {
+    for (const fn of env.ctl.learner.listeners) {
+      fn({ record: stale, outcome: 'none', reason: 'late' });
+      fn({ record: env.ctl.learned.get('aaaaaaaaaaa2'), outcome: 'hit', reason: null });
+    }
+  } finally {
+    CameraLimit.prototype.onPassed = orig;
+  }
+  assert.ok(heard.length >= 1);
+  assert.ok(heard.every((c) => c === 'R.122'), 'P.127[80] (learn: false) không tới CameraLimit');
+  await park(env);
+  const ex = env.ctl.exportGeoJSON();
+  assert.equal(ex.count, 2, 'tệp xuất có mọi biển đang lưu');
+  await env.ctl.clear();
+  assert.equal(env.ctl.state.counts.stored, 0);
+  env.ctl.dispose();
+  // Đối chứng: cùng các dòng với labels.json học P.127 (bản dựng cũ): biển tốc độ được dùng.
+  const old = makeEnv({ mode: 'browse', learnedBackend: memoryBackend(rows()) });
+  await old.ctl.init();
+  assert.equal(old.ctl.learned.featsNear([105.85, 21.03], 100).length, 2);
+  old.ctl.dispose();
+});
+
 test('state: learnable và speedLearnable theo labels.json đã tải; chưa tải được thì null / false', async () => {
   const env = makeEnv({ mode: 'browse' });
   assert.equal(env.ctl.state.learnable, null);
@@ -469,7 +537,7 @@ test('state: learnable và speedLearnable theo labels.json đã tải; chưa t�
   bad.ctl.dispose();
 });
 
-test('labels.json sai mã băm: không dùng, bộ học vẫn có (để giới hạn camera nghe lượt đi qua), nhập tệp báo cần labels', async () => {
+test('labels.json sai mã băm: không dùng, bộ học vẫn có (kho chưa đưa biển nào cho tới khi có labels), nhập tệp báo cần labels', async () => {
   const env = makeEnv({ mode: 'browse', labelHash: 'b'.repeat(64) });
   await env.ctl.init();
   assert.equal(env.ctl.state.labels, 'error');

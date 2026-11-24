@@ -224,7 +224,7 @@ export function settingsView(st) {
     switchHint,
     checkDisabled: !parked || !available,
     storeDisabled: !parked,
-    exportDisabled: !parked || !(st?.counts?.learned > 0),
+    exportDisabled: !parked || !((st?.counts?.stored ?? st?.counts?.learned) > 0),
     parkedHint: !parked,
     evalShown: Number(st?.evalCount) > 0,
     // Công tắc biển tốc độ chỉ có nghĩa khi labels.json cho học biển tốc độ; không thì một dòng ghi chú thay chỗ.
@@ -905,7 +905,7 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
   function openExport() {
     if (!ctl.isParked()) return toast(TEXT.parkedOnly);
     const dates = el('input', { id: 'optCamDates', type: 'checkbox', class: 'switch' });
-    const n = st.counts.learned;
+    const n = st.counts.stored ?? st.counts.learned;
     const body = el(
       'div',
       { class: 'view' },
@@ -948,7 +948,7 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
   }
 
   function openClear() {
-    const n = st.counts.learned;
+    const n = st.counts.stored ?? st.counts.learned;
     // Còn ảnh kiểm tra đã lưu: hộp này nói rõ và cho xoá luôn (chọn sẵn), không âm thầm xoá hay bỏ sót.
     const evalBox = st.evalCount > 0 ? el('input', { type: 'checkbox', class: 'switch', checked: true }) : null;
     const body = el(

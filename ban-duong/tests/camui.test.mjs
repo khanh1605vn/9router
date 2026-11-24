@@ -178,6 +178,9 @@ test('settingsView: chỉ bật được khi xe đã đỗ; tắt và xoá luôn
   assert.equal(v.parkedHint, false);
   // Kho trống: không có gì để xuất.
   assert.equal(settingsView(st({ parked: true })).exportDisabled, true);
+  // Chỉ còn biển bị cất (nhãn đã bị gỡ khỏi danh sách học): vẫn xuất được.
+  assert.equal(settingsView(st({ parked: true, counts: { learned: 0, confirmed: 0, stored: 1 } })).exportDisabled, false);
+  assert.equal(settingsView(st({ parked: true, counts: { learned: 0, confirmed: 0, stored: 0 } })).exportDisabled, true);
   // Bản cài chưa có mô hình hoặc máy không chạy được: công tắc khoá kèm lý do; kho vẫn dùng được.
   v = settingsView(st({ parked: true, models: 'no-models', text: 'Bản cài này chưa có dữ liệu nhận diện biển.' }));
   assert.equal(v.switchDisabled, true);

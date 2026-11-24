@@ -24,7 +24,7 @@ import { CAMERA_ERROR_TEXT, CameraService, cameraConstraints, cameraSupport, CON
 import { CAPTURE_SPEED, captureBlock, DRIVING_MODES, foeFor, holdCamera, isParked, LevelScheduler, StillTimer } from './camsched.js';
 import { planFiles, quantile, verifyBytes, Vision, VISION_LIMITS } from './vision.js';
 import { ML_MANIFEST } from './mlmanifest.js';
-import { LearnedSigns, MAX_RECORDS } from './learnedsigns.js';
+import { labelOf, LearnedSigns, MAX_RECORDS } from './learnedsigns.js';
 import { CLS_MIN_PX, Learner, NOMINAL_W } from './signlearn.js';
 import { DEFAULT_HFOV, focalPx } from './signtrack.js';
 import { CAMERA_LIMIT_CODE, CameraLimit } from './alerts.js';
@@ -44,6 +44,18 @@ export const LABELS_PATH = 'models/labels.json';
 export function speedLearnable(labels) {
   const L = labels && Array.isArray(labels.labels) ? labels.labels : [];
   return L.some((l) => l && l.learn === true && l.code === CAMERA_LIMIT_CODE && l.value != null);
+}
+
+/**
+ * Bản ghi (hay nút biển { code, value }) có nhãn learn: true trong labels.json không. Chưa có labels: không. Bản ghi
+ * cũ của nhãn đã bị gỡ (ví dụ P.127[80] học từ bản dựng trước khi cài mô hình v1) thì không: nó không được đổi giới
+ * hạn trên đồng hồ tốc độ.
+ */
+export function learnableRecord(labels, rec) {
+  const L = labels && Array.isArray(labels.labels) ? labels.labels : null;
+  if (!L || !rec || typeof rec.code !== 'string') return false;
+  const label = labelOf(rec.code, rec.value ?? null);
+  return L.some((l) => l && l.learn === true && l.label === label);
 }
 
 /** Số loại biển được học (nhãn learn: true) của labels.json, hoặc null khi chưa có labels. */
@@ -318,7 +330,9 @@ export class CameraController {
   init() {
     if (this.#ready) return this.#ready;
     const o = this.#o;
-    this.#learned = new LearnedSigns({ backend: o.learnedBackend, now: o.now });
+    // requireLabels: chưa biết nhãn nào được học (labels.json chưa tải hay tải lỗi) thì không hiện, không cảnh báo biển
+    // nào; bản ghi của nhãn đã bị gỡ (learn: false) cũng vậy (LearnedSigns#dormant).
+    this.#learned = new LearnedSigns({ backend: o.learnedBackend, now: o.now, requireLabels: true });
     this.#limit = new CameraLimit();
     this.#sched = new LevelScheduler({ now: o.mono });
     this.#offs.push(
@@ -489,13 +503,18 @@ export class CameraController {
     }
   }
 
-  /** Bộ học dùng đúng đối tượng labels của kho. Chưa có labels: vẫn tạo (CameraLimit vẫn nghe được lượt đi qua). */
+  /**
+   * Bộ học dùng đúng đối tượng labels của kho. Chưa có labels: vẫn tạo, nhưng kho chưa đưa bản ghi nào (requireLabels).
+   * CameraLimit chỉ nghe lượt đi qua của biển có nhãn learn: true trong labels.json đang dùng (learnableRecord).
+   */
   #makeLearner() {
     if (this.#learner && (this.#learnerLabels === this.#labels || !this.#labels)) return;
     const o = this.#o;
     const learner = new Learner({ store: this.#learned, roads: o.roads, labels: this.#labels, vehicle: this.#s.vehicle, now: o.now, mono: o.mono });
     this.#learnerLabels = this.#labels;
-    learner.onPassed((e) => this.#limit.onPassed(e));
+    learner.onPassed((e) => {
+      if (learnableRecord(this.#labels, e?.record)) this.#limit.onPassed(e);
+    });
     this.#learner = learner;
     this.#applyEval();
   }
@@ -1400,7 +1419,8 @@ export class CameraController {
       block: this.#limit ? this.#block : 'off',
       capturing: this.#looping,
       parked: this.#limit ? this.isParked() : false,
-      counts: { learned: c ? c.shown : 0, confirmed: c ? c.confirmed : 0, candidates: c ? c.candidate : 0 },
+      // learned: biển đang dùng; stored: mọi biển xuất được và bị "Xoá" xoá (gồm cả biển bị cất, LearnedSigns#dormant).
+      counts: { learned: c ? c.shown : 0, confirmed: c ? c.confirmed : 0, candidates: c ? c.candidate : 0, stored: c ? c.shown + c.dormant : 0 },
       health: this.#looping && this.#learner ? this.#learner.health().reason : null,
       keepAwakeTurnedOn: this.#keepAwakeTurnedOn,
       check: this.#check ? 'open' : null,

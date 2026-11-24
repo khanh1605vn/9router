@@ -1,4 +1,5 @@
 import test from 'node:test';
+import { readFileSync } from 'node:fs';
 import assert from 'node:assert/strict';
 import { SIGN_CATALOGUE } from '../js/signs.js';
 import { buildLabels } from '../tools/camera/lib.mjs';
@@ -533,7 +534,7 @@ test('danh sách xem lại: gần trước, không có biển đã loại hay b�
   assert.equal(rows[0].status, 'confirmed');
   assert.equal(rows[0].label, 'P.127[50]');
   assert.ok(rows[0].distance < rows[1].distance);
-  assert.deepEqual(store.counts(), { total: 3, shown: 2, candidate: 1, confirmed: 1, retired: 0, suppressed: 1 });
+  assert.deepEqual(store.counts(), { total: 3, shown: 2, candidate: 1, confirmed: 1, retired: 0, suppressed: 1, dormant: 0 });
   assert.equal(store.list().length, 2);
 });
 
@@ -686,4 +687,72 @@ test('kho đầy và đổi trị số: biển cũ bị trừ điểm trước, 
   assert.equal(b2.map.size, MAX_RECORDS);
   assert.ok(s2.get(old), 'biển cũ đổi trị số không bị bỏ');
   assert.equal(s2.get(recs2[1].id), null, 'biển chưa xác nhận khác bị bỏ');
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Bản ghi của nhãn đã bị gỡ khỏi danh sách học (DECISION.md: mọi P.127, P.115, P.106a, DP.135, W.227 ở bản v1)
+
+const settle = () => new Promise((r) => setTimeout(r, 0));
+
+test('bản ghi cũ của nhãn đã bị gỡ (P.127[80] đã xác nhận, P.115) bị cất: không hiện, không cảnh báo, không vào bộ học; vẫn giữ, xuất được, học lại thì dùng lại', async () => {
+  const installed = JSON.parse(readFileSync(new URL('../models/labels.json', import.meta.url), 'utf8'));
+  const learnOf = (j, label) => j.labels.find((l) => l.label === label)?.learn;
+  assert.equal(learnOf(installed, 'P.127[80]'), false);
+  assert.equal(learnOf(installed, 'P.115'), false);
+  assert.equal(learnOf(installed, 'R.122'), true);
+  // Bản dựng trước khi cài mô hình (47 nhãn được học): nhập P.127[80] và P.115, người dùng bấm "Đúng" cho P.127[80].
+  const { store: old, backend } = makeStore();
+  const fc = {
+    type: 'FeatureCollection',
+    features: [
+      ['VN:P.127[80]', 0],
+      ['VN:P.115', 300],
+      ['VN:R.122', 600],
+    ].map(([tag, x]) => ({ type: 'Feature', geometry: { type: 'Point', coordinates: destination(O, 90, x) }, properties: { traffic_sign: tag, direction: 270 } })),
+  };
+  assert.deepEqual(old.importGeoJSON(fc), { added: 3, skipped: 0 });
+  const speed = old.list().find((r) => r.label === 'P.127[80]').id;
+  assert.equal(old.confirm(speed).status, 'confirmed');
+  await settle();
+  const rows = [...backend.map.values()].map((r) => ({ ...r }));
+  // Nâng cấp: cùng các dòng IndexedDB, labels.json đã cài.
+  const { store } = makeStore({ backend: memoryBackend(rows), labels: installed });
+  await store.load();
+  assert.equal(store.size, 3, 'không xoá bản ghi nào');
+  assert.deepEqual(store.list().map((r) => r.label), ['R.122']);
+  assert.deepEqual(store.recordsNear(O, 1000).map((r) => r.code), ['R.122'], 'bộ học (và CameraLimit) không thấy biển bị cất');
+  assert.deepEqual(store.featsNear(O, 1000).map((f) => f.tags.traffic_sign), ['VN:R.122'], 'bộ máy cảnh báo không thấy biển bị cất');
+  assert.deepEqual(store.counts(), { total: 3, shown: 1, candidate: 1, confirmed: 0, retired: 0, suppressed: 0, dormant: 2 });
+  assert.equal(store.get(speed).status, 'confirmed', 'trạng thái giữ nguyên');
+  assert.equal(backend.map.get(speed).status, 'confirmed');
+  assert.equal(store.match({ code: 'P.127', value: '50', coord: O, facing: 270 }).conflicts.length, 0, 'biển bị cất không bị trừ điểm');
+  // Tệp xuất vẫn có mọi biển đang lưu (dữ liệu của người dùng); "Xoá" xoá hết.
+  assert.deepEqual(store.exportGeoJSON().features.map((f) => f.properties.traffic_sign).sort(), ['VN:P.115', 'VN:P.127[80]', 'VN:R.122']);
+  // Labels đổi khi đang chạy: báo cho bên nghe; bản sau học lại nhãn đó thì bản ghi tự dùng lại.
+  let changes = 0;
+  store.onChange(() => changes++);
+  store.setLabels(labels);
+  assert.equal(changes, 1);
+  assert.deepEqual(store.featsNear(O, 1000).map((f) => f.tags.traffic_sign).sort(), ['VN:P.115', 'VN:P.127[80]', 'VN:R.122']);
+  store.setLabels(installed);
+  assert.equal(store.featsNear(O, 1000).length, 1);
+  await store.clear();
+  assert.equal(store.size, 0);
+});
+
+test('requireLabels: chưa có labels thì mọi bản ghi bị cất; không đặt thì như trước (không lọc)', async () => {
+  const { store: a, backend } = makeStore();
+  a.observe(obs());
+  await settle();
+  const rows = [...backend.map.values()].map((r) => ({ ...r }));
+  const { store: strict } = makeStore({ backend: memoryBackend(rows), labels: null, requireLabels: true });
+  await strict.load();
+  assert.equal(strict.featsNear(O, 100).length, 0);
+  assert.equal(strict.recordsNear(O, 100).length, 0);
+  assert.equal(strict.counts().dormant, 1);
+  strict.setLabels(labels);
+  assert.equal(strict.featsNear(O, 100).length, 1);
+  const { store: loose } = makeStore({ backend: memoryBackend(rows), labels: null });
+  await loose.load();
+  assert.equal(loose.featsNear(O, 100).length, 1);
 });
