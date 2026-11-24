@@ -39,9 +39,13 @@ class NavigationController(
         }
     }
 
-    /** Gọi mỗi khi có ảnh chụp mới hoặc dữ liệu chuyển sang cũ. */
-    fun update(fresh: Boolean, hasManeuver: Boolean) {
-        if (fresh && !hasManeuver) stoppedByHost = false
+    /**
+     * Gọi mỗi khi có ảnh chụp mới hoặc dữ liệu chuyển sang cũ. [fromPage]: dữ liệu là của trang web (false ở chế độ
+     * "chỉ có GPS", vốn không bao giờ có chỉ dẫn rẽ). Chỉ dữ liệu mới của trang mà không có chỉ dẫn mới cho biết chuyến
+     * đã kết thúc và bỏ yêu cầu dừng của máy chủ; vài giây chỉ có GPS (điện thoại khoá màn hình) thì không.
+     */
+    fun update(fresh: Boolean, hasManeuver: Boolean, fromPage: Boolean = true) {
+        if (fresh && fromPage && !hasManeuver) stoppedByHost = false
         val want = fresh && hasManeuver && !stoppedByHost
         if (want == isNavigating) return
         try {

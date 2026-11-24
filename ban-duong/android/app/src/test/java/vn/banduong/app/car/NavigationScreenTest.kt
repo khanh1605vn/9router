@@ -307,4 +307,53 @@ class NavigationScreenTest {
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(2))
         assertEquals(sent, nav.tripsSent.size)
     }
+
+    /**
+     * Máy chủ yêu cầu dừng (người lái mở Google Maps), rồi điện thoại khoá màn hình vài giây (chế độ chỉ có GPS), rồi
+     * trang gửi lại cùng chuyến: không được giành lại quyền dẫn đường (NF-5). Lỗi cũ: chế độ GPS xoá yêu cầu dừng.
+     */
+    @Test
+    fun gpsOnlyBlipDoesNotClearHostStop() {
+        val s = screen()
+        ScreenController(s).moveToState(Lifecycle.State.CREATED)
+        CarStateStore.update(state(maneuver = turn), now)
+        assertEquals(1, nav.navigationStartedCount)
+        nav.navigationManagerCallback!!.onStopNavigation()
+        shadowOf(Looper.getMainLooper()).idle()
+        assertTrue(s.navigation.stoppedByHost)
+        now += CarStateStore.STALE_MS + 1
+        CarStateStore.updateNativeFix(fix())
+        assertTrue(CarStateStore.snapshot.view(now).gpsOnly)
+        assertTrue(s.navigation.stoppedByHost)
+        now += 100
+        CarStateStore.update(state(maneuver = turn), now)
+        assertEquals(1, nav.navigationStartedCount)
+        assertFalse(s.navigation.isNavigating)
+        assertTrue(s.navigation.stoppedByHost)
+        // Trang báo hết chuyến (dữ liệu trang, không có chỉ dẫn): chuyến sau lại dẫn đường được.
+        CarStateStore.update(state(), now)
+        assertFalse(s.navigation.stoppedByHost)
+        CarStateStore.update(state(maneuver = turn), now)
+        assertEquals(2, nav.navigationStartedCount)
+    }
+
+    /** Trong hầm: GPS mất, OBD còn tốc độ, trang gửi đều. Thẻ chỉ dẫn và dẫn đường giữ nguyên, không báo mất dữ liệu. */
+    @Test
+    fun tunnelWithObdSpeedKeepsNavigating() {
+        val s = screen()
+        ScreenController(s).moveToState(Lifecycle.State.CREATED)
+        for (sec in listOf(0, 5, 10, 11, 15, 30, 60)) {
+            now = 100_000L + sec * 1000L
+            val st = state(speed = 78.0, over = true, maneuver = turn).copy(
+                ts = epoch + sec * 1000L,
+                speedSource = CarState.SpeedSource.OBD,
+                position = CarState.Position(16.19, 108.13, 0.0, 5.0, fixTs = epoch),
+            )
+            CarStateStore.update(st, now)
+            assertTrue("t=${sec}s", s.navigation.isNavigating)
+            assertTrue("t=${sec}s", template(s).navigationInfo is RoutingInfo)
+        }
+        assertEquals(1, nav.navigationStartedCount)
+        assertEquals(0, nav.navigationEndedCount)
+    }
 }

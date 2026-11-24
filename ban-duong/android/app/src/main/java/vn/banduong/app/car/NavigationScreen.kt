@@ -79,8 +79,13 @@ class NavigationScreen(
         val now = uptime()
         val view = snapshot.view(now)
         val state = view.state
-        // Chế độ "chỉ có GPS" không có chỉ dẫn rẽ (maneuver = null) nên cũng kết thúc dẫn đường.
-        navigation.update(fresh = view.freshness == Freshness.FRESH, hasManeuver = state?.maneuver != null)
+        // Chế độ "chỉ có GPS" không có chỉ dẫn rẽ (maneuver = null) nên cũng kết thúc dẫn đường, nhưng không xoá yêu cầu
+        // dừng của máy chủ (chuyến của trang chưa chắc đã kết thúc).
+        navigation.update(
+            fresh = view.freshness == Freshness.FRESH,
+            hasManeuver = state?.maneuver != null,
+            fromPage = !view.gpsOnly,
+        )
         renderer?.update(snapshot)
 
         if (view.freshness == Freshness.FRESH && !view.gpsOnly && state != null &&

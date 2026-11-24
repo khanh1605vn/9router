@@ -21,7 +21,7 @@ import {
   pidBytesAll,
   pidCommand,
 } from './elm327.js';
-import { createNativeObd, isNativeObdDevice, nativeObdSupport } from './obdnative.js';
+import { createNativeObd, inNativeApp, isNativeObdDevice, nativeObdSupport } from './obdnative.js';
 
 // Cổng OBD của ứng dụng Android: tạo lần đầu cần tới; null trên trình duyệt thường.
 let nativeObd;
@@ -36,12 +36,17 @@ function nativePort() {
 /**
  * Trình duyệt này dùng được Bluetooth (BLE) / Web Serial hay không, và lý do nếu không.
  * @param env đối tượng toàn cục (mặc định globalThis), truyền vào để kiểm thử
- * @returns { ble, serial, secure, reason: 'insecure' | 'ios' | 'webview' | 'firefox' | 'nobt' | null, native? }
+ * reason trong ứng dụng Android: 'noble' (máy chỉ có Bluetooth thường, không có BLE) hoặc 'nobt' (máy không có
+ * Bluetooth dùng được cho bộ OBD).
+ * @returns { ble, serial, secure, reason: 'insecure' | 'ios' | 'webview' | 'firefox' | 'noble' | 'nobt' | null, native? }
  */
 export function detectSupport(env = globalThis) {
   // Trong ứng dụng Android: Bluetooth do máy làm, không cần Web Bluetooth/Web Serial.
   const app = nativeObdSupport(env);
-  if (app) return { ble: app.ble, serial: app.spp, secure: true, reason: app.ble ? null : 'nobt', native: true };
+  if (app) return { ble: app.ble, serial: app.spp, secure: true, reason: app.ble ? null : 'noble', native: true };
+  // Trong ứng dụng nhưng máy không có Bluetooth: không xét User-Agent (WebView có "; wv)" nên sẽ bị nhầm là đang mở
+  // trong Zalo/Facebook và bảo mở bằng Chrome).
+  if (inNativeApp(env)) return { ble: false, serial: false, secure: true, reason: 'nobt', native: true };
   const nav = env?.navigator;
   const loc = env?.location;
   const ua = String(nav?.userAgent || '');

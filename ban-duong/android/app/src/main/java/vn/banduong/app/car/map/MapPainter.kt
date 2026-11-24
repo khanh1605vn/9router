@@ -24,6 +24,7 @@ class MapPainter(private val texts: Texts) {
         val stale: String,
         val speedUnknown: String,
         val gpsOnly: String = stale,
+        val positionStale: String = stale,
         val alertLine: (text: String, distanceM: Int) -> String,
     )
 
@@ -47,6 +48,8 @@ class MapPainter(private val texts: Texts) {
         /** Chỉ có định vị của máy: không có giới hạn tốc độ, cảnh báo. */
         val gpsOnly: Boolean = false,
         val stable: MapMath.Box = visible,
+        /** Tốc độ OBD còn mới nhưng vị trí đã cũ (mất GPS, ví dụ trong hầm): xe đứng ở vị trí cũ trên bản đồ. */
+        val positionStale: Boolean = false,
     )
 
     private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -115,8 +118,13 @@ class MapPainter(private val texts: Texts) {
                 drawPill(canvas, texts.stale, box.centerX, pillY, pillW, p.panel, p.panelText, 16f * dp, dp)
             }
             f.gpsOnly -> drawPill(canvas, texts.gpsOnly, box.centerX, pillY, pillW, p.panel, p.panelText, 16f * dp, dp)
-            else -> state.alerts.firstOrNull()?.let { a ->
-                drawPill(canvas, texts.alertLine(a.text, a.distanceM), box.centerX, pillY, pillW, p.alertPanel, p.alertText, 16f * dp, dp)
+            else -> {
+                val a = state.alerts.firstOrNull()
+                if (a != null) {
+                    drawPill(canvas, texts.alertLine(a.text, a.distanceM), box.centerX, pillY, pillW, p.alertPanel, p.alertText, 16f * dp, dp)
+                } else if (f.positionStale) {
+                    drawPill(canvas, texts.positionStale, box.centerX, pillY, pillW, p.panel, p.panelText, 16f * dp, dp)
+                }
             }
         }
         // Dữ liệu cũ: không vẽ tốc độ, màu quá tốc độ hay biển giới hạn của ảnh chụp cũ như thể đang đúng.

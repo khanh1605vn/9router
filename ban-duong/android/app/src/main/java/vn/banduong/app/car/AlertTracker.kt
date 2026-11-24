@@ -47,8 +47,9 @@ class AlertTracker(
         if (candidate == null) return null
         if (lastShownMs != Long.MIN_VALUE && nowMs - lastShownMs < minGapMs) return null
 
-        // Đánh dấu mọi cảnh báo đang có là đã thấy, để không bật liên tiếp nhiều thông báo.
-        for (a in alerts) seen[key(a)] = Seen(nowMs, a.distanceM)
+        // Chỉ cảnh báo vừa báo là đã thấy; cảnh báo mới khác (ví dụ biển 60 ngay sau camera) vẫn là "mới" và được báo ở
+        // lần gọi sau, khi đã qua [minGapMs], nếu vẫn còn ở phía trước.
+        seen[key(candidate)] = Seen(nowMs, candidate.distanceM)
         while (seen.size > maxRemembered) seen.remove(seen.keys.first())
         lastShownMs = nowMs
         return candidate

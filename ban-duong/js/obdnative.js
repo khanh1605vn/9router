@@ -28,6 +28,20 @@ const LINK_RE = /^[0-9a-f]{16}$/;
 const KINDS = new Set(['ble', 'spp']);
 
 /**
+ * Trang đang chạy trong ứng dụng Android Bạn Đường (có kênh window.BanDuongNative và window.BanDuongApp do ứng dụng gắn),
+ * dù máy có Bluetooth hay không. Mọi lỗi khi đọc đều coi như không.
+ */
+export function inNativeApp(env = globalThis) {
+  try {
+    const ch = env?.BanDuongNative;
+    const app = env?.BanDuongApp;
+    return Boolean(ch && typeof ch.postMessage === 'function' && app && typeof app === 'object');
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Ứng dụng Android có cổng OBD không: { ble, spp } hoặc null (trình duyệt thường, hoặc máy không có Bluetooth).
  * Chỉ tin đúng `true`; mọi lỗi khi đọc đều coi như không có.
  */

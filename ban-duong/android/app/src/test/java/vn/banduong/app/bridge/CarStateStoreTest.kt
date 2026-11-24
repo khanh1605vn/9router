@@ -136,4 +136,42 @@ class CarStateStoreTest {
         CarStateStore.updateNativeFix(null)
         assertEquals(Freshness.NONE, CarStateStore.snapshot.view(16_700).freshness)
     }
+
+    /**
+     * Trong hầm: GPS mất (fixTs đứng yên), bộ OBD vẫn báo tốc độ và trang vẫn gửi "state" mỗi giây. Tốc độ, giới hạn,
+     * cảnh báo của trang vẫn dùng được (đúng như trên điện thoại), chỉ vị trí là cũ. Tốc độ GPS thì vẫn coi là cũ.
+     */
+    @Test
+    fun tunnelWithObdSpeedStaysFreshAndOnlyPositionIsOld() {
+        val obd = withPosition(ageAtSendMs = 0).copy(speedKmh = 78.0, speedSource = CarState.SpeedSource.OBD, overSpeed = true)
+        for (sec in listOf(0, 5, 10, 11, 15, 30, 60)) {
+            val now = 100_000L + sec * 1000L
+            CarStateStore.update(obd.copy(ts = fixAt + sec * 1000L), now)
+            val v = CarStateStore.snapshot.view(now)
+            assertEquals("t=${sec}s", Freshness.FRESH, v.freshness)
+            assertFalse(v.gpsOnly)
+            assertEquals(78.0, v.state!!.speedKmh!!, 0.0)
+            assertEquals(60, v.state!!.limitKmh)
+            assertEquals(1, v.state!!.alerts.size)
+            assertEquals("t=${sec}s", sec > 10, v.positionStale)
+        }
+        // Trang thôi gửi: vẫn cũ sau STALE_MS như mọi khi.
+        assertEquals(Freshness.STALE, CarStateStore.snapshot.view(160_000 + CarStateStore.STALE_MS + 1).freshness)
+        // Máy có định vị riêng còn mới: dùng vị trí đó, giữ tốc độ OBD và giới hạn của trang.
+        CarStateStore.updateNativeFix(fix(at = 160_000))
+        val v = CarStateStore.snapshot.view(160_500)
+        assertEquals(Freshness.FRESH, v.freshness)
+        assertFalse(v.gpsOnly)
+        assertFalse(v.positionStale)
+        assertEquals(10.78, v.state!!.position!!.lat, 0.0)
+        assertEquals(78.0, v.state!!.speedKmh!!, 0.0)
+        assertEquals(60, v.state!!.limitKmh)
+        // Cùng hoàn cảnh mà tốc độ là GPS (cũng đã cũ): STALE (hoặc chỉ có GPS của máy), không dùng tốc độ của trang.
+        CarStateStore.updateNativeFix(null)
+        CarStateStore.update(obd.copy(ts = fixAt + 30_000, speedSource = CarState.SpeedSource.GPS), 200_000)
+        assertEquals(Freshness.STALE, CarStateStore.snapshot.view(200_000).freshness)
+        // OBD nhưng không có số tốc độ: cũng STALE.
+        CarStateStore.update(obd.copy(ts = fixAt + 30_000, speedKmh = null), 200_000)
+        assertEquals(Freshness.STALE, CarStateStore.snapshot.view(200_000).freshness)
+    }
 }

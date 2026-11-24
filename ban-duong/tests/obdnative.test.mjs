@@ -16,6 +16,7 @@ import {
   NATIVE_EVENT,
   NATIVE_OBD_LIMITS,
   NativeObd,
+  inNativeApp,
   NativeObdDevice,
   nativeObdSupport,
 } from '../js/obdnative.js';
@@ -80,7 +81,8 @@ function fakeWindow({ caps = { ble: true, spp: true } } = {}) {
   const sent = [];
   const win = {
     BanDuongNative: { postMessage: (s) => sent.push(JSON.parse(s)) },
-    BanDuongApp: caps ? { v: 1, obd: caps } : undefined,
+    // Như bridge_shim.js: máy không có Bluetooth thì obd = null, còn BanDuongApp vẫn có.
+    BanDuongApp: { v: 1, obd: caps },
     addEventListener(type, fn) {
       if (!listeners.has(type)) listeners.set(type, new Set());
       listeners.get(type).add(fn);
@@ -137,13 +139,34 @@ test('detectSupport trong ứng dụng: dùng Bluetooth của máy, không cần
   win.navigator = { userAgent: 'Mozilla/5.0 (Linux; Android 14; wv) AppleWebKit Chrome/131 Mobile' };
   assert.deepEqual(detectSupport(win), { ble: true, serial: true, secure: true, reason: null, native: true });
   const sppOnly = fakeWindow({ caps: { ble: false, spp: true } });
-  assert.deepEqual(detectSupport(sppOnly), { ble: false, serial: true, secure: true, reason: 'nobt', native: true });
-  // Ứng dụng không có OBD: như WebView thường (lý do 'webview').
+  assert.deepEqual(detectSupport(sppOnly), { ble: false, serial: true, secure: true, reason: 'noble', native: true });
+  // Ứng dụng trên máy không có Bluetooth: không xét User-Agent (WebView có "; wv)"), không bảo "mở bằng Chrome".
   const none = fakeWindow({ caps: null });
   none.navigator = win.navigator;
   none.isSecureContext = true;
-  assert.equal(detectSupport(none).reason, 'webview');
-  assert.equal(detectSupport(none).native, undefined);
+  assert.deepEqual(detectSupport(none), { ble: false, serial: false, secure: true, reason: 'nobt', native: true });
+  const noCaps = fakeWindow({ caps: { ble: false, spp: false } });
+  noCaps.navigator = win.navigator;
+  assert.equal(detectSupport(noCaps).reason, 'nobt');
+  assert.equal(inNativeApp(none), true);
+  // WebView của ứng dụng khác (không có kênh của ứng dụng): vẫn là 'webview'.
+  const other = { navigator: win.navigator, isSecureContext: true };
+  assert.equal(detectSupport(other).reason, 'webview');
+  assert.equal(detectSupport(other).native, undefined);
+  assert.equal(inNativeApp(other), false);
+  // Kênh có nhưng thiếu BanDuongApp (không phải do ứng dụng gắn đủ): không coi là trong ứng dụng.
+  assert.equal(inNativeApp({ BanDuongNative: { postMessage() {} } }), false);
+  assert.equal(inNativeApp({ get BanDuongNative() { throw new Error('x'); } }), false);
+});
+
+test('main.js có câu báo cho mọi lý do không dùng được Bluetooth', async () => {
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(new URL('../js/main.js', import.meta.url), 'utf8');
+  const block = src.slice(src.indexOf('const UNSUPPORTED = {'), src.indexOf('};', src.indexOf('const UNSUPPORTED = {')));
+  for (const reason of ['insecure', 'ios', 'webview', 'firefox', 'other', 'noble', 'nobt']) {
+    assert.match(block, new RegExp(`\\b${reason}: '`), reason);
+  }
+  assert.match(block, /nobt: 'Điện thoại này không hỗ trợ Bluetooth cho bộ OBD\.'/);
 });
 
 // ---------- Danh sách lệnh được phép ----------

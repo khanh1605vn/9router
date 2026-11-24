@@ -39,6 +39,7 @@
     <string name="car_unit_kmh">km/h</string>
     <string name="car_map_stale">Dữ liệu đã cũ</string>
     <string name="car_map_gps_only">Chỉ có GPS, chưa có cảnh báo</string>
+    <string name="car_map_position_stale">Mất GPS, vị trí trên bản đồ đã cũ</string>
     <string name="car_map_speed_unknown" translatable="false">–</string>
 
     <!-- Hộp chọn bộ OBD (WebView không có Web Bluetooth / Web Serial nên máy tự làm). -->

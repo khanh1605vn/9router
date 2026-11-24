@@ -18,6 +18,9 @@ object CarStateStore {
     /**
      * Vị trí trang gửi đã cũ hơn ngần này (tính từ lúc trang nhận lần định vị đó) thì cũng coi là mất dữ liệu: trang
      * bị ẩn (điện thoại khoá màn hình) thì WebView thôi nhận định vị nhưng vẫn có thể gửi "state" đều.
+     *
+     * Trừ khi tốc độ trong "state" là của xe (OBD): khi đó (trong hầm, mất GPS mà bộ OBD vẫn báo) tốc độ, giới hạn
+     * và chỉ dẫn của trang vẫn đúng như trang đang hiện trên điện thoại; chỉ riêng vị trí là cũ ([CarView.positionStale]).
      */
     const val POSITION_STALE_MS = 10_000L
 
@@ -43,17 +46,34 @@ object CarStateStore {
      * Thứ màn hình xe hiện: [state] (đã ghép), độ mới, và [gpsOnly] = chỉ có định vị của máy (tốc độ GPS, vị trí,
      * đường/tuyến cũ để làm nền), không có giới hạn tốc độ, cảnh báo hay chỉ dẫn rẽ vì những thứ đó do trang tính.
      */
-    data class CarView(val state: CarState?, val freshness: Freshness, val gpsOnly: Boolean)
+    data class CarView(
+        val state: CarState?,
+        val freshness: Freshness,
+        val gpsOnly: Boolean,
+        /**
+         * Dữ liệu trang còn mới (tốc độ OBD) nhưng vị trí trong đó đã quá [POSITION_STALE_MS] và máy cũng không có định
+         * vị mới để thay: bản đồ đứng ở vị trí cũ, nên màn hình xe nói rõ là đã mất GPS.
+         */
+        val positionStale: Boolean = false,
+    )
 
     /** Ảnh chụp bất biến: trạng thái từ trang, thời điểm nhận (SystemClock.uptimeMillis) và định vị của máy. */
     data class Snapshot(val state: CarState?, val receivedAtUptimeMs: Long, val fix: NativeFix? = null) {
-        /** Độ mới của dữ liệu từ trang: có "state" trong [STALE_MS] và vị trí trong đó chưa quá [POSITION_STALE_MS]. */
+        /**
+         * Độ mới của dữ liệu từ trang: có "state" trong [STALE_MS], và vị trí trong đó chưa quá [POSITION_STALE_MS] hoặc
+         * tốc độ là của xe (OBD, xem [POSITION_STALE_MS]).
+         */
         fun freshness(nowUptimeMs: Long): Freshness = when {
             state == null -> Freshness.NONE
             nowUptimeMs - receivedAtUptimeMs > STALE_MS -> Freshness.STALE
-            positionStaleAt()?.let { nowUptimeMs >= it } == true -> Freshness.STALE
+            positionStale(nowUptimeMs) && !obdSpeed(state) -> Freshness.STALE
             else -> Freshness.FRESH
         }
+
+        /** Vị trí trong [state] đã quá [POSITION_STALE_MS] (không xét thời điểm nhận "state"). */
+        fun positionStale(nowUptimeMs: Long): Boolean = positionStaleAt()?.let { nowUptimeMs >= it } == true
+
+        private fun obdSpeed(s: CarState) = s.speedSource == CarState.SpeedSource.OBD && s.speedKmh != null
 
         /** Thời điểm (uptime) ảnh chụp này bắt đầu bị coi là cũ (chỉ theo thời điểm nhận). */
         val staleAtUptimeMs: Long get() = receivedAtUptimeMs + STALE_MS + 1
@@ -70,8 +90,17 @@ object CarStateStore {
 
         fun view(nowUptimeMs: Long): CarView {
             val f = freshness(nowUptimeMs)
-            if (f == Freshness.FRESH) return CarView(state, f, gpsOnly = false)
             val fx = fix
+            if (f == Freshness.FRESH) {
+                if (state == null || !positionStale(nowUptimeMs)) return CarView(state, f, gpsOnly = false)
+                // Tốc độ OBD còn mới, vị trí của trang đã cũ: giữ tốc độ, giới hạn, cảnh báo, chỉ dẫn của trang; vị trí
+                // lấy từ định vị của máy nếu còn mới, không thì báo vị trí cũ.
+                if (fx != null && fixFresh(nowUptimeMs)) {
+                    val pos = CarState.Position(fx.lat, fx.lon, fx.headingDeg ?: state.position?.heading, fx.accuracyM)
+                    return CarView(state.copy(position = pos), f, gpsOnly = false)
+                }
+                return CarView(state, f, gpsOnly = false, positionStale = true)
+            }
             if (fx != null && fixFresh(nowUptimeMs)) return CarView(gpsOnlyState(state, fx), Freshness.FRESH, gpsOnly = true)
             return CarView(state, f, gpsOnly = false)
         }

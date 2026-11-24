@@ -30,13 +30,42 @@ class AlertTrackerTest {
         assertNull(t.pick(listOf(cam, toll), 9_000))
     }
 
+    /**
+     * Hai cảnh báo mới cùng lúc: báo cái gần trước, cái kia vẫn "mới" và được báo sau khi qua minGapMs. Lỗi cũ: mọi
+     * cảnh báo đang có bị đánh dấu đã thấy nên biển 60 ngay sau camera không bao giờ được báo.
+     */
     @Test
-    fun nearestNewAlertWinsAndAllCurrentAreMarked() {
-        val t = AlertTracker()
+    fun nearestNewAlertWinsAndTheOtherFollowsAfterGap() {
+        val t = AlertTracker(minGapMs = 4_000)
         val a = alert("Biển P.127", 120, CarState.AlertKind.SIGN, "P.127")
         val b = alert("Đường sắt", 400, CarState.AlertKind.RAIL)
         assertEquals(a, t.pick(listOf(a, b), 0))
+        assertNull(t.pick(listOf(a, b), 1_000))
+        assertEquals(b, t.pick(listOf(a, b), 4_000))
         assertNull(t.pick(listOf(a, b), 10_000))
+    }
+
+    @Test
+    fun cameraAndSignTogetherAreBothPresentedWhileApproaching() {
+        val t = AlertTracker()
+        val presented = ArrayList<String>()
+        for (sec in 0..30) {
+            val cam = CarState.Alert(CarState.AlertKind.CAMERA, "speed_camera", "Camera phạt nguội", 300 - sec * 8, CarState.AlertSource.OSM, id = "c1")
+            val sign = CarState.Alert(CarState.AlertKind.SIGN, "P.127", "Tốc độ tối đa 60 km/h", 320 - sec * 8, CarState.AlertSource.OSM, id = "s1")
+            t.pick(listOf(cam, sign), sec * 1000L)?.let { presented += it.text }
+        }
+        assertEquals(listOf("Camera phạt nguội", "Tốc độ tối đa 60 km/h"), presented)
+    }
+
+    @Test
+    fun unpresentedAlertThatIsAlreadyPassedIsNotPresented() {
+        val t = AlertTracker(minGapMs = 4_000)
+        val a = alert("Camera phạt nguội", 50)
+        val b = alert("Trạm thu phí", 60, CarState.AlertKind.TOLL)
+        assertEquals(a, t.pick(listOf(a, b), 0))
+        // Đã đi qua trạm trước khi hết khoảng nghỉ: không còn trong danh sách nên không báo muộn.
+        assertNull(t.pick(listOf(a), 4_000))
+        assertNull(t.pick(emptyList(), 8_000))
     }
 
     @Test

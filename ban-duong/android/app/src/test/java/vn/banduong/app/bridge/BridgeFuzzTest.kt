@@ -202,6 +202,153 @@ class BridgeFuzzTest {
         assertTrue(BridgeMessageParser.parse(" {\r\n\t\"v\" : 1 , \"type\" : \"hello\" } ", now) is ParseResult.Ok)
     }
 
+    /**
+     * Vòng kiểm chứng 2: org.json đọc một chữ không ngoặc tới dấu phân cách, và dấu " giữa chữ (`n"`, `true"`, `1"`) chỉ
+     * là ký tự thường; bộ soát cũ lại tưởng một chuỗi bắt đầu ở đó nên không đếm các ngoặc phía sau. Bộ soát nay đọc
+     * theo ngữ pháp nên mọi dạng này bị bỏ.
+     */
+    @Test
+    fun quoteInsideBareLiteralCannotHideBrackets() {
+        for (n in listOf(50, 5_000, 60_000)) {
+            val deep = "[".repeat(n) + "1" + "]".repeat(n)
+            val cases = listOf(
+                "{\"v\":1,\"type\":\"hello\",\"x\":[n\",$deep,n\"]}",
+                "{n\":$deep,n\":1,\"v\":1,\"type\":\"hello\"}",
+                "{\"v\":1,\"type\":\"hello\",\"x\":[true\",$deep,true\"]}",
+                "{\"v\":1,\"type\":\"hello\",\"x\":[1\",$deep,1\"]}",
+                "{\"v\":1,\"type\":\"hello\",\"x\":[nul\",$deep,nul\"]}",
+                "{\"v\":1,\"type\":\"hello\",\"x\":[1-\",$deep,1-\"]}",
+            )
+            for (raw in cases) {
+                if (raw.length > BridgeLimits.MAX_MESSAGE_CHARS) continue
+                val r = onBigStack { BridgeMessageParser.parse(raw, now) }
+                assertTrue("phải bỏ (n=$n): ${raw.take(60)} → $r", r == ParseResult.Rejected("bad-json") || r == ParseResult.Rejected("too-deep"))
+            }
+        }
+        // Các dạng JSON hợp lệ khác vẫn qua: khoá rỗng, chuỗi có \" và \u, số âm/mũ, mảng/đối tượng rỗng.
+        assertTrue(BridgeMessageParser.parse("{\"\":[],\"v\":1,\"a\":{},\"type\":\"hello\",\"s\":\"a\\\"b\\u00e9\\\\\",\"n\":[-0,0.5,1E+2,-3e-4]}", now) is ParseResult.Ok)
+        // Số và chuỗi sai dạng JSON (org.json vẫn nhận) cũng bị bỏ.
+        for (bad in listOf("01", "1.", ".5", "+1", "1e", "-", "0x10", "\"\\x\"", "\"\\u12\"", "\"a\tb\"", "tru", "nulls", "\"a\"\"b\"")) {
+            assertEquals(bad, ParseResult.Rejected("bad-json"), BridgeMessageParser.parse("{\"v\":1,\"type\":\"hello\",\"x\":$bad}", now))
+        }
+    }
+
+    /**
+     * So sánh với org.json: sinh ngẫu nhiên tài liệu lồng nhau mà org.json đọc được, dùng cả các dạng dễ dãi nó nhận
+     * (chữ có dấu " ở giữa như `n"`, chuỗi '…' và chú thích chứa ngoặc, `;` và `=`, khoá không ngoặc). Mọi tài liệu bộ
+     * soát cho qua thì org.json đọc ra cấu trúc sâu không quá MAX_DEPTH; tài liệu JSON chặt thì bộ soát cho qua đúng khi
+     * độ sâu thật không quá MAX_DEPTH. Kiểu QUOTE chỉ dùng chữ có dấu " (mọi dấu " đều nằm trong chữ), đúng kiểu đã
+     * qua mặt bộ soát cũ ở vòng kiểm chứng 2.
+     */
+    @Test
+    fun prescanAgreesWithOrgJsonDepth() {
+        val rnd = Random(424242)
+        val max = BridgeMessageParser.MAX_DEPTH
+        val deepByMode = IntArray(Gen.entries.size)
+        repeat(9_000) { n ->
+            val mode = Gen.entries[n % Gen.entries.size]
+            val sb = StringBuilder()
+            val depth = genObject(rnd, sb, 1, mode)
+            val raw = sb.toString()
+            val parsed = onBigStack { runCatching { JSONObject(raw) }.getOrNull() }
+            assertTrue("org.json phải đọc được tài liệu sinh ra: ${raw.take(200)}", parsed != null)
+            assertEquals("độ sâu sinh ra = độ sâu org.json đọc: $raw", depth, depthOf(parsed))
+            val r = BridgeMessageParser.prescan(raw, max)
+            if (r == null) assertTrue("bộ soát cho qua nhưng org.json sâu $depth: ${raw.take(200)}", depth <= max)
+            if (mode == Gen.STRICT) assertEquals("JSON chặt: $raw", if (depth <= max) null else "too-deep", r)
+            if (depth > max) deepByMode[mode.ordinal]++
+        }
+        for (m in Gen.entries) assertTrue("$m: ${deepByMode[m.ordinal]}", deepByMode[m.ordinal] > 100)
+    }
+
+    private enum class Gen { STRICT, LENIENT, QUOTE }
+
+    private fun ws(rnd: Random, sb: StringBuilder, mode: Gen) {
+        when (rnd.nextInt(if (mode == Gen.LENIENT) 8 else 5)) {
+            0 -> sb.append(' ')
+            1 -> sb.append("\n\t")
+            5 -> sb.append("/*").append("[[{".repeat(rnd.nextInt(4))).append("*/")
+            6 -> sb.append("#]]}[").append('\n')
+            7 -> sb.append("//[[[").append('\n')
+        }
+    }
+
+    private fun genKey(rnd: Random, sb: StringBuilder, mode: Gen, i: Int) {
+        when (mode) {
+            Gen.STRICT -> sb.append("\"k$i").append(if (rnd.nextBoolean()) "[{" else "").append('"')
+            Gen.QUOTE -> sb.append("n\"$i")
+            Gen.LENIENT -> when (rnd.nextInt(4)) {
+                0 -> sb.append("\"k$i[{\"")
+                1 -> sb.append("'k$i[[\"'")
+                2 -> sb.append("n\"$i")
+                else -> sb.append("k$i")
+            }
+        }
+    }
+
+    /** Ghi một giá trị; trả độ sâu của nó (0 cho giá trị đơn). */
+    private fun genValue(rnd: Random, sb: StringBuilder, d: Int, mode: Gen): Int {
+        if (d < 12 && rnd.nextInt(10) < 6) {
+            return if (rnd.nextBoolean()) genObject(rnd, sb, d + 1, mode) else genArray(rnd, sb, d + 1, mode)
+        }
+        val pick = when (mode) {
+            Gen.STRICT -> rnd.nextInt(4)
+            Gen.QUOTE -> 1 + rnd.nextInt(6)
+            Gen.LENIENT -> rnd.nextInt(8)
+        }
+        when (pick) {
+            0 -> sb.append("\"s[").append(if (rnd.nextBoolean()) "\\\"[[" else "").append('"')
+            1 -> sb.append(listOf("true", "false", "null")[rnd.nextInt(3)])
+            2 -> sb.append(rnd.nextInt(-50, 50))
+            3 -> sb.append("-1.5e+3")
+            4 -> sb.append("n\"")
+            5 -> sb.append("true\"")
+            6 -> sb.append("1\"")
+            else -> sb.append("'[[[\"'")
+        }
+        return 0
+    }
+
+    private fun sep(rnd: Random, mode: Gen) = if (mode == Gen.LENIENT && rnd.nextInt(3) == 0) ";" else ","
+
+    private fun genObject(rnd: Random, sb: StringBuilder, d: Int, mode: Gen): Int {
+        sb.append('{')
+        var deepest = 0
+        val n = rnd.nextInt(0, 4)
+        for (i in 0 until n) {
+            if (i > 0) sb.append(sep(rnd, mode))
+            ws(rnd, sb, mode)
+            genKey(rnd, sb, mode, i)
+            ws(rnd, sb, mode)
+            sb.append(if (mode == Gen.LENIENT && rnd.nextInt(3) == 0) "=" else ":")
+            ws(rnd, sb, mode)
+            deepest = maxOf(deepest, genValue(rnd, sb, d, mode))
+            ws(rnd, sb, mode)
+        }
+        sb.append('}')
+        return 1 + deepest
+    }
+
+    private fun genArray(rnd: Random, sb: StringBuilder, d: Int, mode: Gen): Int {
+        sb.append('[')
+        var deepest = 0
+        val n = rnd.nextInt(1, 4)
+        for (i in 0 until n) {
+            if (i > 0) sb.append(sep(rnd, mode))
+            ws(rnd, sb, mode)
+            deepest = maxOf(deepest, genValue(rnd, sb, d, mode))
+            ws(rnd, sb, mode)
+        }
+        sb.append(']')
+        return 1 + deepest
+    }
+
+    private fun depthOf(v: Any?): Int = when (v) {
+        is JSONObject -> 1 + (v.keys().asSequence().maxOfOrNull { depthOf(v.opt(it)) } ?: 0)
+        is JSONArray -> 1 + ((0 until v.length()).maxOfOrNull { depthOf(v.opt(it)) } ?: 0)
+        else -> 0
+    }
+
     private fun <T> onBigStack(block: () -> T): T {
         var out: Result<T>? = null
         val t = Thread(null, { out = runCatching(block) }, "bridge-8mb", 8L * 1024 * 1024)

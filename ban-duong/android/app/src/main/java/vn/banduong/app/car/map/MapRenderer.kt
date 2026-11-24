@@ -172,6 +172,7 @@ class MapRenderer internal constructor(
             settings = settings,
             headingDeg = lastHeading,
             gpsOnly = view.gpsOnly,
+            positionStale = view.positionStale,
             stable = boxOf(stableArea, c) ?: box,
         )
     }
@@ -191,6 +192,7 @@ class MapRenderer internal constructor(
                 stale = carContext.getString(R.string.car_map_stale),
                 speedUnknown = carContext.getString(R.string.car_map_speed_unknown),
                 gpsOnly = carContext.getString(R.string.car_map_gps_only),
+                positionStale = carContext.getString(R.string.car_map_position_stale),
                 alertLine = { t, d ->
                     carContext.getString(
                         R.string.car_alert_line, t,

@@ -1199,7 +1199,8 @@ const UNSUPPORTED = {
   webview: 'Trang đang mở bên trong ứng dụng khác (Zalo, Facebook…), nơi không có Bluetooth. Hãy mở trang bằng Chrome.',
   firefox: 'Firefox không hỗ trợ Bluetooth trên web. Hãy dùng Chrome hoặc Samsung Internet trên Android.',
   other: 'Trình duyệt này không hỗ trợ Bluetooth trên web. Hãy dùng Chrome hoặc Samsung Internet trên Android.',
-  nobt: 'Điện thoại này không hỗ trợ Bluetooth Low Energy.',
+  noble: 'Điện thoại này không hỗ trợ Bluetooth Low Energy.',
+  nobt: 'Điện thoại này không hỗ trợ Bluetooth cho bộ OBD.',
 };
 
 const carReady = () => car.client != null && car.state === 'ready';

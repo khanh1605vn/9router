@@ -244,37 +244,117 @@ object BridgeMessageParser {
     }
 
     /**
-     * Soát trước khi đưa cho org.json, chỉ nhận JSON chặt (đúng kiểu JSON.stringify của trang): trả lý do bị bỏ, hoặc
-     * null nếu được. org.json của Android dễ dãi (nhận chú thích / * * /, //, #, chuỗi trong dấu ' và chữ không ngoặc),
-     * nên ngoài chuỗi "…" chỉ cho phép khoảng trắng, { } [ ] : , và các ký tự của số, true, false, null; nhờ vậy
-     * không thể giấu dấu ngoặc trong chú thích hay chuỗi '…' để qua mặt bộ đếm độ sâu. Đóng ngoặc nhiều hơn mở cũng bị
-     * bỏ (bộ đếm không bao giờ âm).
+     * Soát trước khi đưa cho org.json, chỉ nhận JSON chặt (RFC 8259, đúng kiểu JSON.stringify của trang): trả lý do bị
+     * bỏ, hoặc null nếu được. org.json của Android dễ dãi (nhận chú thích / * * /, //, #, chuỗi trong dấu ', chữ không
+     * ngoặc, và dấu " nằm giữa một chữ như `n"` là ký tự thường), nên bộ đếm độ sâu chỉ đúng nếu ta đọc theo đúng ngữ
+     * pháp: đây là bộ đọc ngữ pháp JSON đầy đủ (theo vị trí của từng token, có ngăn xếp riêng tối đa [maxDepth] tầng),
+     * không phải đếm ký tự. Chuỗi chỉ mở ở chỗ cần một giá trị hay một khoá; chữ phải đúng là true/false/null; số đúng
+     * dạng JSON; sau mỗi giá trị chỉ có khoảng trắng, `,` `]` `}` hoặc hết. JSON chặt là tập con của thứ org.json nhận,
+     * và ranh giới token của hai bên trùng nhau, nên độ sâu ta đếm là độ sâu org.json sẽ đệ quy.
      */
     fun prescan(s: String, maxDepth: Int): String? {
+        // isObject[d]: tầng d là { (true) hay [ (false).
+        val isObject = BooleanArray(maxDepth + 1)
         var depth = 0
-        var inStr = false
-        var esc = false
-        for (ch in s) {
-            if (inStr) {
-                when {
-                    esc -> esc = false
-                    ch == '\\' -> esc = true
-                    ch == '"' -> inStr = false
+        var st = S_VALUE
+        var i = 0
+        val n = s.length
+        while (true) {
+            while (i < n && (s[i] == ' ' || s[i] == '\t' || s[i] == '\n' || s[i] == '\r')) i++
+            if (i >= n) return if (st == S_AFTER && depth == 0) null else "bad-json"
+            val ch = s[i]
+            when (st) {
+                S_VALUE, S_VALUE_OR_CLOSE -> {
+                    if (ch == ']' && st == S_VALUE_OR_CLOSE) {
+                        depth--; i++; st = S_AFTER
+                        continue
+                    }
+                    when {
+                        ch == '{' || ch == '[' -> {
+                            if (++depth > maxDepth) return "too-deep"
+                            isObject[depth] = ch == '{'
+                            i++
+                            st = if (ch == '{') S_KEY_OR_CLOSE else S_VALUE_OR_CLOSE
+                        }
+                        ch == '"' -> { i = endOfString(s, i); if (i < 0) return "bad-json"; st = S_AFTER }
+                        ch == '-' || ch in '0'..'9' -> { i = endOfNumber(s, i); if (i < 0) return "bad-json"; st = S_AFTER }
+                        s.startsWith("true", i) -> { i += 4; st = S_AFTER }
+                        s.startsWith("false", i) -> { i += 5; st = S_AFTER }
+                        s.startsWith("null", i) -> { i += 4; st = S_AFTER }
+                        else -> return "bad-json"
+                    }
                 }
-                continue
-            }
-            when (ch) {
-                '"' -> inStr = true
-                '{', '[' -> if (++depth > maxDepth) return "too-deep"
-                '}', ']' -> if (--depth < 0) return "bad-json"
-                ' ', '\t', '\n', '\r', ':', ',' -> Unit
-                in '0'..'9', '-', '+', '.', 'e', 'E' -> Unit
-                // Chữ của true, false, null.
-                't', 'r', 'u', 'f', 'a', 'l', 's', 'n' -> Unit
-                else -> return "bad-json"
+                S_KEY, S_KEY_OR_CLOSE -> when {
+                    ch == '}' && st == S_KEY_OR_CLOSE -> { depth--; i++; st = S_AFTER }
+                    ch == '"' -> { i = endOfString(s, i); if (i < 0) return "bad-json"; st = S_COLON }
+                    else -> return "bad-json"
+                }
+                S_COLON -> if (ch == ':') { i++; st = S_VALUE } else return "bad-json"
+                else -> { // S_AFTER: vừa hết một giá trị.
+                    if (depth == 0) return "bad-json" // chỉ được một giá trị gốc
+                    val obj = isObject[depth]
+                    when {
+                        ch == ',' -> { i++; st = if (obj) S_KEY else S_VALUE }
+                        ch == '}' && obj -> { depth--; i++ }
+                        ch == ']' && !obj -> { depth--; i++ }
+                        else -> return "bad-json"
+                    }
+                }
             }
         }
-        return null
+    }
+
+    private const val S_VALUE = 0 // cần một giá trị (đầu vào, sau ':' hay sau ',' trong [ ])
+    private const val S_VALUE_OR_CLOSE = 1 // ngay sau '[': một giá trị hoặc ']'
+    private const val S_KEY = 2 // sau ',' trong { }: một khoá
+    private const val S_KEY_OR_CLOSE = 3 // ngay sau '{': một khoá hoặc '}'
+    private const val S_COLON = 4 // sau khoá
+    private const val S_AFTER = 5 // sau một giá trị: ',' hoặc đóng ngoặc (hoặc hết, ở tầng gốc)
+
+    /** [i] trỏ vào '"' mở; trả chỉ số ngay sau '"' đóng, hoặc -1 nếu chuỗi sai (ký tự điều khiển, \ lạ, chưa đóng). */
+    private fun endOfString(s: String, start: Int): Int {
+        var i = start + 1
+        while (i < s.length) {
+            val c = s[i]
+            when {
+                c == '"' -> return i + 1
+                c < ' ' -> return -1
+                c == '\\' -> {
+                    if (i + 1 >= s.length) return -1
+                    when (s[i + 1]) {
+                        '"', '\\', '/', 'b', 'f', 'n', 'r', 't' -> i += 2
+                        'u' -> {
+                            if (i + 6 > s.length) return -1
+                            for (k in i + 2 until i + 6) if (Character.digit(s[k], 16) < 0) return -1
+                            i += 6
+                        }
+                        else -> return -1
+                    }
+                }
+                else -> i++
+            }
+        }
+        return -1
+    }
+
+    /** Số JSON: -?(0|[1-9][0-9]*)(.[0-9]+)?([eE][+-]?[0-9]+)?; trả chỉ số ngay sau số, hoặc -1. */
+    private fun endOfNumber(s: String, start: Int): Int {
+        var i = start
+        fun digits(): Int {
+            val from = i
+            while (i < s.length && s[i] in '0'..'9') i++
+            return i - from
+        }
+        if (s[i] == '-') i++
+        if (i >= s.length) return -1
+        if (s[i] == '0') i++ else if (digits() == 0) return -1
+        if (i < s.length && s[i] == '.') { i++; if (digits() == 0) return -1 }
+        if (i < s.length && (s[i] == 'e' || s[i] == 'E')) {
+            i++
+            if (i < s.length && (s[i] == '+' || s[i] == '-')) i++
+            if (digits() == 0) return -1
+        }
+        return i
     }
 
     /** Độ sâu lồng { [ không quá [max] và đúng dạng JSON chặt (xem [prescan]). */

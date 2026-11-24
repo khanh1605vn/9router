@@ -119,6 +119,18 @@ class MapPainterTest {
         draw(frame(state()).copy(gpsOnly = true))
     }
 
+    /** Trong hầm (tốc độ OBD còn mới, vị trí cũ): vẫn vẽ tốc độ, màu quá tốc độ, biển; có thêm thẻ báo mất GPS ở trên. */
+    @Test
+    fun positionStaleKeepsSpeedAndAddsPill() {
+        val normal = draw(frame(state(over = true)))
+        val old = draw(frame(state(over = true)).copy(positionStale = true))
+        assertEquals(MapStyle.LIGHT.overSpeed, old.getPixel(16, 410))
+        assertEquals(Color.WHITE, old.getPixel(138, 416))
+        var changed = 0
+        for (y in 10..46) for (x in 0 until 800) if (normal.getPixel(x, y) != old.getPixel(x, y)) changed++
+        assertTrue("có thẻ mất GPS ở trên ($changed điểm ảnh khác)", changed > 1000)
+    }
+
     @Test
     fun rendererFrameUsesVisibleAreaAndDensity() {
         val r = MapRenderer(painter, dark = false, clock = { 0L })
