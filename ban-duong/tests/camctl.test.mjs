@@ -34,6 +34,7 @@ import {
   learnedCaption,
   PAUSE_POLL_MS,
   PROGRESS_STEP,
+  PRUNED_CODES,
   RANGE_STEP_M,
   rangeText,
   readRange,
@@ -68,8 +69,8 @@ const RUNTIME = [
 ];
 const MODELS = ['models/sign-det.int8.tflite', 'models/sign-cls.int8.tflite'];
 
-function manifest({ models = true, labelBytes = LABEL_BYTES, labelHash = sha(labelBytes) } = {}) {
-  const files = { [LABELS_PATH]: { sha256: labelHash, size: labelBytes.byteLength } };
+function manifest({ models = true, labelBytes = LABEL_BYTES, labelHash = sha(labelBytes), labelsEntry = true } = {}) {
+  const files = labelsEntry ? { [LABELS_PATH]: { sha256: labelHash, size: labelBytes.byteLength } } : {};
   for (const p of [...RUNTIME, ...(models ? MODELS : [])]) files[p] = { sha256: FAKE_HASH, size: 1000 };
   return { version: 1, files };
 }
@@ -202,7 +203,7 @@ class FakeVision {
   }
 }
 
-function makeEnv({ perm = 'granted', mode = 'drive', settings = {}, models = true, labelHash, labelBytes = LABEL_BYTES, learnedBackend = memoryBackend(), support = { ok: true, reason: null }, vision = null, cameraFactory = null, visionFactory, evalBackend = evalMemoryBackend() } = {}) {
+function makeEnv({ perm = 'granted', mode = 'drive', settings = {}, models = true, labelHash, labelBytes = LABEL_BYTES, labelsEntry = true, learnedBackend = memoryBackend(), support = { ok: true, reason: null }, vision = null, cameraFactory = null, visionFactory, evalBackend = evalMemoryBackend() } = {}) {
   const env = { perm, mode, stationary: null, timers: [], clock: { t: 1000 }, logs: [], tracks: [], grabs: 0 };
   let timerId = 0;
   env.setTimeout = (fn, ms) => {
@@ -299,7 +300,7 @@ function makeEnv({ perm = 'granted', mode = 'drive', settings = {}, models = tru
       if (env.fetchImpl) return env.fetchImpl(url, opts);
       return new Response(labelBytes.slice(), { status: 200 });
     },
-    manifest: manifest({ models, labelBytes, labelHash }),
+    manifest: manifest({ models, labelBytes, labelHash, labelsEntry }),
     base: 'https://app.test/',
     now: () => 1_763_900_000_000 + env.clock.t,
     mono: () => env.clock.t,
@@ -485,7 +486,7 @@ test('nâng cấp lên labels.json đã cài: biển P.127[80] đã xác nhận 
   const env = makeEnv({ mode: 'browse', labelBytes: bytes, learnedBackend: memoryBackend(rows()) });
   const init = env.ctl.init();
   await env.ctl.learned.load();
-  // Kho đã đọc mà labels.json chưa tới: chưa biết trị số nào được học, nên biển tốc độ chưa dùng; biển khác thì có
+  // Kho đã đọc mà labels.json chưa tới: biển thuộc loại bản này đã gỡ (gồm biển tốc độ) chưa dùng; biển khác thì có
   // (requireLabels: labelsPending). Bộ học chưa được xét bản ghi nào.
   if (env.ctl.state.labels !== 'ok') {
     assert.deepEqual(env.ctl.learned.featsNear([105.85, 21.03], 100).map((f) => f.tags.traffic_sign), ['VN:R.122']);
@@ -1473,11 +1474,27 @@ async function waitFor(cond) {
   return cond();
 }
 
-test('labelsPending: chỉ biển tốc độ tối đa P.127 phải chờ labels.json', () => {
+test('labelsPending: đúng các loại biển bản này đã gỡ (PRUNED_CODES) phải chờ labels.json; khớp models/labels.json và thẻ mô hình', () => {
+  assert.deepEqual([...PRUNED_CODES].sort(), ['DP.135', 'P.106a', 'P.115', 'P.127', 'W.227']);
+  for (const code of PRUNED_CODES) assert.equal(labelsPending({ code, value: null }), true, code);
   assert.equal(labelsPending({ code: 'P.127', value: '80' }), true);
-  assert.equal(labelsPending({ code: 'P.127', value: null }), true);
-  for (const code of ['R.122', 'P.115', 'P.127a', 'DP.127', 'W.207a']) assert.equal(labelsPending({ code, value: null }), false);
+  for (const code of ['R.122', 'DP.134', 'P.127a', 'DP.127', 'W.207a', 'P.106b']) assert.equal(labelsPending({ code, value: null }), false, code);
   assert.equal(labelsPending(null), false);
+  assert.equal(labelsPending({ code: 5 }), false);
+  // labels.json đã cài: không loại nào trong PRUNED_CODES được học (không cất nhầm biển đang được học) …
+  const installed = JSON.parse(readFileSync(new URL('../models/labels.json', import.meta.url), 'utf8'));
+  for (const l of installed.labels) if (PRUNED_CODES.includes(l.code)) assert.notEqual(l.learn, true, l.label);
+  // … và mọi nhãn thẻ mô hình ghi là đã gỡ ("Đã đặt `learn: false` cho: …") đều thuộc PRUNED_CODES.
+  const card = readFileSync(new URL('../models/MODEL_CARD.md', import.meta.url), 'utf8');
+  const line = card.split('\n').find((x) => x.startsWith('Đã đặt `learn: false` cho:'));
+  assert.ok(line, 'thẻ mô hình có dòng các nhãn đã gỡ');
+  const removed = line.slice(line.indexOf('cho:') + 4).replace(/\.\s*$/, '').split(',').map((x) => x.trim().replace(/\[\d+\]$/, ''));
+  assert.ok(removed.length >= 5);
+  for (const code of removed) assert.ok(PRUNED_CODES.includes(code), code);
+  // Nhãn nào bị gỡ mà PRUNED_CODES thiếu thì biển cũ của nó sẽ hiện lúc chưa có labels.json.
+  const learnableAt47 = LABELS.labels.filter((l) => l.learn === true);
+  const ok = new Set(installed.labels.filter((l) => l.learn === true).map((l) => l.label));
+  for (const l of learnableAt47) if (!ok.has(l.label)) assert.ok(PRUNED_CODES.includes(l.code), l.label);
 });
 
 test('labels.json lỗi khi camera tắt, máy vẫn có mạng (không có "online", bộ nhận diện không tải): tự tải lại sau 30 s, gấp đôi tới 10 phút; tải được thì bộ học lại thấy R.122', async () => {
@@ -1555,7 +1572,7 @@ test('labels.json lỗi: trang hiện lại hay có mạng lại thì tải lạ
   env.ctl.dispose();
 });
 
-test('labels.json lỗi: chỉ cất biển tốc độ; R.122 vẫn được báo, P.127[80] đã xác nhận không hiện và không bao giờ tới CameraLimit; tải được thì dùng lại', async () => {
+test('labels.json lỗi: chỉ cất biển thuộc loại đã gỡ; R.122 vẫn được báo, P.127[80] đã xác nhận không hiện và không bao giờ tới CameraLimit; tải được labels học nó thì dùng lại', async () => {
   const rows = [storedRow('aaaaaaaaaaa1', 'P.127', '80'), storedRow('aaaaaaaaaaa2', 'R.122', null)];
   // labels.json của bài này (47 nhãn) học P.127[80]: biển vẫn phải chờ, vì lúc lỗi không biết điều đó.
   const env = makeEnv({ mode: 'browse', learnedBackend: memoryBackend(rows) });
@@ -1582,23 +1599,22 @@ test('labels.json lỗi: chỉ cất biển tốc độ; R.122 vẫn được b�
   }
   assert.deepEqual(heard, []);
   assert.equal(env.ctl.speedLimit, null);
-  // Dòng số biển ở Cài đặt (luôn hiện, camera đang tắt) nói rõ vì sao và rằng ứng dụng tự tải lại.
+  // Dòng số biển ở Cài đặt (luôn hiện, camera đang tắt): số biển đang giữ, không hứa "tải xong thì dùng".
   const line = settingsView(st).count;
-  assert.equal(line, countText(st.counts, 'error'));
-  assert.ok(line.startsWith('Biển đã học: 1 (1 đã xác nhận). Chưa tải được danh sách biển, nên 1 biển tốc độ'));
-  assert.match(line, /Biển trên bản đồ và các biển camera ghi nhận khác vẫn được báo\. Ứng dụng sẽ tự tải lại\.$/);
-  // Có mạng lại: tải được, biển tốc độ được dùng lại (labels này học nó), dòng số biển hết câu lỗi.
+  assert.equal(line, countText(st.counts));
+  assert.equal(line, 'Biển đã học: 1 (1 đã xác nhận). Đang giữ 1 biển thuộc loại bản này chưa học (không hiện, không báo); vẫn xuất tệp hoặc xoá được.');
+  // Có mạng lại: tải được, biển tốc độ được dùng lại (labels 47 nhãn của bài này học nó), hết câu biển đang giữ.
   env.fetchImpl = null;
   env.win.dispatchEvent(new Event('online'));
   assert.ok(await waitFor(() => env.ctl.state.labels === 'ok'));
   assert.deepEqual(signsNear(env), ['VN:P.127[80]', 'VN:R.122']);
   assert.deepEqual(env.ctl.state.counts, { learned: 2, confirmed: 2, candidates: 0, stored: 2 });
-  assert.equal(heldText(env.ctl.state.counts, env.ctl.state.labels), null);
+  assert.equal(heldText(env.ctl.state.counts), null);
   assert.equal(settingsView(env.ctl.state).count, 'Biển đã học: 2 (2 đã xác nhận).');
   env.ctl.dispose();
 });
 
-test('labels.json sai mã băm với labels đã cài: P.127[80] cũ vẫn bị cất cả khi lỗi lẫn khi tải được; dòng số biển nói đúng từng lúc', async () => {
+test('labels.json sai mã băm với labels đã cài: P.127[80] cũ vẫn bị cất cả khi lỗi lẫn khi tải được; dòng số biển không đổi', async () => {
   const installed = readFileSync(new URL('../models/labels.json', import.meta.url));
   const bytes = new Uint8Array(installed.buffer, installed.byteOffset, installed.byteLength);
   const rows = [storedRow('aaaaaaaaaaa1', 'P.127', '80'), storedRow('aaaaaaaaaaa3', 'P.127', '50', 'candidate')];
@@ -1610,7 +1626,7 @@ test('labels.json sai mã băm với labels đã cài: P.127[80] cũ vẫn bị 
   assert.deepEqual(signsNear(env), []);
   assert.equal(
     settingsView(env.ctl.state).count,
-    'Chưa có biển nào đang dùng. Chưa tải được danh sách biển, nên 2 biển tốc độ do camera ghi nhận tạm chưa dùng (không hiện, không báo; vẫn xuất tệp hoặc xoá được) cho tới khi tải xong. Biển trên bản đồ và các biển camera ghi nhận khác vẫn được báo. Ứng dụng sẽ tự tải lại.'
+    'Chưa có biển nào đang dùng. Đang giữ 2 biển thuộc loại bản này chưa học (không hiện, không báo); vẫn xuất tệp hoặc xoá được.'
   );
   bad = false;
   await env.advance(LABELS_RETRY_MS);
@@ -1621,6 +1637,84 @@ test('labels.json sai mã băm với labels đã cài: P.127[80] cũ vẫn bị 
     'Chưa có biển nào đang dùng. Đang giữ 2 biển thuộc loại bản này chưa học (không hiện, không báo); vẫn xuất tệp hoặc xoá được.'
   );
   env.ctl.dispose();
+});
+
+test('labels.json đã cài: lúc đang tải, lỗi, thiếu hay đã tải, biển hiện và số biển như nhau; biển thuộc loại đã gỡ (P.127, P.115, W.227, …) không bao giờ hiện', async () => {
+  const installed = readFileSync(new URL('../models/labels.json', import.meta.url));
+  const bytes = new Uint8Array(installed.buffer, installed.byteOffset, installed.byteLength);
+  const rows = () => [
+    storedRow('aaaaaaaaaaa1', 'P.127', '80'),
+    storedRow('aaaaaaaaaaa3', 'P.127', '50', 'candidate'),
+    storedRow('aaaaaaaaaaa2', 'R.122', null),
+    storedRow('aaaaaaaaaaa4', 'DP.134', null),
+    storedRow('aaaaaaaaaaa5', 'P.115', null),
+    storedRow('aaaaaaaaaaa6', 'W.227', null),
+    storedRow('aaaaaaaaaaa7', 'P.106a', null, 'candidate'),
+    storedRow('aaaaaaaaaaa8', 'DP.135', null),
+  ];
+  const seen = {};
+  const look = (env) => ({
+    feats: signsNear(env),
+    list: env.ctl.list().map((r) => r.code).sort(),
+    counts: env.ctl.state.counts,
+    line: settingsView(env.ctl.state).count,
+  });
+  const cases = {
+    loading: { fetchImpl: () => new Promise(() => {}) },
+    error: { fetchImpl: () => Promise.reject(new TypeError('Failed to fetch')) },
+    integrity: { fetchImpl: async () => new Response(new Uint8Array(bytes.byteLength), { status: 200 }) },
+    missing: { labelsEntry: false },
+    ok: {},
+  };
+  for (const [name, c] of Object.entries(cases)) {
+    const env = makeEnv({ mode: 'browse', labelBytes: bytes, labelsEntry: c.labelsEntry ?? true, learnedBackend: memoryBackend(rows()) });
+    if (c.fetchImpl) env.fetchImpl = c.fetchImpl;
+    const init = env.ctl.init();
+    await env.ctl.learned.load();
+    if (name !== 'loading') await init;
+    assert.equal(env.ctl.state.labels, name === 'integrity' ? 'error' : name, name);
+    seen[name] = look(env);
+    if (name !== 'ok') assert.deepEqual(env.ctl.learned.recordsNear(HERE, 100), [], `${name}: bộ học chưa xét bản ghi nào`);
+    assert.equal(env.ctl.speedLimit, null, name);
+    env.ctl.dispose();
+  }
+  assert.deepEqual(seen.ok.feats, ['VN:DP.134', 'VN:R.122']);
+  assert.deepEqual(seen.ok.counts, { learned: 2, confirmed: 2, candidates: 0, stored: 8 });
+  assert.equal(seen.ok.line, 'Biển đã học: 2 (2 đã xác nhận). Đang giữ 6 biển thuộc loại bản này chưa học (không hiện, không báo); vẫn xuất tệp hoặc xoá được.');
+  for (const name of ['loading', 'error', 'integrity', 'missing']) assert.deepEqual(seen[name], seen.ok, name);
+});
+
+test("labels.json thiếu trong manifest ('missing'): không tải, không hẹn tải lại (cả khi có mạng lại hay trang hiện lại); nhập tệp không bảo chờ", async () => {
+  const env = makeEnv({ mode: 'browse', labelsEntry: false });
+  let emits = 0;
+  env.ctl.onChange(() => emits++);
+  await env.ctl.init();
+  assert.equal(env.ctl.state.labels, 'missing');
+  const labelFetches = () => env.fetches.filter((u) => String(u).includes(LABELS_PATH)).length;
+  assert.equal(labelFetches(), 0);
+  assert.equal(env.timers.length, 0, 'không có hẹn tải lại');
+  env.win.dispatchEvent(new Event('online'));
+  env.doc.hide();
+  env.doc.show();
+  await settle();
+  const before = emits;
+  await env.advance(2 * 60 * 60 * 1000);
+  assert.equal(env.ctl.state.labels, 'missing');
+  assert.equal(labelFetches(), 0);
+  assert.equal(env.timers.length, 0);
+  assert.equal(emits, before, 'không có lần "tải lại" nào');
+  await park(env);
+  const r = env.ctl.importGeoJSON({ type: 'FeatureCollection', features: [] });
+  assert.equal(r.error, 'no-labels');
+  assert.equal(r.text, TEXT.labelsMissing);
+  assert.doesNotMatch(r.text, /tải lại|thử lại/);
+  env.ctl.dispose();
+  // labels.json lỗi (mạng) thì vẫn bảo ứng dụng đang tự tải lại.
+  const bad = makeEnv({ mode: 'browse', labelHash: 'b'.repeat(64) });
+  await bad.ctl.init();
+  await park(bad);
+  assert.equal(bad.ctl.importGeoJSON({ type: 'FeatureCollection', features: [] }).text, TEXT.labels);
+  bad.ctl.dispose();
 });
 
 test('dispose(): thôi tải lại labels.json (hẹn giờ, "online", trang hiện lại)', async () => {

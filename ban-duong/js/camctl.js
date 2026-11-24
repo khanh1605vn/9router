@@ -59,11 +59,22 @@ export function learnableRecord(labels, rec) {
 }
 
 /**
- * Bản ghi (hay nút biển { code, value }) phải chờ labels.json mới được dùng: biển tốc độ tối đa. Thiếu danh sách học thì
- * không biết trị số nào được học (bản v1 gỡ mọi P.127), nên biển tốc độ đã lưu không hiện, không báo và không đổi giới
- * hạn trên đồng hồ tốc độ; các biển khác vẫn được báo như trước (LearnedSigns, requireLabels).
+ * Các loại biển từng được học ở bản trước (3b413d8, labels.json 47 nhãn) mà bản này đã gỡ (learn: false, xem
+ * models/MODEL_CARD.md): mọi biển tốc độ tối đa P.127, cấm xe tải P.106a, hạn chế trọng tải P.115, hết tất cả các lệnh
+ * cấm DP.135 và công trường W.227. Chỉ bản ghi của những loại này có thể nằm trong kho mà không được học ở bản này (biển
+ * nhập từ tệp phải có learn: true), nên khi chưa có labels.json kho cất đúng những bản ghi mà labels.json sẽ cất. Bản
+ * sau gỡ thêm loại nào thì phải thêm vào đây (bài thử so với models/labels.json).
  */
-export const labelsPending = (rec) => rec?.code === CAMERA_LIMIT_CODE;
+export const PRUNED_CODES = Object.freeze([CAMERA_LIMIT_CODE, 'P.106a', 'P.115', 'DP.135', 'W.227']);
+const PRUNED = new Set(PRUNED_CODES);
+
+/**
+ * Bản ghi (hay nút biển { code, value }) phải chờ labels.json mới được dùng: biển thuộc PRUNED_CODES. Thiếu danh sách
+ * học (đang tải lần đầu, tải lỗi, bản cài thiếu tệp) thì kho cất đúng các biển này, như khi đã tải được labels.json của
+ * bản này: số biển đang dùng và đang giữ không đổi theo trạng thái tải, biển tốc độ đã lưu không hiện, không báo và không
+ * đổi giới hạn trên đồng hồ tốc độ; các biển khác vẫn được báo (LearnedSigns, requireLabels).
+ */
+export const labelsPending = (rec) => typeof rec?.code === 'string' && PRUNED.has(rec.code);
 
 /** Số loại biển được học (nhãn learn: true) của labels.json, hoặc null khi chưa có labels. */
 export function learnableCount(labels) {
@@ -88,6 +99,7 @@ export const RANGE_STEP_M = 5; // tầm đọc biển ước tính làm tròn xu
 export const PROGRESS_STEP = 0.01; // tiến độ tải chỉ báo lại khi đổi từ chừng này (phần) trở lên
 // labels.json lỗi (mạng, mã băm sai): tự tải lại sau LABELS_RETRY_MS, mỗi lần lỗi tiếp thì gấp đôi, tối đa
 // LABELS_RETRY_MAX_MS; cũng tải lại ngay khi có mạng lại ('online') hay khi trang hiện lại. Không bao giờ tải song song.
+// Bản cài không có labels.json trong manifest ('missing') thì không tải lại.
 export const LABELS_RETRY_MS = 30 * 1000;
 export const LABELS_RETRY_MAX_MS = 10 * 60 * 1000;
 // Ứng dụng mở nhiều ngày liền: xoá ảnh kiểm tra quá hạn ít nhất mỗi chừng này (ms, theo đồng hồ của máy).
@@ -111,6 +123,7 @@ export const TEXT = Object.freeze({
   dark: 'Hình từ camera quá tối.',
   bright: 'Hình từ camera quá sáng.',
   labels: 'Chưa tải được danh sách biển. Ứng dụng đang tự tải lại (cần có mạng); hãy thử lại sau ít phút.',
+  labelsMissing: 'Bản cài này thiếu danh sách biển. Hãy cập nhật ứng dụng.',
   visionStopped: 'Bộ nhận diện biển bị lỗi nhiều lần nên đã dừng. Sẽ thử lại ở chuyến đi sau.',
   enableHidden: 'Ứng dụng đã bị ẩn khi đang mở camera. Hãy bấm bật lại.',
   keepAwakeOn: 'Đã bật “Giữ màn hình sáng khi lái” vì camera chỉ chạy khi màn hình sáng.',
@@ -344,9 +357,10 @@ export class CameraController {
   init() {
     if (this.#ready) return this.#ready;
     const o = this.#o;
-    // requireLabels: chưa biết nhãn nào được học (labels.json chưa tải hay tải lỗi) thì không hiện, không cảnh báo biển
-    // tốc độ (labelsPending), các biển khác vẫn dùng; có labels rồi thì bản ghi của nhãn đã bị gỡ (learn: false) bị cất
-    // (LearnedSigns#dormant). CameraLimit thì chỉ nghe biển learn: true (learnableRecord), nên thiếu labels là không đổi.
+    // requireLabels: chưa biết nhãn nào được học (labels.json chưa tải, tải lỗi hay thiếu) thì cất biển thuộc các loại
+    // bản này đã gỡ (labelsPending, PRUNED_CODES), các biển khác vẫn dùng; có labels rồi thì bản ghi của nhãn đã bị gỡ
+    // (learn: false) bị cất (LearnedSigns#dormant). CameraLimit thì chỉ nghe biển learn: true (learnableRecord), nên
+    // thiếu labels là không đổi.
     this.#learned = new LearnedSigns({ backend: o.learnedBackend, now: o.now, requireLabels: labelsPending });
     this.#limit = new CameraLimit();
     this.#sched = new LevelScheduler({ now: o.mono });
@@ -435,7 +449,8 @@ export class CameraController {
       .then((labels) => {
         if (this.#labelsLoad === p) this.#labelsLoad = null;
         if (this.#labelsState === 'ok') this.#labelsDelay = LABELS_RETRY_MS;
-        else this.#scheduleLabelsRetry();
+        // Bản cài thiếu tệp ('missing', manifest không có labels.json): tải lại cũng không có, nên không hẹn.
+        else if (this.#labelsState !== 'missing') this.#scheduleLabelsRetry();
         if (this.#learned) this.#emit();
         return labels;
       });
@@ -460,10 +475,10 @@ export class CameraController {
     this.#labelsTimer = null;
   }
 
-  /** labels.json đang lỗi hay thiếu: tải lại ngay (hẹn giờ, 'online', trang hiện lại, bộ nhận diện vừa tải xong). */
+  /** labels.json đang lỗi: tải lại ngay (hẹn giờ, 'online', trang hiện lại, bộ nhận diện vừa tải xong). */
   #retryLabels() {
     if (this.#disposed || !this.#limit) return;
-    if (this.#labelsState !== 'error' && this.#labelsState !== 'missing') return;
+    if (this.#labelsState !== 'error') return; // 'missing': bản cài không có tệp, tải lại vô ích
     this.#loadLabels().then(() => this.#makeLearner());
   }
 
@@ -561,7 +576,7 @@ export class CameraController {
    */
   #onOnline() {
     if (this.#disposed || !this.#limit) return;
-    if (this.#labelsState === 'error' || this.#labelsState === 'missing') {
+    if (this.#labelsState === 'error') {
       this.#labelsDelay = LABELS_RETRY_MS;
       this.#retryLabels();
     }
@@ -1416,7 +1431,9 @@ export class CameraController {
   importGeoJSON(input) {
     return this.#parked((l) => {
       const res = l.importGeoJSON(input);
-      return { ok: !res.error || res.added > 0, ...res, text: importText(res) };
+      // Bản cài thiếu labels.json thì không tự tải lại được: không bảo người dùng chờ.
+      const text = res.error === 'no-labels' && this.#labelsState === 'missing' ? TEXT.labelsMissing : importText(res);
+      return { ok: !res.error || res.added > 0, ...res, text };
     });
   }
 

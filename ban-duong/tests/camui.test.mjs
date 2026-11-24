@@ -132,28 +132,24 @@ test('biển đang lưu mà không dùng: dòng số biển, danh sách và hộ
   assert.equal(countText({ learned: 3, confirmed: 1, stored: 3 }, 'ok'), 'Biển đã học: 3 (1 đã xác nhận).');
   assert.equal(countText({ learned: 0, confirmed: 0, stored: 0 }, 'ok'), UI_TEXT.empty);
   assert.equal(clearText({ learned: 0, stored: 0 }), UI_TEXT.empty);
-  // Đang tải labels lần đầu.
-  assert.equal(heldText({ learned: 1, stored: 2 }, 'loading'), 'Đang tải danh sách biển; 1 biển đang lưu chờ tới khi tải xong.');
-  // labels.json lỗi hay thiếu: luôn nói biển tốc độ tạm chưa dùng, biển bản đồ vẫn báo, ứng dụng tự tải lại.
-  for (const labels of ['error', 'missing']) {
-    assert.equal(
-      heldText({ learned: 4, confirmed: 2, stored: 6 }, labels),
-      'Chưa tải được danh sách biển, nên 2 biển tốc độ do camera ghi nhận tạm chưa dùng (không hiện, không báo; vẫn xuất tệp hoặc xoá được) cho tới khi tải xong. Biển trên bản đồ và các biển camera ghi nhận khác vẫn được báo. Ứng dụng sẽ tự tải lại.'
-    );
-    assert.equal(
-      countText({ learned: 0, confirmed: 0, stored: 0 }, labels),
-      `${UI_TEXT.empty} Chưa tải được danh sách biển, nên biển tốc độ do camera ghi nhận tạm chưa dùng cho tới khi tải xong. Biển trên bản đồ và các biển camera ghi nhận khác vẫn được báo. Ứng dụng sẽ tự tải lại.`
-    );
-    // Dòng này luôn hiện, kể cả khi camera tắt (ô trạng thái thì ẩn).
-    const v = settingsView(st({ enabled: false, labels, counts: { learned: 1, confirmed: 1, stored: 2 } }));
+  // Trạng thái tải labels.json không đổi câu: lúc chưa có labels kho cất đúng các loại bản này đã gỡ (camctl
+  // PRUNED_CODES), nên không hứa "tải xong thì dùng", và không có biển bị giữ thì không có câu nào (kể cả khi lỗi).
+  for (const labels of ['idle', 'loading', 'error', 'missing', 'ok']) {
+    const v = settingsView(st({ enabled: false, labels, counts: { learned: 1, confirmed: 1, stored: 3 } }));
     assert.equal(v.statusShown, false);
-    assert.match(v.count, /^Biển đã học: 1 \(1 đã xác nhận\)\. Chưa tải được danh sách biển, nên 1 biển tốc độ/);
+    assert.equal(v.count, `Biển đã học: 1 (1 đã xác nhận). ${HELD}`, labels);
+    assert.equal(settingsView(st({ enabled: false, labels, counts: { learned: 0, confirmed: 0, stored: 0 } })).count, UI_TEXT.empty, labels);
+    assert.equal(settingsView(st({ enabled: false, labels, counts: { learned: 2, confirmed: 1, stored: 2 } })).count, 'Biển đã học: 2 (1 đã xác nhận).', labels);
   }
-  // TEXT.labels (cũng dùng khi nhập tệp mà chưa có labels) không còn bảo mở lại ứng dụng: việc tải lại là tự động.
+  assert.equal(heldText({ learned: 0, stored: 0 }), null);
+  for (const t of [HELD]) assert.doesNotMatch(t, /tải xong|tạm chưa|vẫn được báo/);
+  // TEXT.labels (dùng khi nhập tệp mà labels.json đang lỗi) không còn bảo mở lại ứng dụng: việc tải lại là tự động.
   assert.doesNotMatch(TEXT.labels, /mở lại/);
   assert.match(TEXT.labels, /tự tải lại/);
+  // Bản cài thiếu labels.json: không hứa tự tải lại.
+  assert.doesNotMatch(TEXT.labelsMissing, /tải lại|chờ|thử lại/);
   // Tiếng Việt viết thường kiểu câu, không có chữ in hoa liền nhau.
-  for (const t of [HELD, heldText(some, 'error'), UI_TEXT.noneInUse, TEXT.labels]) assert.doesNotMatch(t, /\p{Lu}{2,}/u);
+  for (const t of [HELD, UI_TEXT.noneInUse, TEXT.labels, TEXT.labelsMissing]) assert.doesNotMatch(t, /\p{Lu}{2,}/u);
 });
 
 test('importResultText: "Đã thêm X biển, bỏ qua Y", kho đầy, lỗi tệp', () => {
