@@ -69,7 +69,20 @@ export const UI_TEXT = Object.freeze({
   rejected: 'Đã bỏ biển này. Camera sẽ không học lại biển này trong một thời gian.',
   removed: 'Đã ghi nhận biển đã bị dỡ.',
   evalCleared: 'Đã xoá ảnh biển đã lưu.',
+  // Thay cho công tắc "Dùng biển tốc độ do camera ghi nhận…" khi labels.json không cho học biển tốc độ nào (bản v1).
+  noSpeed: 'Bản này chưa học biển tốc độ tối đa, nên camera không đổi giới hạn trên đồng hồ tốc độ.',
 });
+
+/**
+ * Câu về các loại biển được học, theo labels.json đã tải (st.learnable, st.speedLearnable), hoặc null khi chưa có.
+ * Biển tốc độ bị gỡ ở bản v1 vì trên dữ liệu thử mô hình còn đọc nhầm trị số (models/MODEL_CARD.md).
+ */
+export function learnText(st) {
+  const n = st?.learnable;
+  if (!Number.isInteger(n) || n <= 0) return null;
+  const head = `Bản này học ${num(n)} loại biển thường gặp`;
+  return st.speedLearnable ? `${head}.` : `${head}; chưa học biển tốc độ tối đa vì trên dữ liệu thử, mô hình còn đọc nhầm trị số.`;
+}
 
 /**
  * Luồng "Kiểm tra camera" bị bộ điều phối đóng (người dùng không bấm đóng): câu giải thích và có hiện nút "Mở lại" không.
@@ -214,6 +227,9 @@ export function settingsView(st) {
     exportDisabled: !parked || !(st?.counts?.learned > 0),
     parkedHint: !parked,
     evalShown: Number(st?.evalCount) > 0,
+    // Công tắc biển tốc độ chỉ có nghĩa khi labels.json cho học biển tốc độ; không thì một dòng ghi chú thay chỗ.
+    camSpeedShown: st?.speedLearnable === true,
+    noSpeedNote: st?.labels === 'ok' && st?.speedLearnable !== true,
   };
 }
 
@@ -255,14 +271,16 @@ export function runNote() {
 }
 
 /** Đoạn lời giới thiệu hiện lúc bật lần đầu: [[tiêu đề nhỏ, nội dung]]. */
-export function introParagraphs(manifest = ML_MANIFEST) {
+export function introParagraphs(manifest = ML_MANIFEST, st = null) {
   const mb = downloadMb(manifest);
+  const learn = learnText(st);
   return [
     [
       'Cách hoạt động',
       'Camera ghi nhận biển báo khi xe đi qua. Ở những lần đi sau, khi biển đã được thấy rõ vào ít nhất 2 ngày khác nhau ' +
         '(hoặc bạn bấm “Đúng” trong danh sách biển), ứng dụng báo trước 100–200 m. Biển chưa xác nhận chỉ hiện trên màn ' +
-        'hình, không đọc thành tiếng.',
+        'hình, không đọc thành tiếng.' +
+        (learn ? ` ${learn}` : ''),
     ],
     [
       'Dùng camera nào',
@@ -431,6 +449,9 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
     $('btnCamCheck').disabled = v.checkDisabled;
     $('optSignCamera').checked = st.signCamera;
     $('optCamSpeed').checked = st.camSpeed;
+    $('optCamSpeed').closest('label').hidden = !v.camSpeedShown;
+    $('camSpeedNote').hidden = !v.noSpeedNote;
+    $('camSpeedNote').textContent = UI_TEXT.noSpeed;
     $('camLearnedCount').textContent = countText(st.counts);
     $('btnCamList').disabled = v.storeDisabled;
     $('btnCamImport').disabled = v.storeDisabled;
@@ -480,7 +501,7 @@ export function initCamUi(ctl, { store, map = null, openModal, closeOverlays, to
 
   function openIntro() {
     const body = el('div', { class: 'view cam-intro' });
-    for (const [head, text] of introParagraphs()) body.append(el('p', { class: 'note' }, el('b', {}, `${head}. `), text));
+    for (const [head, text] of introParagraphs(ML_MANIFEST, st)) body.append(el('p', { class: 'note' }, el('b', {}, `${head}. `), text));
     body.append(
       el(
         'div',

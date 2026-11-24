@@ -36,9 +36,12 @@ import {
   UI_TEXT,
   clearEvalText,
   evalCountText,
+  learnText,
 } from '../js/camui.js';
 import { EVAL_TEXT } from '../js/evalcrops.js';
-import { TEXT } from '../js/camctl.js';
+import { learnableCount, speedLearnable, TEXT } from '../js/camctl.js';
+import { SIGN_CATALOGUE } from '../js/signs.js';
+import { buildLabels } from '../tools/camera/lib.mjs';
 import { CAPTURE_SPEED, FOE_Y_FRAC, foeFor } from '../js/camsched.js';
 import { dayNumber, MAX_IMPORT_CHARS } from '../js/learnedsigns.js';
 import { ML_MANIFEST } from '../js/mlmanifest.js';
@@ -330,4 +333,62 @@ test('camui.js: dữ liệu từ bản ghi và tệp không bao giờ đi qua in
   assert.ok(htmlUses.length > 0);
   for (const u of htmlUses) assert.match(u, /^(?:v\b|lineIcon\(|entry \? signSvg\(|\/\/)/, u);
   assert.doesNotMatch(src, /insertAdjacentHTML|outerHTML|document\.write/);
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// Biển tốc độ: công tắc camSpeed chỉ hiện khi labels.json cho học biển tốc độ (bản v1 thì không)
+
+/** labels.json như bản dựng nhưng mọi P.127 có learn: false (như bản v1 đã cài). */
+function prunedSpeedLabels() {
+  const j = buildLabels(SIGN_CATALOGUE);
+  for (const l of j.labels) if (l.code === 'P.127') l.learn = false;
+  return j;
+}
+
+test('settingsView: công tắc biển tốc độ chỉ hiện khi labels.json học biển tốc độ; không thì một dòng ghi chú', () => {
+  let v = settingsView(st({ labels: 'ok', speedLearnable: true }));
+  assert.equal(v.camSpeedShown, true);
+  assert.equal(v.noSpeedNote, false);
+  v = settingsView(st({ labels: 'ok', speedLearnable: false }));
+  assert.equal(v.camSpeedShown, false);
+  assert.equal(v.noSpeedNote, true);
+  // Chưa tải được labels.json: không biết nên không hiện cả hai.
+  v = settingsView(st({ labels: 'error', speedLearnable: false }));
+  assert.equal(v.camSpeedShown, false);
+  assert.equal(v.noSpeedNote, false);
+  assert.equal(settingsView(st({})).camSpeedShown, false);
+  assert.match(UI_TEXT.noSpeed, /^Bản này chưa học biển tốc độ tối đa, nên camera không đổi giới hạn trên đồng hồ tốc độ\.$/);
+  const html = readFileSync(new URL('../index.html', import.meta.url), 'utf8');
+  assert.match(html, /<p id="camSpeedNote" class="note" hidden><\/p>/);
+  assert.match(html, /<label class="opt"><span>Dùng biển tốc độ do camera ghi nhận cho đồng hồ tốc độ<small>[^<]+<\/small><\/span><input id="optCamSpeed"/);
+});
+
+test('learnText: số loại biển được học theo labels.json; nói rõ khi chưa học biển tốc độ', () => {
+  const full = buildLabels(SIGN_CATALOGUE);
+  const pruned = prunedSpeedLabels();
+  assert.equal(learnText(null), null);
+  assert.equal(learnText(st({ learnable: null })), null);
+  assert.equal(learnText(st({ learnable: 0 })), null);
+  assert.equal(learnText(st({ learnable: learnableCount(full), speedLearnable: speedLearnable(full) })), 'Bản này học 47 loại biển thường gặp.');
+  assert.equal(
+    learnText(st({ learnable: learnableCount(pruned), speedLearnable: speedLearnable(pruned) })),
+    'Bản này học 36 loại biển thường gặp; chưa học biển tốc độ tối đa vì trên dữ liệu thử, mô hình còn đọc nhầm trị số.'
+  );
+  // Lời giới thiệu lúc bật lần đầu có câu này khi đã có labels, không có khi chưa.
+  const how = (x) => introParagraphs(ML_MANIFEST, x)[0][1];
+  assert.match(how(st({ learnable: 32, speedLearnable: false })), /Bản này học 32 loại biển thường gặp; chưa học biển tốc độ tối đa/);
+  assert.doesNotMatch(how(null), /loại biển/);
+});
+
+test('models/labels.json đã cài (bản v1): 32 loại biển, không học biển tốc độ nào, nên công tắc biển tốc độ bị ẩn', () => {
+  const installed = JSON.parse(readFileSync(new URL('../models/labels.json', import.meta.url), 'utf8'));
+  // Khi biển tốc độ được học lại (DECISION.md: cần mô hình qua E1 cho cả 11 trị số và dữ liệu đường thật), sửa bài này
+  // cùng README ("Chỉ 32 loại biển", "Biển tốc độ chưa được học") và lời trong ứng dụng.
+  assert.equal(learnableCount(installed), 32);
+  assert.equal(speedLearnable(installed), false);
+  const v = settingsView(st({ labels: 'ok', learnable: learnableCount(installed), speedLearnable: speedLearnable(installed) }));
+  assert.equal(v.camSpeedShown, false);
+  assert.equal(v.noSpeedNote, true);
+  const readme = readFileSync(new URL('../README.md', import.meta.url), 'utf8');
+  assert.match(readme, new RegExp(`Chỉ ${learnableCount(installed)} loại biển`));
 });

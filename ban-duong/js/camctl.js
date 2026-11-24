@@ -27,7 +27,7 @@ import { ML_MANIFEST } from './mlmanifest.js';
 import { LearnedSigns, MAX_RECORDS } from './learnedsigns.js';
 import { CLS_MIN_PX, Learner, NOMINAL_W } from './signlearn.js';
 import { DEFAULT_HFOV, focalPx } from './signtrack.js';
-import { CameraLimit } from './alerts.js';
+import { CAMERA_LIMIT_CODE, CameraLimit } from './alerts.js';
 import { EVAL_FILE_NAME, EVAL_TEXT, EvalCrops } from './evalcrops.js';
 import { formatNumberVi } from './signs.js';
 
@@ -35,6 +35,22 @@ const P = globalThis.VisionProto; // vision.js đã nạp visionproto.js
 
 // ---- Ngưỡng ----
 export const LABELS_PATH = 'models/labels.json';
+
+/**
+ * labels.json có cho học ít nhất một biển tốc độ tối đa (P.127[n], learn: true) không. Mô hình v1 thì không (mọi trị số
+ * P.127 đều bị gỡ vì không qua ngưỡng E1, xem models/MODEL_CARD.md): khi đó camera không bao giờ đổi giới hạn trên
+ * đồng hồ tốc độ, nên công tắc "Dùng biển tốc độ do camera ghi nhận…" được ẩn (cài đặt camSpeed vẫn giữ nguyên).
+ */
+export function speedLearnable(labels) {
+  const L = labels && Array.isArray(labels.labels) ? labels.labels : [];
+  return L.some((l) => l && l.learn === true && l.code === CAMERA_LIMIT_CODE && l.value != null);
+}
+
+/** Số loại biển được học (nhãn learn: true) của labels.json, hoặc null khi chưa có labels. */
+export function learnableCount(labels) {
+  if (!labels || !Array.isArray(labels.labels)) return null;
+  return labels.labels.filter((l) => l && l.learn === true).length;
+}
 export const CHECK_FRAMES = 30; // "Kiểm tra camera": số khung đo cho mỗi tổ hợp lượt quét ('A' và 'A'+'B')
 export const CHECK_FRAMES_MAX = 200; // … không đo quá chừng này khung mỗi tổ hợp
 export const CHECK_GRAB_FAILS = 20; // … lấy khung hỏng liên tiếp chừng này lần thì thôi đo
@@ -1392,6 +1408,8 @@ export class CameraController {
       camEval: s.camEval === true,
       signCamera: s.signCamera !== false,
       camSpeed: s.camSpeed !== false,
+      learnable: learnableCount(this.#labels),
+      speedLearnable: speedLearnable(this.#labels),
       speedLimit: this.speedLimit ? this.speedLimit.n : null,
     };
     st.text = stateText(st);

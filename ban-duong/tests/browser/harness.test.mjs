@@ -16,7 +16,7 @@ import { CLS_MIN_PX, NOMINAL_W } from '../../js/signlearn.js';
 import { destination, distance } from '../../js/geo.js';
 import * as C from './lib/drive-config.mjs';
 import * as B from './bench.js';
-import { bboxHasRoad, bboxOf, BDScene as S, BROWSER_DIR, JUNCTION_COORD, JUNCTION_KEY, ORIGIN, overpassFixture, ROAD, sceneSigns, SIGN_LAT, SIGNS, WORLD } from './lib/drive-world.mjs';
+import { bboxHasRoad, bboxOf, BDScene as S, BROWSER_DIR, fixtureLabels, JUNCTION_COORD, JUNCTION_KEY, MAIN_SIGN, ORIGIN, overpassFixture, ROAD, sceneSigns, SIGN_LAT, SIGNS, SPEED_FIXTURE_LABEL, WORLD } from './lib/drive-world.mjs';
 
 const P = globalThis.VisionProto;
 const O = (() => {
@@ -115,12 +115,29 @@ test('truy vấn Overpass: chỉ ô chứa đường thử nhận dữ liệu', 
 
 test('biển của cảnh: R.122 cách nút giao 10 m, ba biển cách nhau đủ xa, họ biển từ labels.json', () => {
   assert.equal(ROAD.junction - SIGNS['R.122'].s, 10);
-  const xs = Object.values(SIGNS).map((s) => s.s).sort((a, b) => a - b);
+  // P.127[50] (S3L) đứng đúng chỗ của biển chính và không bao giờ cùng một lần đi với nó; các chỗ đặt biển cách xa nhau.
+  assert.equal(SIGNS[SPEED_FIXTURE_LABEL].s, SIGNS[MAIN_SIGN].s);
+  const xs = [...new Set(Object.values(SIGNS).map((s) => s.s))].sort((a, b) => a - b);
+  assert.equal(xs.length, 3);
   for (let i = 1; i < xs.length; i++) assert.ok(xs[i] - xs[i - 1] > 100);
   const sg = sceneSigns(['W.224', 'R.122'], { 'W.224': 'triangle', 'R.122': 'octagon' });
   assert.deepEqual(sg.map((x) => x.shape), ['triangle', 'round']);
   assert.ok(sg.every((x) => x.lat === SIGN_LAT && x.dir === 1));
   assert.throws(() => sceneSigns(['P.999'], {}));
+});
+
+test('biển chính học được với models/labels.json đã cài; nhãn giả lập của S3L chỉ đổi learn của P.127[50]', () => {
+  const text = readFileSync(join(BROWSER_DIR, '..', '..', 'models', 'labels.json'), 'utf8');
+  const installed = JSON.parse(text);
+  const learn = (j, l) => j.labels.find((x) => x.label === l)?.learn;
+  for (const l of [MAIN_SIGN, 'W.224', 'R.122']) assert.equal(learn(installed, l), true, l);
+  assert.equal(learn(installed, SPEED_FIXTURE_LABEL), false, 'bản v1 không học biển tốc độ');
+  const fx = JSON.parse(fixtureLabels(text).toString('utf8'));
+  assert.equal(learn(fx, SPEED_FIXTURE_LABEL), true);
+  const diff = fx.labels.filter((l, i) => JSON.stringify(l) !== JSON.stringify(installed.labels[i])).map((l) => l.label);
+  assert.deepEqual(diff, [SPEED_FIXTURE_LABEL]);
+  assert.deepEqual({ ...fx, labels: null }, { ...installed, labels: null });
+  assert.throws(() => fixtureLabels(text, 'P.999'));
 });
 
 test('oracle.js: hằng số như bộ nhận diện thật (visionproto.js)', () => {
@@ -200,8 +217,10 @@ test('số lần thiếu để bị loại (PLAN §5.8): 7 từ mức trần, 2 
 });
 
 test('init.js: nhịp đọc giao diện, GPS giả và giọng đọc giả', () => {
-  assert.deepEqual({ ...I }, { SAMPLE_MS: 500, HOOK_MS: 300, SPEAK_MS_PER_CHAR: 55, SPEAK_MS_MIN: 200, FIRST_FIX_MS: 300, HEADING_NOISE_DEG: 1, SPEED_NOISE: 0.1, MOVING: 0.5 });
+  assert.deepEqual({ ...I }, { SAMPLE_MS: 500, HOOK_MS: 300, SPEAK_MS_PER_CHAR: 55, SPEAK_MS_MIN: 200, FIRST_FIX_MS: 300, HEADING_NOISE_DEG: 1, SPEED_NOISE: 0.1, MOVING: 0.5, GT_FAR: 120, GT_IOU: 0.3, GT_MAX_ROWS: 20000 });
   assert.ok(I.SAMPLE_MS < 1000, 'đọc giao diện dày hơn nhịp định vị 1 Hz');
+  // Đối chiếu khung với cảnh: xa hơn mọi biển bộ dò còn thấy (biển 0,7 m ở 120 m chỉ còn khoảng 8 px).
+  assert.ok(I.GT_FAR >= 100 && I.GT_IOU > 0 && I.GT_IOU < 1);
 });
 
 test('bench.js: số khung, tổ hợp lượt quét, chạy dài, phân vị', () => {

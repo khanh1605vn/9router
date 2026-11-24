@@ -50,12 +50,34 @@ export const LANE_WEST = -BDScene.LANE_W / 2;
 // Biển cho chiều đi Đông: 5 m bên phải làn xe.
 export const SIGN_LAT = LANE_EAST + BDScene.SIGN_RIGHT;
 
-/** Các biển của cảnh (chiều đi Đông). R.122 đặt 10 m trước nút giao, đúng chỗ bộ học neo biển của nút giao. */
+/**
+ * Các biển của cảnh (chiều đi Đông). R.122 đặt 10 m trước nút giao, đúng chỗ bộ học neo biển của nút giao.
+ * P.103a, W.224, R.122 được học với models/labels.json đã cài. P.127[50] đứng cùng chỗ với P.103a (không bao giờ cùng
+ * một lần đi): mô hình v1 không học biển tốc độ (learn: false), nên nó chỉ dùng trong kịch bản S3L với một labels.json
+ * giả lập chỉ có trong kiểm thử (SPEED_FIXTURE_LABEL), để giữ kiểm tra đường đi của CameraLimit trên trình duyệt.
+ */
 export const SIGNS = Object.freeze({
+  'P.103a': Object.freeze({ label: 'P.103a', code: 'P.103a', value: null, s: 350 }),
   'P.127[50]': Object.freeze({ label: 'P.127[50]', code: 'P.127', value: '50', s: 350 }),
   'W.224': Object.freeze({ label: 'W.224', code: 'W.224', value: null, s: 520 }),
   'R.122': Object.freeze({ label: 'R.122', code: 'R.122', value: null, s: ROAD.junction - 10 }),
 });
+
+/** Biển chính của các kịch bản (học được với labels.json đã cài) và biển tốc độ của S3L (chỉ với nhãn giả lập). */
+export const MAIN_SIGN = 'P.103a';
+export const SPEED_FIXTURE_LABEL = 'P.127[50]';
+
+/**
+ * labels.json giả lập cho S3L: đúng tệp đã cài, chỉ đổi learn của `label` thành true. Chỉ dùng trong kiểm thử (được
+ * trả qua page.route cùng mã băm mới trong manifest trên đường truyền); tệp trên đĩa không đổi.
+ */
+export function fixtureLabels(installed, label = SPEED_FIXTURE_LABEL) {
+  const j = JSON.parse(installed);
+  const e = j.labels.find((l) => l.label === label);
+  if (!e) throw new Error(`labels.json không có nhãn ${label}`);
+  e.learn = true;
+  return Buffer.from(`${JSON.stringify(j, null, 2)}\n`);
+}
 
 const r7 = (x) => Math.round(x * 1e7) / 1e7;
 const ll = (c) => ({ lat: r7(c[1]), lon: r7(c[0]) });

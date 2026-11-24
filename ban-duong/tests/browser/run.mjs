@@ -12,16 +12,23 @@
 // - --real-models: bộ nhận diện thật (Vision, LiteRT.js) trên chính khung hình của cảnh; cần models/ đã cài.
 // S10 (khớp vectơ mẫu) và S11 (độ trễ) luôn dùng mô hình thật, và tự bỏ qua khi models/ chưa có mô hình.
 //
+// Biển: P.103a, W.224 và R.122 học được với models/labels.json đã cài. Mô hình v1 không học biển tốc độ (mọi P.127 có
+// learn: false, xem models/MODEL_CARD.md), nên đường đi của biển giới hạn "Camera" (CameraLimit) được kiểm riêng ở S3L
+// trong một ngữ cảnh trình duyệt riêng, với labels.json giả lập chỉ có trong kiểm thử (P.127[50] learn: true), và chỉ
+// ở chế độ oracle.
+//
 // Cổng: một cổng trống trong 20500–20599. Mọi tiến trình (máy chủ thử, Chromium) đều được dừng khi xong hay khi lỗi.
 
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { APP, loadPlaywright, startDevServer } from './lib/harness.mjs';
 import {
-  bboxHasRoad, bboxOf, JUNCTION_KEY, LANE_EAST, LANE_WEST, locate, ORIGIN, overpassFixture, ROAD, sceneSigns, SIGNS, SOURCES,
+  bboxHasRoad, bboxOf, fixtureLabels, JUNCTION_KEY, LANE_EAST, LANE_WEST, locate, MAIN_SIGN, ORIGIN, overpassFixture, ROAD, sceneSigns,
+  SIGNS, SOURCES, SPEED_FIXTURE_LABEL,
 } from './lib/drive-world.mjs';
 import {
   ALONG_ERR_MAX, DAY0, DAY_MS, EAST, GPS_ACCURACY, GPS_SIGMA, HIDE_STOP_MS, IDB_FLUSH_MS, LATENCY_FRAMES, LIMIT_MARGIN,
@@ -41,10 +48,15 @@ const OUT = opt('out');
 const SHOTS = opt('shots');
 const ONLY = opt('only') ? new Set(opt('only').split(',').map((x) => x.trim().toUpperCase())) : null;
 
-const FAMILIES = (() => {
-  const j = JSON.parse(readFileSync(join(APP, 'models', 'labels.json'), 'utf8'));
-  return Object.fromEntries(j.labels.map((l) => [l.label, l.family]));
-})();
+const LABELS_TEXT = readFileSync(join(APP, 'models', 'labels.json'), 'utf8');
+const LABELS = JSON.parse(LABELS_TEXT);
+const FAMILIES = Object.fromEntries(LABELS.labels.map((l) => [l.label, l.family]));
+const LEARNABLE = new Set(LABELS.labels.filter((l) => l.learn === true).map((l) => l.label));
+const M = MAIN_SIGN; // biển chính của các kịch bản (P.103a)
+const SPD = SPEED_FIXTURE_LABEL; // biển tốc độ của S3L (P.127[50], chỉ học được với nhãn giả lập)
+// Câu đọc của từng biển (để nhận ra câu của camera và kiểm khoảng cách đọc).
+const SAYS = Object.freeze({ 'P.103a': /cấm ô tô/i, 'R.122': /dừng lại/i, 'W.224': /người đi bộ/i, 'P.127[50]': /tốc độ tối đa 50/i });
+const ANY_SIGN_SAY = /tốc độ tối đa|dừng lại|cấm ô tô|người đi bộ/i;
 
 // ---------------------------------------------------------------------------------------------
 // Tiện ích
@@ -122,7 +134,11 @@ const PNG_1PX = png1px([233, 238, 242]);
 const OVERPASS = JSON.stringify(overpassFixture());
 const EMPTY_OVERPASS = JSON.stringify({ version: 0.6, osm3s: { timestamp_osm_base: '2026-11-20T00:00:00Z' }, elements: [] });
 
-async function newContext(browser, net) {
+/**
+ * Một ngữ cảnh trình duyệt mới (IndexedDB riêng). labels: Buffer labels.json giả lập (chỉ S3L): được trả cho
+ * models/labels.json?v=… và manifest trên đường truyền mang mã băm, kích thước của nó (tệp trên đĩa không đổi).
+ */
+async function newContext(browser, net, { labels = null } = {}) {
   const ctx = await browser.newContext({
     viewport: VIEWPORT,
     deviceScaleFactor: 1,
@@ -147,18 +163,28 @@ async function newContext(browser, net) {
     net.blocked.add(new URL(url).host);
     return route.abort();
   });
-  if (!REAL) {
-    // Chưa có mô hình thật: thêm hai mục mô hình giả vào manifest (chỉ trên đường truyền, tệp trên đĩa không đổi) để
-    // bộ điều phối coi tính năng là có; bộ nhận diện oracle không tải tệp nào.
+  const fx = labels ? { sha256: createHash('sha256').update(labels).digest('hex'), size: labels.length } : null;
+  if (!REAL || fx) {
+    // Oracle: thêm hai mục mô hình giả vào manifest nếu chưa có (chỉ trên đường truyền, tệp trên đĩa không đổi) để bộ
+    // điều phối coi tính năng là có; bộ nhận diện oracle không tải tệp nào. Nhãn giả lập: thay mục labels.json.
     await ctx.route(/\/js\/mlmanifest\.js(\?|$)/, async (route) => {
       const res = await route.fetch();
       let body = await res.text();
       const e = (n) => `{"sha256":"${'ab'.repeat(32)}","size":${n}}`;
-      if (!/sign-det\.int8\.tflite/.test(body)) {
+      if (!REAL && !/sign-det\.int8\.tflite/.test(body)) {
         body = body.replace('"files": {', `"files": {"models/sign-det.int8.tflite": ${e(520000)}, "models/sign-cls.int8.tflite": ${e(380000)},`);
+      }
+      if (fx) {
+        const before = body;
+        body = body.replace(/("models\/labels\.json":\s*\{\s*"sha256":\s*")[0-9a-f]{64}(",\s*"size":\s*)\d+/, `$1${fx.sha256}$2${fx.size}`);
+        if (body === before) throw new Error('manifest: không thay được mục labels.json');
       }
       return route.fulfill({ status: 200, contentType: 'text/javascript; charset=utf-8', body });
     });
+  }
+  if (fx) {
+    await ctx.route(/\/models\/labels\.json(\?|$)/, (route) =>
+      route.fulfill({ status: 200, contentType: 'application/json', body: labels }));
   }
   return ctx;
 }
@@ -244,7 +270,15 @@ async function drivePass(env, p) {
   await page.close();
   const pass = { day: p.day, night: Boolean(p.night), dir, from, to, signs: p.signs, flags: cfg.scene.flags, permission: cfg.camPermission, log, before, after, errors, ms: Date.now() - t0 };
   env.passes.push(brief(pass));
-  console.log(`  ngày ${p.day}${p.night ? ' (đêm)' : ''}: ${(pass.ms / 1000).toFixed(0)} s, getUserMedia ${log.gum}, khung ${log.oracle?.frames ?? '?'}, câu đọc ${log.speech.length}, lượt đi qua ${log.passed.length}`);
+  console.log(`  ngày ${p.day}${p.night ? ' (đêm)' : ''}: ${(pass.ms / 1000).toFixed(0)} s, getUserMedia ${log.gum}, khung ${log.oracle?.frames ?? log.framesSeen ?? '?'}, câu đọc ${log.speech.length}, lượt đi qua ${log.passed.length}`);
+  if (REAL) {
+    for (const [label, e] of Object.entries(gtStats(log.gt))) {
+      const a = e.all;
+      console.log(`    ${label}: ${a.frames} khung có biển, thấy ${a.det}, phân loại ${a.cls}, đúng ${a.ok} (p ≥ ${GT_P_SURE}: ${a.sure}), nhầm ${a.wrong}`);
+    }
+    const tr = log.results.map((x) => `${x.label ?? '?'}:${x.ok ? 'nhận' : x.reason}`);
+    console.log(`    lượt bám đã xét: ${tr.length ? tr.join(', ') : 'không có'}; hộp lạ ${log.stray.boxes} (phân loại ${log.stray.classified}, nhãn được học ${log.stray.learnable})`);
+  }
   return pass;
 }
 
@@ -258,6 +292,36 @@ async function readRecords(page, ids) {
     for (const k of Object.keys(out)) if (!out[k]) delete out[k];
     return { records: Object.values(out), counts: L.counts() };
   }, Object.values(ids));
+}
+
+// Dải khoảng cách (m) khi đối chiếu từng khung với cảnh, và p tối thiểu của một khung "đọc chắc" (như MEAN_P_MIN).
+const GT_BINS = Object.freeze([[0, 20], [20, 30], [30, 45], [45, 60], [60, 80], [80, 120]]);
+const GT_P_SURE = 0.85;
+
+/**
+ * Tỉ lệ thấy và đọc đúng của bộ nhận diện theo từng biển của cảnh, gộp và theo dải khoảng cách: frames (khung có biển
+ * trong hình), det (có hộp khớp IoU ≥ 0,3), cls (hộp đó đã được phân loại), ok (nhãn top-1 đúng), sure (đúng và
+ * p ≥ 0,85), wrong (nhãn top-1 là một nhãn khác, không phải nền/biển khác).
+ */
+function gtStats(rows) {
+  const out = {};
+  const blank = () => ({ frames: 0, det: 0, cls: 0, ok: 0, sure: 0, wrong: 0 });
+  for (const [label, Z, , det, top, p] of rows || []) {
+    const e = (out[label] ||= { all: blank(), byZ: Object.fromEntries(GT_BINS.map(([a, b]) => [`${a}-${b}`, blank()])) });
+    const bin = GT_BINS.find(([a, b]) => Z >= a && Z < b);
+    for (const c of [e.all, bin && e.byZ[`${bin[0]}-${bin[1]}`]].filter(Boolean)) {
+      c.frames++;
+      if (!det) continue;
+      c.det++;
+      if (top == null) continue;
+      c.cls++;
+      if (top === label) {
+        c.ok++;
+        if (p >= GT_P_SURE) c.sure++;
+      } else if (top !== 'background' && top !== 'other-sign') c.wrong++;
+    }
+  }
+  return out;
 }
 
 /** Tóm tắt một lần đi cho tệp kết quả (bỏ các mẫu giao diện dài). */
@@ -281,6 +345,7 @@ function brief(pass) {
     speech: l.speech.map((x) => ({ text: x.text, s: r1(x.s) })),
     passed: l.passed.map((e) => ({ ...e, s: r1(e.s), L: r1(e.L) })),
     tracks: l.results,
+    vision: { framesSeen: l.framesSeen, gt: gtStats(l.gt), stray: l.stray },
     records: pass.after.records.map(recBrief),
     pageErrors: pass.errors.page,
     consoleErrors: pass.errors.console.slice(0, 20),
@@ -340,106 +405,150 @@ const unchanged = (a, b) => a && b && a.L === b.L && a.misses === b.misses && a.
 
 const SC = {};
 
+/** Lần đi đầu tiên với biển `main` và R.122 (S1, và ngày đầu của S3L). */
+async function firstPass(env, res, main, shotName) {
+  const shot = env.shot(shotName, { canvas: true });
+  const pass = await drivePass(env, { day: env.nextDay(), signs: [main, 'R.122'], hooks: [{ at: 320, fn: shot }] });
+  common(res, pass);
+  res.check('kho trống trước lần đi', pass.before.records.length === 0, pass.before.counts);
+  const p = recOf(pass.after, main);
+  const r = recOf(pass.after, 'R.122');
+  res.check('có đúng hai biển đã học', pass.after.records.length === 2, pass.after.records.map(recBrief));
+  res.check(`${main} là biển chưa xác nhận`, p?.status === 'candidate', p && recBrief(p));
+  res.check('R.122 là biển chưa xác nhận', r?.status === 'candidate', r && recBrief(r));
+  return { pass, p, r };
+}
+
 SC.S1 = {
-  title: 'Lần đầu đi qua P.127[50] và R.122 ở 50 km/h: hai biển chưa xác nhận, sai số ≤ 5 m, R.122 neo vào nút giao, không đọc gì',
+  title: `Lần đầu đi qua ${M} và R.122 ở 50 km/h: hai biển chưa xác nhận, sai số ≤ 5 m, R.122 neo vào nút giao, không đọc gì`,
   async run(env, res) {
-    const shot = env.shot('s1-scene-day', { canvas: true });
-    const pass = await drivePass(env, { day: env.nextDay(), signs: ['P.127[50]', 'R.122'], hooks: [{ at: 320, fn: shot }] });
-    common(res, pass);
-    res.check('kho trống trước lần đi', pass.before.records.length === 0, pass.before.counts);
-    const p = recOf(pass.after, 'P.127[50]');
-    const r = recOf(pass.after, 'R.122');
-    res.check('có đúng hai biển đã học', pass.after.records.length === 2, pass.after.records.map(recBrief));
-    res.check('P.127[50] là biển chưa xác nhận', p?.status === 'candidate', p && recBrief(p));
-    res.check('R.122 là biển chưa xác nhận', r?.status === 'candidate', r && recBrief(r));
-    if (p) res.check(`P.127[50]: sai số dọc đường ≤ ${ALONG_ERR_MAX} m`, Math.abs(locate(p.coord).s - SIGNS['P.127[50]'].s) <= ALONG_ERR_MAX, { s: r1(locate(p.coord).s), want: SIGNS['P.127[50]'].s });
+    res.check(`${M}, W.224 và R.122 học được với models/labels.json đã cài`, [M, 'W.224', 'R.122'].every((l) => LEARNABLE.has(l)), [M, 'W.224', 'R.122'].filter((l) => !LEARNABLE.has(l)));
+    const { pass, p, r } = await firstPass(env, res, M, 's1-scene-day');
+    if (p) res.check(`${M}: sai số dọc đường ≤ ${ALONG_ERR_MAX} m`, Math.abs(locate(p.coord).s - SIGNS[M].s) <= ALONG_ERR_MAX, { s: r1(locate(p.coord).s), want: SIGNS[M].s });
     if (r) {
       res.check(`R.122: sai số dọc đường ≤ ${ALONG_ERR_MAX} m`, Math.abs(locate(r.coord).s - SIGNS['R.122'].s) <= ALONG_ERR_MAX, { s: r1(locate(r.coord).s), want: SIGNS['R.122'].s });
       res.check('R.122 neo vào nút giao', r.junction === JUNCTION_KEY, { junction: r.junction, want: JUNCTION_KEY });
     }
     res.check('hướng mặt biển nhìn về xe đi Đông (270° ± 15°)', [p, r].every((x) => x && Math.abs(((x.facing - 270 + 540) % 360) - 180) <= 15), [p?.facing, r?.facing]);
-    res.check('không đọc biển nào của camera', camSpeech(pass).length === 0 && !pass.log.speech.some((x) => /tốc độ tối đa|dừng lại/.test(x.text)), pass.log.speech.map((x) => x.text));
+    res.check('không đọc biển nào của camera', camSpeech(pass).length === 0 && !pass.log.speech.some((x) => ANY_SIGN_SAY.test(x.text)), pass.log.speech.map((x) => x.text));
     res.check('không phát sự kiện đi qua cho biển mới', pass.log.passed.length === 0, pass.log.passed);
-    if (p) env.ids['P.127[50]'] = p.id;
+    if (p) env.ids[M] = p.id;
     if (r) env.ids['R.122'] = r.id;
     res.data = { records: pass.after.records.map(recBrief), speech: pass.log.speech.map((x) => x.text), oracle: pass.log.oracle, tracks: pass.log.results };
     env.chain.S1 = res.status === 'pass';
   },
 };
 
+/** Lần đi thứ hai (S2, và ngày thứ hai của S3L): cả hai biển được xác nhận, chưa đọc gì. */
+async function secondPass(env, res, main, shotName) {
+  const pass = await drivePass(env, { day: env.nextDay(), signs: [main, 'R.122'], hooks: [{ at: 260, fn: env.shot(shotName) }] });
+  common(res, pass);
+  const pb = recOf(pass.before, main);
+  const rb = recOf(pass.before, 'R.122');
+  res.check('kho đọc lại từ IndexedDB: hai biển chưa xác nhận', pb?.status === 'candidate' && rb?.status === 'candidate', pass.before.records.map(recBrief));
+  const p = recOf(pass.after, main);
+  const r = recOf(pass.after, 'R.122');
+  res.check(`${main} đã xác nhận, thấy vào 2 ngày`, p?.status === 'confirmed' && p.hitDays === 2, p && recBrief(p));
+  res.check('R.122 đã xác nhận, thấy vào 2 ngày', r?.status === 'confirmed' && r.hitDays === 2, r && recBrief(r));
+  const quiet = pass.log.samples.filter((x) => x.bar && /\bquiet\b/.test(x.bar.cls) && /\blearned\b/.test(x.bar.cls));
+  res.check('thanh cảnh báo hiện biển chưa xác nhận: viền nét đứt, "Camera mới thấy, chưa xác nhận"', quiet.some((x) => x.bar.cap === 'Camera mới thấy, chưa xác nhận'), quiet.slice(0, 2).map((x) => ({ s: x.s, ...x.bar })));
+  res.check('không đọc biển nào của camera (biển chưa xác nhận không bao giờ được đọc)', camSpeech(pass).length === 0 && !pass.log.speech.some((x) => ANY_SIGN_SAY.test(x.text)), pass.log.speech.map((x) => x.text));
+  const hits = pass.log.passed.filter((e) => e.outcome === 'hit');
+  const code = SIGNS[main].code;
+  res.check('mỗi biển có một lần thấy lại (hit)', [code, 'R.122'].every((c) => hits.filter((e) => e.code === c).length === 1), pass.log.passed);
+  return pass;
+}
+
+/** Câu đọc kèm "(camera ghi nhận)" của từng biển, ở 100–200 m (khoảng cách thật và khoảng cách trong câu). */
+function checkSpoken(res, pass, labels) {
+  const said = camSpeech(pass);
+  for (const label of labels) {
+    const u = said.find((x) => SAYS[label].test(x.text));
+    const d = u ? SIGNS[label].s - u.s : null;
+    const m = u && /Phía trước (\d+) mét/.exec(u.text);
+    res.check(`${label}: đọc kèm "${CAMERA_SUFFIX.trim()}"`, Boolean(u), said.map((x) => x.text));
+    if (u) {
+      res.check(`${label}: đọc khi còn ${SPEAK_MIN}–${SPEAK_MAX} m (khoảng cách thật)`, d >= SPEAK_MIN && d <= SPEAK_MAX, { trueDistance: r1(d), text: u.text });
+      res.check(`${label}: khoảng cách trong câu đọc ${SPEAK_MIN}–${SPEAK_MAX} m`, m && Number(m[1]) >= SPEAK_MIN && Number(m[1]) <= SPEAK_MAX, u.text);
+    }
+  }
+}
+
 SC.S2 = {
   title: 'Ngày hôm sau: cả hai biển được xác nhận',
   async run(env, res) {
-    const shot = env.shot('s2-quiet-bar');
-    const pass = await drivePass(env, { day: env.nextDay(), signs: ['P.127[50]', 'R.122'], hooks: [{ at: 260, fn: shot }] });
-    common(res, pass);
-    const pb = recOf(pass.before, 'P.127[50]');
-    const rb = recOf(pass.before, 'R.122');
-    res.check('kho đọc lại từ IndexedDB: hai biển chưa xác nhận', pb?.status === 'candidate' && rb?.status === 'candidate', pass.before.records.map(recBrief));
-    const p = recOf(pass.after, 'P.127[50]');
-    const r = recOf(pass.after, 'R.122');
-    res.check('P.127[50] đã xác nhận, thấy vào 2 ngày', p?.status === 'confirmed' && p.hitDays === 2, p && recBrief(p));
-    res.check('R.122 đã xác nhận, thấy vào 2 ngày', r?.status === 'confirmed' && r.hitDays === 2, r && recBrief(r));
-    const quiet = pass.log.samples.filter((x) => x.bar && /\bquiet\b/.test(x.bar.cls) && /\blearned\b/.test(x.bar.cls));
-    res.check('thanh cảnh báo hiện biển chưa xác nhận: viền nét đứt, "Camera mới thấy, chưa xác nhận"', quiet.some((x) => x.bar.cap === 'Camera mới thấy, chưa xác nhận'), quiet.slice(0, 2).map((x) => ({ s: x.s, ...x.bar })));
-    res.check('không đọc biển nào của camera (biển chưa xác nhận không bao giờ được đọc)', camSpeech(pass).length === 0 && !pass.log.speech.some((x) => /tốc độ tối đa|dừng lại/.test(x.text)), pass.log.speech.map((x) => x.text));
-    const hits = pass.log.passed.filter((e) => e.outcome === 'hit');
-    res.check('mỗi biển có một lần thấy lại (hit)', ['P.127', 'R.122'].every((c) => hits.filter((e) => e.code === c).length === 1), pass.log.passed);
+    const pass = await secondPass(env, res, M, 's2-quiet-bar');
     res.data = { records: pass.after.records.map(recBrief), passed: pass.log.passed, speech: pass.log.speech.map((x) => x.text) };
     env.chain.S2 = res.status === 'pass';
   },
 };
 
 SC.S3 = {
-  title: 'Lần thứ ba: đọc "… (camera ghi nhận)" ở 100–200 m; biển giới hạn hiện "Camera" 50 sau biển',
+  title: `Lần thứ ba: đọc "… (camera ghi nhận)" ở 100–200 m cho ${M} và R.122; không biển nào là biển tốc độ nên giới hạn vẫn của bản đồ`,
   async run(env, res) {
-    const shots = [{ at: 250, fn: env.shot('s3-confirmed-bar') }, { at: 450, fn: env.shot('s3-camera-limit') }];
-    const pass = await drivePass(env, { day: env.nextDay(), signs: ['P.127[50]', 'R.122'], hooks: shots });
+    const shots = [{ at: 250, fn: env.shot('s3-confirmed-bar') }, { at: 450, fn: env.shot('s3-map-limit') }];
+    const pass = await drivePass(env, { day: env.nextDay(), signs: [M, 'R.122'], hooks: shots });
     common(res, pass);
-    const said = camSpeech(pass);
-    for (const [label, re] of [['P.127[50]', /tốc độ tối đa 50/], ['R.122', /dừng lại/]]) {
-      const u = said.find((x) => re.test(x.text));
-      const d = u ? SIGNS[label].s - u.s : null;
-      const m = u && /Phía trước (\d+) mét/.exec(u.text);
-      res.check(`${label}: đọc kèm "${CAMERA_SUFFIX.trim()}"`, Boolean(u), said.map((x) => x.text));
-      if (u) {
-        res.check(`${label}: đọc khi còn ${SPEAK_MIN}–${SPEAK_MAX} m (khoảng cách thật)`, d >= SPEAK_MIN && d <= SPEAK_MAX, { trueDistance: r1(d), text: u.text });
-        res.check(`${label}: khoảng cách trong câu đọc ${SPEAK_MIN}–${SPEAK_MAX} m`, m && Number(m[1]) >= SPEAK_MIN && Number(m[1]) <= SPEAK_MAX, u.text);
-      }
-    }
+    checkSpoken(res, pass, [M, 'R.122']);
     const conf = pass.log.samples.filter((x) => x.bar && /\blearned\b/.test(x.bar.cls));
     res.check('thanh cảnh báo hiện biển đã xác nhận (không nét đứt) có huy hiệu camera', conf.some((x) => !/\bquiet\b/.test(x.bar.cls) && x.bar.badge), conf.slice(0, 2).map((x) => ({ s: x.s, ...x.bar })));
-    const sP = SIGNS['P.127[50]'].s;
-    const win = pass.log.samples.filter((x) => x.s >= sP + LIMIT_MARGIN && x.s <= ROAD.junction - LIMIT_MARGIN && x.v > 0);
-    const camOk = win.filter((x) => x.limit && x.limit.value === '50' && x.limit.camera && x.limit.src === 'Camera');
-    res.check(`biển giới hạn hiện "Camera" 50 sau biển (${sP + LIMIT_MARGIN}–${ROAD.junction - LIMIT_MARGIN} m)`, win.length > 0 && camOk.length === win.length, { samples: win.length, camera50: camOk.length, first: win[0]?.limit, last: win[win.length - 1]?.limit });
-    const pre = pass.log.samples.filter((x) => x.s >= EAST.from + 50 && x.s <= sP - LIMIT_MARGIN && x.v > 0);
-    res.check(`trước biển: giới hạn của bản đồ ${ROAD.maxspeed}, không có "Camera"`, pre.length > 0 && pre.every((x) => x.limit && x.limit.value === String(ROAD.maxspeed) && !x.limit.camera), { samples: pre.length, first: pre[0]?.limit });
-    const postJ = pass.log.samples.filter((x) => x.s >= ROAD.junction + LIMIT_MARGIN && x.v > 0);
-    res.check('qua nút giao (đổi đường): giới hạn camera hết hiệu lực', postJ.length > 0 && postJ.every((x) => !x.limit?.camera), { samples: postJ.length, last: postJ[postJ.length - 1]?.limit });
-    const p = recOf(pass.after, 'P.127[50]');
+    // Không có biển tốc độ nào được học: giới hạn suốt đường là của bản đồ, không bao giờ "Camera".
+    const moving = pass.log.samples.filter((x) => x.s >= EAST.from + 50 && x.s <= ROAD.junction - LIMIT_MARGIN && x.v > 0);
+    res.check(`suốt đường: giới hạn của bản đồ ${ROAD.maxspeed}, không có "Camera"`, moving.length > 0 && moving.every((x) => x.limit && x.limit.value === String(ROAD.maxspeed) && !x.limit.camera), { samples: moving.length, first: moving[0]?.limit, last: moving[moving.length - 1]?.limit });
+    res.check('không có giới hạn tốc độ từ camera', pass.log.samples.every((x) => !x.limit?.camera && !x.cam?.speedLimit), null);
+    const p = recOf(pass.after, M);
     const r = recOf(pass.after, 'R.122');
     res.check('hai biển vẫn đã xác nhận, thấy vào 3 ngày', p?.status === 'confirmed' && r?.status === 'confirmed' && p.hitDays === 3 && r.hitDays === 3, [p, r].map((x) => x && recBrief(x)));
-    res.data = { speech: pass.log.speech.map((x) => ({ text: x.text, s: r1(x.s) })), records: pass.after.records.map(recBrief), limitSamples: pass.log.samples.filter((x) => x.v > 0).map((x) => ({ s: x.s, limit: x.limit })) };
+    res.data = { speech: pass.log.speech.map((x) => ({ text: x.text, s: r1(x.s) })), records: pass.after.records.map(recBrief) };
     env.chain.S3 = res.status === 'pass';
+  },
+};
+
+SC.S3L = {
+  title: `Biển giới hạn "Camera" (CameraLimit) với nhãn giả lập: ${SPD} học được chỉ trong kiểm thử; ngày thứ ba đọc "tốc độ tối đa 50 (camera ghi nhận)" và đồng hồ hiện "Camera" 50 sau biển`,
+  async run(env, res) {
+    if (REAL) return res.skip(`--real-models: mô hình v1 không học biển tốc độ (${SPD} có learn: false trong models/labels.json); S3L chỉ kiểm phần sau bộ nhận diện nên chạy ở chế độ oracle.`);
+    res.check(`${SPD} không học được với models/labels.json đã cài`, !LEARNABLE.has(SPD), null);
+    // Ngữ cảnh riêng (IndexedDB riêng), nhãn giả lập chỉ ở đây; ngày đếm từ đầu.
+    const sub = { ...env, ids: {}, day: -1, ctx: await newContext(env.browser, env.net, { labels: fixtureLabels(LABELS_TEXT, SPD) }) };
+    try {
+      await firstPass(sub, res, SPD, 's3l-scene-day');
+      await secondPass(sub, res, SPD, 's3l-quiet-bar');
+      const pass = await drivePass(sub, { day: sub.nextDay(), signs: [SPD, 'R.122'], hooks: [{ at: 450, fn: env.shot('s3l-camera-limit') }], settings: { camSpeed: true } });
+      common(res, pass);
+      checkSpoken(res, pass, [SPD]);
+      const sP = SIGNS[SPD].s;
+      const win = pass.log.samples.filter((x) => x.s >= sP + LIMIT_MARGIN && x.s <= ROAD.junction - LIMIT_MARGIN && x.v > 0);
+      const camOk = win.filter((x) => x.limit && x.limit.value === '50' && x.limit.camera && x.limit.src === 'Camera');
+      res.check(`biển giới hạn hiện "Camera" 50 sau biển (${sP + LIMIT_MARGIN}–${ROAD.junction - LIMIT_MARGIN} m)`, win.length > 0 && camOk.length === win.length, { samples: win.length, camera50: camOk.length, first: win[0]?.limit, last: win[win.length - 1]?.limit });
+      const pre = pass.log.samples.filter((x) => x.s >= EAST.from + 50 && x.s <= sP - LIMIT_MARGIN && x.v > 0);
+      res.check(`trước biển: giới hạn của bản đồ ${ROAD.maxspeed}, không có "Camera"`, pre.length > 0 && pre.every((x) => x.limit && x.limit.value === String(ROAD.maxspeed) && !x.limit.camera), { samples: pre.length, first: pre[0]?.limit });
+      const postJ = pass.log.samples.filter((x) => x.s >= ROAD.junction + LIMIT_MARGIN && x.v > 0);
+      res.check('qua nút giao (đổi đường): giới hạn camera hết hiệu lực', postJ.length > 0 && postJ.every((x) => !x.limit?.camera), { samples: postJ.length, last: postJ[postJ.length - 1]?.limit });
+      const p = recOf(pass.after, SPD);
+      res.check(`${SPD} vẫn đã xác nhận, thấy vào 3 ngày`, p?.status === 'confirmed' && p.hitDays === 3, p && recBrief(p));
+      res.data = { speech: pass.log.speech.map((x) => ({ text: x.text, s: r1(x.s) })), records: pass.after.records.map(recBrief), limitSamples: pass.log.samples.filter((x) => x.v > 0).map((x) => ({ s: x.s, limit: x.limit })) };
+    } finally {
+      await sub.ctx.close().catch(() => {});
+    }
   },
 };
 
 SC.S4 = {
   title: 'Biển bị dỡ khỏi cảnh: biển đã xác nhận bị loại sau số lần thiếu của §5.8, biển chưa xác nhận sau 2 lần; biển của nút giao cũng bị tính lần thiếu',
   async run(env, res) {
-    // Ngày chuẩn bị: P.127 lên mức trần (L_MAX) để đúng câu "7 lần từ mức trần"; W.224 mới thấy một lần.
-    const prep = await drivePass(env, { day: env.nextDay(), signs: ['P.127[50]', 'W.224', 'R.122'] });
+    // Ngày chuẩn bị: biển chính lên mức trần (L_MAX) để đúng câu "7 lần từ mức trần"; W.224 mới thấy một lần.
+    const prep = await drivePass(env, { day: env.nextDay(), signs: [M, 'W.224', 'R.122'] });
     common(res, prep);
-    const p0 = recOf(prep.after, 'P.127[50]');
+    const p0 = recOf(prep.after, M);
     const w0 = recOf(prep.after, 'W.224');
     res.check('ngày chuẩn bị: W.224 là biển chưa xác nhận mới', w0?.status === 'candidate' && w0.hitDays === 1, w0 && recBrief(w0));
-    res.check(`ngày chuẩn bị: P.127[50] đã xác nhận, L = ${L_MAX} (mức trần)`, p0?.status === 'confirmed' && Math.abs(p0.L - L_MAX) < 1e-6, p0 && recBrief(p0));
+    res.check(`ngày chuẩn bị: ${M} đã xác nhận, L = ${L_MAX} (mức trần)`, p0?.status === 'confirmed' && Math.abs(p0.L - L_MAX) < 1e-6, p0 && recBrief(p0));
     if (!p0 || !w0) return;
     env.ids['W.224'] = w0.id;
     const kP = missesToRetire(p0.L, L_MISS_CONFIRMED);
     const kW = missesToRetire(w0.L, L_MISS_CANDIDATE);
-    res.data.expected = { 'P.127[50]': { L: p0.L, misses: kP }, 'W.224': { L: w0.L, misses: kW } };
+    res.data.expected = { [M]: { L: p0.L, misses: kP }, 'W.224': { L: w0.L, misses: kW } };
     res.check('số lần thiếu để loại theo §5.8: biển đã xác nhận 7 (từ mức trần), biển chưa xác nhận 2', kP === 7 && kW === 2, { kP, kW });
     const timeline = [];
     let lastP = p0;
@@ -455,7 +564,7 @@ SC.S4 = {
       const outW = pass.log.passed.filter((e) => e.id === w0.id).map((e) => `${e.outcome}${e.reason ? `:${e.reason}` : ''}`);
       const outR = R ? pass.log.passed.filter((e) => e.id === R.id).map((e) => `${e.outcome}${e.reason ? `:${e.reason}` : ''}`) : [];
       timeline.push({ day: pass.day, P: P && recBrief(P), W: Wr && recBrief(Wr), R: R && recBrief(R), outP, outW, outR });
-      res.check(`ngày ${pass.day}: P.127[50] có đúng một lần thiếu`, P && P.misses === lastP.misses + 1, { before: recBrief(lastP), after: P && recBrief(P), events: outP });
+      res.check(`ngày ${pass.day}: ${M} có đúng một lần thiếu`, P && P.misses === lastP.misses + 1, { before: recBrief(lastP), after: P && recBrief(P), events: outP });
       if (lastW.status !== 'retired') res.check(`ngày ${pass.day}: W.224 có đúng một lần thiếu`, Wr && Wr.misses === lastW.misses + 1, { after: Wr && recBrief(Wr), events: outW });
       // PLAN §5.8 chỉ đòi biển vẫn còn không bao giờ bị tính là thiếu: 'hit', hoặc 'none:seen' khi lượt bám thấy biển nhưng
       // chưa đủ tin (p của oracle 0,80–0,99 mỗi khung, trung bình 3–5 khung dưới 0,85 vào 3–8 % số lần) đều đúng.
@@ -476,7 +585,7 @@ SC.S4 = {
     res.check(`R.122: thấy lại (hit) ${rHits} ngày, 'none:seen' ${rSeen} ngày; có ít nhất một ngày thấy lại`, rHits >= 1, { hit: rHits, seen: rSeen });
     const retiredAtP = timeline.find((x) => x.P?.status === 'retired');
     const retiredAtW = timeline.find((x) => x.W?.status === 'retired');
-    res.check(`P.127[50] bị loại đúng ở lần thiếu thứ ${kP}`, retiredAtP && retiredAtP.P.misses - p0.misses === kP && timeline.filter((x) => x.P?.status === 'confirmed').every((x) => x.P.misses - p0.misses < kP), retiredAtP?.P);
+    res.check(`${M} bị loại đúng ở lần thiếu thứ ${kP}`, retiredAtP && retiredAtP.P.misses - p0.misses === kP && timeline.filter((x) => x.P?.status === 'confirmed').every((x) => x.P.misses - p0.misses < kP), retiredAtP?.P);
     res.check(`W.224 bị loại đúng ở lần thiếu thứ ${kW}`, retiredAtW && retiredAtW.W.misses - w0.misses === kW && timeline.filter((x) => x.W?.status === 'candidate').every((x) => x.W.misses - w0.misses < kW), retiredAtW?.W);
     // Biển của nút giao (R.122, neo 10 m trước nút giao, đường chính tách làm hai đường OSM ở nút giao như dữ liệu thật):
     // dỡ nốt nó thì mỗi lượt đi qua cũng phải là một lần thiếu.
@@ -491,7 +600,7 @@ SC.S4 = {
       if (R) lastR = R;
     }
     res.data.junction = junction;
-    env.chain.confirmed = false; // P.127 đã bị loại: các kịch bản sau cần chuỗi S1–S3 mới
+    env.chain.confirmed = false; // biển chính đã bị loại: các kịch bản sau cần chuỗi S1–S3 mới
   },
 };
 
@@ -499,9 +608,9 @@ SC.S5 = {
   title: 'Ban đêm: không có lần thiếu nào được tính',
   async run(env, res) {
     const shot = env.shot('s5-scene-night', { canvas: true });
-    const pass = await drivePass(env, { day: env.nextDay(), night: true, signs: ['P.127[50]', 'R.122'], hooks: [{ at: 300, fn: shot }] });
+    const pass = await drivePass(env, { day: env.nextDay(), night: true, signs: [M, 'R.122'], hooks: [{ at: 300, fn: shot }] });
     common(res, pass);
-    for (const label of ['P.127[50]', 'R.122']) {
+    for (const label of [M, 'R.122']) {
       const a = recOf(pass.before, label);
       const b = recOf(pass.after, label);
       res.check(`${label}: không bị trừ điểm (L, số lần thiếu giữ nguyên)`, unchanged(a, b), { before: a && recBrief(a), after: b && recBrief(b) });
@@ -514,14 +623,14 @@ SC.S5 = {
 SC.S6 = {
   title: 'Đi ngược chiều: không có bằng chứng, không cảnh báo',
   async run(env, res) {
-    const pass = await drivePass(env, { day: env.nextDay(), dir: -1, signs: ['P.127[50]', 'R.122'], hooks: [{ at: 400, fn: env.shot('s6-westbound') }] });
+    const pass = await drivePass(env, { day: env.nextDay(), dir: -1, signs: [M, 'R.122'], hooks: [{ at: 400, fn: env.shot('s6-westbound') }] });
     common(res, pass);
-    for (const label of ['P.127[50]', 'R.122']) {
+    for (const label of [M, 'R.122']) {
       const a = recOf(pass.before, label);
       const b = recOf(pass.after, label);
       res.check(`${label}: kho không đổi (L, số ngày, số lần thiếu, số lượt)`, unchanged(a, b) && a.passes === b.passes, { before: a && recBrief(a), after: b && recBrief(b) });
     }
-    const ids = new Set([env.ids['P.127[50]'], env.ids['R.122']]);
+    const ids = new Set([env.ids[M], env.ids['R.122']]);
     res.check('không có sự kiện đi qua nào cho hai biển', !pass.log.passed.some((e) => ids.has(e.id)), pass.log.passed);
     const shown = pass.log.samples.filter((x) => (x.bar && /\blearned\b/.test(x.bar.cls)) || x.strip.some((c) => /\blearned\b/.test(c)));
     res.check('thanh cảnh báo và dải biển không hiện biển camera', shown.length === 0, shown.slice(0, 2));
@@ -551,7 +660,7 @@ SC.S7 = {
       // Quyền "chỉ lần này" hết hạn: lại là prompt; ẩn trả camera, hiện lại không hỏi quyền.
       { at: 340, fn: async (page) => { await page.evaluate(() => globalThis.__BDH.setPermission('prompt')); await toggle(page); await gum(page, 'promptAgain'); } },
     ];
-    const pass = await drivePass(env, { day: env.nextDay(), to: 430, signs: ['P.127[50]'], permission: 'prompt', hooks });
+    const pass = await drivePass(env, { day: env.nextDay(), to: 430, signs: [M], permission: 'prompt', hooks });
     common(res, pass, { camera: false });
     res.check('đang chạy, quyền "prompt": không gọi getUserMedia, nút camera gạch chéo', at.moving?.gum === 0 && /cam-off/.test(at.moving.chip), at.moving);
     res.check('ẩn rồi hiện trang (quyền "prompt"): vẫn không gọi getUserMedia', at.afterToggle?.gum === 0, at.afterToggle);
@@ -583,7 +692,7 @@ SC.S8 = {
         },
       },
     ];
-    const pass = await drivePass(env, { day: env.nextDay(), to: 420, signs: ['P.127[50]'], hooks });
+    const pass = await drivePass(env, { day: env.nextDay(), to: 420, signs: [M], hooks });
     common(res, pass);
     res.check('trước khi ẩn: camera mở và đang lấy khung', at.before?.live >= 1 && at.before.capturing === true, at.before);
     res.check(`ẩn trang: mọi track đã dừng trong ${HIDE_STOP_MS} ms`, at.hidden?.live === 0 && at.hidden.stops >= 1 && at.hidden.capturing === false, at.hidden);
@@ -597,9 +706,9 @@ SC.S9 = {
   title: 'Camera không có hình (khung đen): không có lần thiếu nào, nút camera báo',
   async run(env, res) {
     const shot = env.shot('s9-blank-chip');
-    const pass = await drivePass(env, { day: env.nextDay(), signs: ['P.127[50]', 'R.122'], flags: { blank: true }, hooks: [{ at: 300, fn: shot }] });
+    const pass = await drivePass(env, { day: env.nextDay(), signs: [M, 'R.122'], flags: { blank: true }, hooks: [{ at: 300, fn: shot }] });
     common(res, pass);
-    for (const label of ['P.127[50]', 'R.122']) {
+    for (const label of [M, 'R.122']) {
       const a = recOf(pass.before, label);
       const b = recOf(pass.after, label);
       res.check(`${label}: không bị trừ điểm`, unchanged(a, b), { before: a && recBrief(a), after: b && recBrief(b) });
@@ -663,10 +772,10 @@ async function benchPage(env) {
   return page;
 }
 
-// Thứ tự chạy: S4 làm biển bị loại nên chạy cuối trong các kịch bản cần biển đã xác nhận.
-const ORDER = ['S1', 'S2', 'S3', 'S5', 'S6', 'S9', 'S7', 'S8', 'S4', 'S10', 'S11'];
+// Thứ tự chạy: S4 làm biển bị loại nên chạy cuối trong các kịch bản cần biển đã xác nhận. S3L dùng ngữ cảnh riêng.
+const ORDER = ['S1', 'S2', 'S3', 'S3L', 'S5', 'S6', 'S9', 'S7', 'S8', 'S4', 'S10', 'S11'];
 const NEEDS_CONFIRMED = new Set(['S4', 'S5', 'S6', 'S9']);
-const DRIVES = new Set(['S1', 'S2', 'S3', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']);
+const DRIVES = new Set(['S1', 'S2', 'S3', 'S3L', 'S4', 'S5', 'S6', 'S7', 'S8', 'S9']);
 
 async function main() {
   const models = modelsInstalled();
@@ -674,8 +783,11 @@ async function main() {
   const pw = loadPlaywright();
   const started = new Date().toISOString();
   const results = [];
+  const net = { overpass: 0, overpassRoad: 0, tiles: 0, blocked: new Set() };
   const env = {
     base: null,
+    browser: null,
+    net,
     ctx: null,
     ids: {},
     chain: { S1: false, S2: false, S3: false, confirmed: false },
@@ -697,13 +809,13 @@ async function main() {
       };
     },
   };
-  const net = { overpass: 0, overpassRoad: 0, tiles: 0, blocked: new Set() };
   console.log(`Bộ chạy thử lái xe: chế độ ${REAL ? 'mô hình thật' : 'oracle'}, cổng ${port}${models.ok ? '' : ', models/ chưa có mô hình đã huấn luyện'}`);
   const srv = await startDevServer(port);
   env.base = srv.url;
   let browser = null;
   try {
     browser = await pw.chromium.launch();
+    env.browser = browser;
     env.ctx = await newContext(browser, net);
     const want = ORDER.filter((id) => !ONLY || ONLY.has(id));
     const runOne = async (id, { prerequisite = false } = {}) => {

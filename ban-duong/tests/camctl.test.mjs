@@ -23,12 +23,14 @@ import {
   GRAB_RETRY_MS,
   importText,
   LABELS_PATH,
+  learnableCount,
   learnedCaption,
   PAUSE_POLL_MS,
   PROGRESS_STEP,
   RANGE_STEP_M,
   rangeText,
   readRange,
+  speedLearnable,
   stateText,
   TEXT,
   VISION_FATAL,
@@ -432,6 +434,39 @@ test('init: labels.json tải một lần từ URL ?v=<16 hex>, kiểm SHA-256, 
   assert.equal(env.ctl.learner.labels.size, env.ctl.learned.labels.size);
   assert.equal(env.md.calls.length, 0); // khởi động không bao giờ mở camera khi chưa bật
   env.ctl.dispose();
+});
+
+test('speedLearnable / learnableCount: chỉ P.127[n] có learn: true mới là biển tốc độ được học', () => {
+  assert.equal(speedLearnable(LABELS), true);
+  assert.equal(learnableCount(LABELS), 47);
+  const pruned = structuredClone(LABELS);
+  for (const l of pruned.labels) if (l.code === 'P.127') l.learn = false;
+  assert.equal(speedLearnable(pruned), false, 'bản v1: mọi trị số P.127 bị gỡ');
+  assert.equal(learnableCount(pruned), 47 - 11);
+  // Một trị số còn học được là đủ; P.127 không trị số hay mã khác (P.117 hạn chế chiều cao) thì không tính.
+  pruned.labels.find((l) => l.label === 'P.127[60]').learn = true;
+  assert.equal(speedLearnable(pruned), true);
+  assert.equal(speedLearnable({ labels: [{ code: 'P.127', value: null, learn: true }, { code: 'P.117', value: null, learn: true }] }), false);
+  for (const bad of [null, undefined, {}, { labels: 'x' }]) {
+    assert.equal(speedLearnable(bad), false);
+    assert.equal(learnableCount(bad), null);
+  }
+});
+
+test('state: learnable và speedLearnable theo labels.json đã tải; chưa tải được thì null / false', async () => {
+  const env = makeEnv({ mode: 'browse' });
+  assert.equal(env.ctl.state.learnable, null);
+  assert.equal(env.ctl.state.speedLearnable, false);
+  await env.ctl.init();
+  assert.equal(env.ctl.state.learnable, 47);
+  assert.equal(env.ctl.state.speedLearnable, true);
+  env.ctl.dispose();
+  const bad = makeEnv({ mode: 'browse', labelHash: 'b'.repeat(64) });
+  await bad.ctl.init();
+  assert.equal(bad.ctl.state.labels, 'error');
+  assert.equal(bad.ctl.state.learnable, null);
+  assert.equal(bad.ctl.state.speedLearnable, false);
+  bad.ctl.dispose();
 });
 
 test('labels.json sai mã băm: không dùng, bộ học vẫn có (để giới hạn camera nghe lượt đi qua), nhập tệp báo cần labels', async () => {

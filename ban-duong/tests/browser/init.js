@@ -22,7 +22,12 @@
   const SPEED_NOISE = 0.1; // nhiễu tốc độ của GPS (m/s)
   const MOVING = 0.5; // dưới tốc độ này (m/s) GPS không báo hướng đi
   const SPEAK_MS_MIN = 200; // … nhưng không ngắn hơn chừng này (ms)
-  globalThis.BDInitLimits = Object.freeze({ SAMPLE_MS, HOOK_MS, SPEAK_MS_PER_CHAR, SPEAK_MS_MIN, FIRST_FIX_MS, HEADING_NOISE_DEG, SPEED_NOISE, MOVING });
+  // Đối chiếu từng khung với cảnh (để báo tỉ lệ thấy và đọc đúng của bộ nhận diện thật): chỉ xét biển cách máy ảnh tới
+  // chừng này, khớp khi IoU với hộp của cảnh từ chừng này; ghi tối đa chừng này mục.
+  const GT_FAR = 120; // m
+  const GT_IOU = 0.3;
+  const GT_MAX_ROWS = 20000;
+  globalThis.BDInitLimits = Object.freeze({ SAMPLE_MS, HOOK_MS, SPEAK_MS_PER_CHAR, SPEAK_MS_MIN, FIRST_FIX_MS, HEADING_NOISE_DEG, SPEED_NOISE, MOVING, GT_FAR, GT_IOU, GT_MAX_ROWS });
   if (typeof window === 'undefined' || window.top !== window) return; // Node (tự kiểm) hay khung con: chỉ hằng số
 
   const cfg = globalThis.__BDH_CFG;
@@ -50,6 +55,11 @@
     visibility: [],
     marks: [],
     oracle: {},
+    // Mỗi biển của cảnh thấy được trong một khung đã xử lý: [nhãn, Z (m), bề rộng hộp (px), thấy (0/1), nhãn top-1 hay
+    // null, p top-1 hay null], và số hộp không khớp biển nào của cảnh (hộp lạ, kèm nhãn top-1 nếu đã phân loại).
+    gt: [],
+    stray: { boxes: 0, classified: 0, learnable: 0, labels: {} },
+    framesSeen: 0,
   };
   const tracks = [];
   const tracksLive = () => tracks.filter((t) => t.readyState === 'live').length;
@@ -373,6 +383,7 @@
       log.passed.push({ outcome: e.outcome, reason: e.reason ?? null, id: r.id, code: r.code, value: r.value ?? null, status: r.status, L: r.L, misses: r.misses, hitDays: r.hitDays, s: p.s, mono: perfNow() });
     });
     const onVision = L.onVision.bind(L);
+    const learnable = (label) => L.labels?.get?.(label)?.learn === true;
     const pause = L.pause.bind(L);
     const note = (out) => {
       for (const x of out?.results || []) {
@@ -380,8 +391,56 @@
       }
       return out;
     };
-    L.onVision = (...a) => note(onVision(...a));
+    L.onVision = (...a) => {
+      try {
+        matchFrame(a[0], a[1], learnable);
+      } catch (err) {
+        log.marks.push({ kind: 'gt-error', message: String(err) });
+      }
+      return note(onVision(...a));
+    };
     L.pause = (...a) => note(pause(...a));
+  }
+
+  /** Đối chiếu kết quả một khung (hợp đồng 5) với các biển của cảnh ở tư thế xe lúc chụp khung. */
+  function matchFrame(r, size, learnable) {
+    if (!r || !Array.isArray(r.boxes)) return;
+    log.framesSeen++;
+    const W = size?.width || S.W;
+    const H = size?.height || S.H;
+    const ps = pose(r.t);
+    const cam = S.camera(ps, { width: W, height: H });
+    const SH = globalThis.BDOracle?.SHAPE || {};
+    const used = new Set();
+    for (const sg of scene.signs) {
+      if ((sg.dir >= 0 ? 1 : -1) !== cam.dir) continue;
+      const fam = cfg.families?.[sg.label];
+      const b = S.signBox(cam, sg, SH[fam] || SH.default || { bw: 1, bh: 1 });
+      if (!b || b.Z > GT_FAR || b.x < 0 || b.y < 0 || b.x + b.w > W || b.y + b.h > H) continue;
+      let best = -1;
+      let bi = 0;
+      r.boxes.forEach((x, i) => {
+        const v = globalThis.VisionProto ? globalThis.VisionProto.iou(x, b) : 0;
+        if (v >= GT_IOU && v > bi) {
+          bi = v;
+          best = i;
+        }
+      });
+      if (best >= 0) used.add(best);
+      const c = best >= 0 ? r.boxes[best].cls : null;
+      if (log.gt.length < GT_MAX_ROWS) {
+        log.gt.push([sg.label, Math.round(b.Z * 10) / 10, Math.round(b.w * 10) / 10, best >= 0 ? 1 : 0, c ? c[0][0] : null, c ? Math.round(c[0][1] * 1000) / 1000 : null]);
+      }
+    }
+    r.boxes.forEach((x, i) => {
+      if (used.has(i)) return;
+      log.stray.boxes++;
+      if (!x.cls) return;
+      log.stray.classified++;
+      const top = x.cls[0][0];
+      if (learnable(top)) log.stray.learnable++;
+      log.stray.labels[top] = (log.stray.labels[top] || 0) + 1;
+    });
   }
 
   function sample() {
