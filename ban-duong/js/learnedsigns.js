@@ -331,8 +331,10 @@ export class LearnedSigns {
    * @param now      () → ms (đồng hồ của máy, dùng để tính số thứ tự ngày)
    * @param labels   labels.json (để kiểm tra biển nhập từ tệp: chỉ nhận nhãn được học; và để "cất" bản ghi của nhãn
    *                 không còn được học, xem #dormant)
-   * @param requireLabels  true: khi chưa có labels thì mọi bản ghi đều bị cất (không hiện, không cảnh báo) cho tới
-   *                 khi biết nhãn nào được học (CameraController dùng); false (mặc định): chưa có labels thì không lọc
+   * @param requireLabels  bản ghi nào phải chờ labels mới được dùng, khi chưa có labels (chưa tải hay tải lỗi):
+   *                 true: mọi bản ghi; hàm (bản ghi, chỉ đọc) → true: những bản ghi mà hàm chọn (CameraController chọn
+   *                 biển tốc độ: thiếu danh sách học thì không biết trị số có được học không); false (mặc định): không
+   *                 lọc. Đặt (true hay hàm) thì bộ học cũng không được xét bản ghi nào khi chưa có labels (recordsNear).
    * @param random   () → [0, 1) để tạo mã bản ghi
    */
   constructor({
@@ -345,7 +347,7 @@ export class LearnedSigns {
     this.backend = backend;
     this.now = now;
     this.random = random;
-    this.requireLabels = requireLabels === true;
+    this.requireLabels = typeof requireLabels === 'function' ? requireLabels : requireLabels === true;
     this.setLabels(labels);
   }
 
@@ -358,13 +360,21 @@ export class LearnedSigns {
 
   /**
    * Bản ghi "bị cất": nhãn của nó không có learn: true trong labels.json đang dùng (nhãn đã bị gỡ khỏi danh sách học,
-   * ví dụ mọi P.127 ở bản v1, DECISION.md), hoặc chưa có labels khi requireLabels. Bản ghi bị cất vẫn được giữ nguyên
-   * (không đổi trạng thái, không bị trừ điểm, vẫn có trong tệp xuất và bị "Xoá" xoá như mọi bản ghi) nhưng không hiện,
-   * không cảnh báo, không đọc, không vào bộ học (featsNear, recordsNear, list, match) nên không đổi giới hạn tốc độ.
-   * Bản sau học lại nhãn đó thì bản ghi tự dùng lại.
+   * ví dụ mọi P.127 ở bản v1, DECISION.md), hoặc chưa có labels mà requireLabels chọn bản ghi này. Bản ghi bị cất vẫn
+   * được giữ nguyên (không đổi trạng thái, không bị trừ điểm, vẫn có trong tệp xuất và bị "Xoá" xoá như mọi bản ghi)
+   * nhưng không hiện, không cảnh báo, không đọc, không vào bộ học (featsNear, recordsNear, list, match) nên không đổi
+   * giới hạn tốc độ. Bản sau học lại nhãn đó (hay labels tải được) thì bản ghi tự dùng lại.
    */
   #dormant(r) {
-    if (!this.labels) return this.requireLabels;
+    if (!this.labels) {
+      const need = this.requireLabels;
+      if (typeof need !== 'function') return need;
+      try {
+        return Boolean(need(r));
+      } catch {
+        return true; // không biết thì cất (an toàn hơn là báo)
+      }
+    }
     return this.labels.get(labelOf(r.code, r.value))?.learn !== true;
   }
 
@@ -552,8 +562,13 @@ export class LearnedSigns {
     return false;
   }
 
-  /** Bản sao các bản ghi chưa xác nhận và đã xác nhận trong bán kính radius (m) (bộ học dùng để xét lượt đi qua). */
+  /**
+   * Bản sao các bản ghi chưa xác nhận và đã xác nhận trong bán kính radius (m) (bộ học dùng để xét lượt đi qua). Chưa
+   * có labels mà requireLabels được đặt: không có bản ghi nào. Khi đó bộ học loại mọi lượt bám (không biết nhãn nào
+   * được học), nên nếu thấy bản ghi thì lượt đi qua nào cũng thành "không thấy" và bản ghi bị trừ điểm oan.
+   */
   recordsNear(coord, radius) {
+    if (!this.labels && this.requireLabels) return [];
     return this.#near(coord, radius).filter((r) => this.#active(r)).map(snapshot);
   }
 
