@@ -49,6 +49,7 @@ export const DEFAULT_SETTINGS = {
   carUi: 'auto', // giao diện màn hình ô tô: 'auto' | 'on' | 'off'
   theme: 'auto', // 'auto' | 'light' | 'dark'
   keepAwake: true,
+  iosHintDismissed: false, // đã ẩn gợi ý "thêm vào Màn hình chính" trên iPhone, iPad (js/ios.js)
   // Camera nhận diện biển (thử nghiệm)
   camEnabled: false, // chỉ bật được bằng tay khi xe đã đỗ
   camDeviceId: null, // camera đã chọn ở mục kiểm tra camera; null = camera sau của điện thoại

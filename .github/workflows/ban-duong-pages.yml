@@ -1,0 +1,127 @@
+# Bạn Đường (ban-duong/): đưa ứng dụng web lên GitHub Pages của kho này, để iPhone (Safari → Thêm vào Màn hình chính)
+# và mọi trình duyệt mở được tại https://<chủ kho>.github.io/<tên kho>/ (kho khanh1605vn/9router:
+# https://khanh1605vn.github.io/9router/).
+#
+# Việc làm một lần của chủ kho: Settings › Pages › Build and deployment › Source: GitHub Actions. Sau đó mỗi lần đẩy
+# lên master có sửa ban-duong/ (trừ ban-duong/android/) thì trang tự cập nhật; máy đã mở ứng dụng thấy dòng
+# “Đã có bản mới” (service worker, sw.js VERSION).
+#
+# Workflow này không đụng tới .github/workflows/gitbook-pages.yml (trang tài liệu của 9router đưa sang kho khác bằng
+# khoá triển khai riêng) và không dùng secret nào.
+#
+# Bảo mật:
+#  - chỉ đưa thư mục dist/ (`npm run dist`: index.html, manifest.webmanifest, sw.js, css/, js/, icons/, vendor/,
+#    models/), không có tests/, tools/, android/, tệp .env hay khoá; bước "Kiểm tra dist" dừng nếu thấy thứ khác;
+#  - chỉ triển khai từ master: push chỉ nghe master, và job triển khai tự dừng nếu ref không phải refs/heads/master
+#    (kể cả khi bấm chạy tay trên nhánh khác); Environment github-pages của GitHub cũng chỉ nhận nhánh mặc định;
+#  - quyền tối thiểu: mặc định chỉ đọc; chỉ job triển khai có pages: write và id-token: write (OIDC của deploy-pages);
+#  - không chạy trên pull_request / pull_request_target: mã từ fork không bao giờ được triển khai;
+#  - actions ghim theo SHA commit (chú thích ghi bản tương ứng, đã đối chiếu bằng git ls-remote).
+name: Bạn Đường Pages
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - ban-duong/**
+      - '!ban-duong/android/**'
+      - .github/workflows/ban-duong-pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Mỗi lần chỉ một lần triển khai; không huỷ lần đang chạy (GitHub khuyên vậy với Pages), lần mới chờ đến lượt.
+concurrency:
+  group: ban-duong-pages
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Kiểm thử
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+
+      - name: Kiểm thử ứng dụng web (npm test)
+        working-directory: ban-duong
+        run: npm test
+
+  deploy:
+    name: Đưa lên GitHub Pages
+    needs: test
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Chỉ triển khai từ master
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/master" ]; then
+            echo "::error::Chỉ triển khai từ nhánh master (đang ở $GITHUB_REF) / Pages are deployed from master only"
+            exit 1
+          fi
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 22
+
+      - name: Tạo thư mục dist
+        working-directory: ban-duong
+        run: |
+          set -euo pipefail
+          npm run dist
+          # Không cho GitHub Pages chạy Jekyll (ghi rõ, dù triển khai bằng Actions vốn không qua Jekyll).
+          touch dist/.nojekyll
+
+      - name: Kiểm tra dist
+        working-directory: ban-duong/dist
+        run: |
+          set -euo pipefail
+          export LC_ALL=C
+          # Đúng các mục của `npm run dist`, cộng .nojekyll.
+          want=$(printf '%s\n' .nojekyll css icons index.html js manifest.webmanifest models sw.js vendor | sort)
+          have=$(find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
+          if [ "$have" != "$want" ]; then
+            echo "::error::dist có mục lạ / unexpected entries in dist:"; diff <(echo "$want") <(echo "$have") || true
+            exit 1
+          fi
+          # Tệp ẩn duy nhất được phép là .nojekyll (bước tải lên bật include-hidden-files để giữ tệp này).
+          hidden=$(find . -mindepth 1 -name '.*' ! -path './.nojekyll' -print)
+          if [ -n "$hidden" ]; then echo "::error::dist có tệp ẩn / hidden files in dist:"; echo "$hidden"; exit 1; fi
+          # Không bao giờ đưa lên: mã thử nghiệm, công cụ, ứng dụng Android, tệp môi trường, khoá, liên kết tượng trưng.
+          bad=$(find . \( -type d \( -name tests -o -name tools -o -name android -o -name node_modules \) \) -o \
+            \( -type f \( -name '*.env' -o -name '.env*' -o -name '*.jks' -o -name '*.keystore' -o -name '*.p12' \
+            -o -name '*.pem' -o -name '*.key' -o -name 'local.properties' \) \) -o -type l)
+          if [ -n "$bad" ]; then echo "::error::dist có tệp không được đưa lên / forbidden files in dist:"; echo "$bad"; exit 1; fi
+          test -f index.html && test -f sw.js && test -f manifest.webmanifest
+          du -sh .
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ban-duong/dist
+          include-hidden-files: true
+
+      - name: Triển khai
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

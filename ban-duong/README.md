@@ -28,10 +28,27 @@ Cần Node.js 22 trở lên.
 ```bash
 cd ban-duong
 npm start          # mở http://localhost:5173
-npm test           # 680 bài kiểm thử logic (không cần mạng)
+npm test           # các bài kiểm thử logic (không cần mạng)
 ```
 
 Trên máy tính không có GPS, ứng dụng lấy tâm bản đồ làm điểm xuất phát; dùng nút **Chạy thử** để xem dẫn đường hoạt động.
+
+## Mở trên iPhone và máy tính
+
+Bản web của Bạn Đường nằm tại **<https://khanh1605vn.github.io/9router/>**. Mở địa chỉ này bằng Safari trên iPhone, iPad (rồi cài ra Màn hình chính như mục [Cài trên iPhone](#cài-trên-iphone)), bằng Chrome trên điện thoại Android hay bằng trình duyệt trên máy tính. Ứng dụng Android trên xe không cần địa chỉ này: nó mang sẵn ứng dụng web bên trong.
+
+Trang được GitHub Actions tự đưa lên (workflow `.github/workflows/ban-duong-pages.yml` ở gốc kho): mỗi lần mã trên nhánh `master` có thay đổi trong `ban-duong/` (trừ `ban-duong/android/`), workflow chạy `npm test`, rồi `npm run dist`, kiểm tra thư mục `dist/` chỉ có tệp của ứng dụng và đưa đúng thư mục đó lên. Không cần secret nào.
+
+**Việc chủ kho làm một lần** (trên GitHub, kho `khanh1605vn/9router`):
+
+1. Vào **Settings** → **Pages** → **Build and deployment** → **Source**, chọn **GitHub Actions**.
+2. Gộp (merge) thay đổi vào nhánh `master`. Lần chạy đầu tiên của workflow **Bạn Đường Pages** đưa trang lên; nếu đã gộp từ trước khi bật Pages, vào thẻ **Actions** → **Bạn Đường Pages** → **Run workflow** (chọn nhánh `master`) để chạy lại.
+
+Sau đó **bản mới tự đến máy người dùng**: lần sau mở ứng dụng khi có mạng, máy nhận bản mới và hiện nút **Đã có bản mới, bấm để tải lại** (chỉ hiện khi xe đứng yên). Khi sửa mã, nhớ tăng `VERSION` trong `sw.js` và `SHELL_VERSION` trong `js/appupdate.js`.
+
+Lưu ý: mọi trang GitHub Pages của cùng một tài khoản (`khanh1605vn.github.io/<tên kho>/`) dùng chung một địa chỉ gốc, nên dùng chung bộ nhớ trình duyệt và quyền vị trí, camera, dù nằm ở kho khác. Kho khác trên cùng tài khoản **không phải** là địa chỉ khác. Đừng đưa trang thử nghiệm, bản sao thứ hai của Bạn Đường hay mã không tin cậy lên Pages của tài khoản này; trang thử nghiệm phải ở một tên miền khác hẳn (Netlify Drop, hay Pages của một tài khoản GitHub khác). Từ bản `v12`, bộ nhớ đệm của ứng dụng gắn với thư mục `/9router/`, nên một bản Bạn Đường khác trên cùng tài khoản không còn xoá được bộ nhớ đệm của nó, nhưng một trang có mã xấu trên cùng địa chỉ gốc thì vẫn đọc và sửa được dữ liệu của ứng dụng; cách chắc chắn duy nhất là giữ tài khoản này sạch, hoặc dùng tên miền riêng.
+
+Bản mới đến tay người dùng ngay cả khi GitHub Pages bảo trình duyệt giữ tệp 10 phút (`Cache-Control: max-age=600`): service worker luôn tải thẳng tệp mới từ máy chủ khi cài bản mới, và hỏi lại máy chủ mỗi lần nạp tệp của ứng dụng.
 
 ## Đưa lên mạng để dùng trên điện thoại
 
@@ -42,13 +59,15 @@ Trình duyệt chỉ cấp quyền vị trí cho trang chạy bằng **HTTPS**, 
 3. Kéo thư mục `dist` thả vào trang.
 4. Netlify trả về một địa chỉ dạng `https://ten-ngau-nhien.netlify.app`. Mở địa chỉ đó trên điện thoại.
 
-Các lựa chọn khác dùng được y như vậy: Cloudflare Pages, Vercel, hoặc GitHub Pages của một repo riêng chứa nội dung thư mục `dist` ở gốc. Không cần cấu hình gì thêm vì mọi đường dẫn trong ứng dụng đều là đường dẫn tương đối.
+Các lựa chọn khác dùng được y như vậy: Cloudflare Pages, Vercel, hoặc GitHub Pages (kho này đã có sẵn workflow tự đưa lên, xem [Mở trên iPhone và máy tính](#mở-trên-iphone-và-máy-tính)). Không cần cấu hình gì thêm vì mọi đường dẫn trong ứng dụng đều là đường dẫn tương đối, nên ứng dụng chạy được cả ở gốc tên miền lẫn trong thư mục con như `/9router/`.
 
-Muốn chạy `tests/browser/device-bench.html` (đo tốc độ nhận diện trên điện thoại thật) hay `tools/camera/label-crops.html` qua mạng, hãy đưa **cả thư mục** `ban-duong` lên một trang tạm **khác địa chỉ** với trang dùng khi lái, rồi xoá trang đó khi xong, để các trang thử nghiệm không bao giờ dùng chung quyền camera và dữ liệu của ứng dụng.
+Muốn chạy `tests/browser/device-bench.html` (đo tốc độ nhận diện trên điện thoại thật) hay `tools/camera/label-crops.html` qua mạng, hãy đưa **cả thư mục** `ban-duong` lên một trang tạm **khác tên miền** với trang dùng khi lái (ví dụ Netlify Drop; **không** dùng một kho khác trên `khanh1605vn.github.io`, vì đó vẫn là cùng địa chỉ gốc), rồi xoá trang đó khi xong, để các trang thử nghiệm không bao giờ dùng chung quyền camera và dữ liệu của ứng dụng.
 
 ### Nếu thêm Content-Security-Policy
 
-Ứng dụng hiện không gửi Content-Security-Policy (CSP). Nếu bạn thêm CSP qua cấu hình của dịch vụ lưu trữ (ví dụ tệp `_headers` của Netlify hay Cloudflare Pages), phải tách hai chính sách:
+`index.html` đã có sẵn một CSP dạng thẻ `<meta http-equiv="Content-Security-Policy">` (vì GitHub Pages không gửi được tiêu đề HTTP): chỉ khoá nguồn mã (`script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:`), cấm plugin, khung, đổi `<base>` và gửi biểu mẫu ra ngoài; giống chính sách mà ứng dụng Android gửi kèm trang (`HTML_CSP` trong `android/…/web/WebAssets.kt`), trừ `frame-ancestors` (thẻ meta không nhận chỉ thị này, nên trang trên GitHub Pages vẫn có thể bị trang khác nhúng vào khung). Thẻ này chỉ áp lên trang, không áp lên `js/vision-worker.js`. Nếu sửa chính sách ở một chỗ, sửa cả chỗ kia (`tests/deploy.test.mjs` kiểm tra hai chỗ khớp nhau).
+
+Nếu bạn thêm CSP đầy đủ hơn qua cấu hình của dịch vụ lưu trữ (ví dụ tệp `_headers` của Netlify hay Cloudflare Pages), phải tách hai chính sách:
 
 - **Trang** (`/` và `/index.html`): `default-src 'self'; script-src 'self'; worker-src 'self' blob:; img-src 'self' data: blob:` cộng các máy chủ ô bản đồ; `connect-src 'self'` cộng các máy chủ kiểu bản đồ, ô bản đồ, Overpass, tìm địa điểm và tìm đường (lấy danh sách từ `js/mapview.js`, `js/roaddata.js`, `js/routing.js`, `js/search.js`, đừng chép cố định); `style-src 'self' https://fonts.googleapis.com; font-src https://fonts.gstatic.com`. Cần `blob:` trong `worker-src` vì MapLibre chạy worker vẽ bản đồ từ địa chỉ `blob:`; chỉ có `worker-src 'self'` thì bản đồ không hiện.
 - **`js/vision-worker.js`** (bộ nhận diện biển): worker này nhận chính sách từ chính phản hồi của tệp đó, không theo trang. Nó cần `script-src 'self' blob: 'wasm-unsafe-eval'`: `blob:` để chạy mã LiteRT đã kiểm SHA-256, `'wasm-unsafe-eval'` để dịch WebAssembly. Chỉ đặt `blob:` và `'wasm-unsafe-eval'` cho riêng tệp này.
@@ -58,13 +77,38 @@ Muốn chạy `tests/browser/device-bench.html` (đo tốc độ nhận diện t
 ### Cài ra màn hình chính
 
 - **Android (Chrome)**: mở trang → bấm nút ba chấm → **Thêm vào màn hình chính** (hoặc **Cài đặt ứng dụng**).
-- **iPhone (Safari)**: mở trang → bấm nút **Chia sẻ** → **Thêm vào MH chính**.
+- **iPhone, iPad (Safari)**: mở trang → bấm nút **Chia sẻ** → **Thêm vào Màn hình chính**. Từ iOS 16.4, Chrome, Edge và Firefox trên iPhone cũng làm được như vậy qua nút **Chia sẻ** của mình. Xem từng bước và các giới hạn ở mục [Cài trên iPhone](#cài-trên-iphone).
 
 Lần đầu mở, hãy cho phép trang dùng vị trí và chạm vào màn hình một lần để trình duyệt cho phát âm thanh.
 
 ### Giọng đọc tiếng Việt
 
 Ứng dụng dùng giọng đọc có sẵn của thiết bị. Nếu không nghe thấy tiếng Việt: vào **Cài đặt** của máy → **Chuyển văn bản thành giọng nói** → tải dữ liệu giọng **Tiếng Việt**. Trong ứng dụng có nút **Đọc thử** ở phần Cài đặt.
+
+## Cài trên iPhone
+
+Trên iPhone, iPad, Bạn Đường là ứng dụng web cài từ Safari ra Màn hình chính (không có ứng dụng trên App Store: ứng dụng iPhone gốc và CarPlay cần tài khoản nhà phát triển Apple trả phí). Cần **iOS 16.4 trở lên**; máy cũ hơn sẽ hiện dòng “Trình duyệt này chưa chạy được Bạn Đường”.
+
+1. Mở **Safari** (biểu tượng la bàn xanh) và vào địa chỉ của ứng dụng, ví dụ <https://khanh1605vn.github.io/9router/>. Nếu đang mở trong Zalo hay Facebook (hay một trình duyệt lạ), hãy chép địa chỉ rồi dán vào Safari: ứng dụng sẽ nhắc việc này. Chrome, Edge và Firefox trên iOS 16.4 trở lên cũng thêm được ra Màn hình chính qua nút **Chia sẻ** của trình duyệt (thường ở thanh địa chỉ, hoặc trong trình đơn ba chấm hay ba gạch); không thấy mục **Thêm vào Màn hình chính** thì làm từ Safari. Mỗi bản cài từ một trình duyệt có dữ liệu riêng, nên chỉ cài một lần, từ một trình duyệt.
+2. Bấm nút **Chia sẻ** (hình ô vuông có mũi tên đi lên, ở thanh dưới trên iPhone, góc trên trên iPad). Trên iOS mới, nếu không thấy nút này, bấm nút **ba chấm** trước rồi chọn **Chia sẻ**.
+3. Kéo danh sách xuống, chọn **Thêm vào Màn hình chính** (có máy ghi tắt là **Thêm vào MH chính**; máy để tiếng Anh: **Add to Home Screen**). Nếu có công tắc mở như ứng dụng web, hãy để bật.
+4. Bấm **Thêm**. Biểu tượng Bạn Đường xuất hiện trên Màn hình chính; từ nay mở ứng dụng bằng biểu tượng này, không mở qua Safari.
+5. Lần đầu mở, bấm **Cho phép** khi được hỏi dùng vị trí. Nếu lỡ từ chối: vào **Cài đặt** của iPhone → **Quyền riêng tư & Bảo mật** → **Dịch vụ định vị**, kiểm tra Dịch vụ định vị đang bật và mục của Safari (máy tiếng Anh: **Safari Websites**) được phép **Khi dùng ứng dụng**, rồi đóng hẳn và mở lại Bạn Đường.
+6. Vào **Cài đặt** của ứng dụng (nút bánh răng) → bấm **Đọc thử**. Không nghe thấy giọng tiếng Việt: vào **Cài đặt** của iPhone → **Trợ năng** → **Nội dung được đọc** → **Giọng nói** → **Tiếng Việt**, tải một giọng. Không nghe thấy gì: tắt chế độ im lặng (nút gạt hay nút tác vụ ở cạnh máy) và tăng âm lượng.
+
+Khi mở trong Safari, Chrome, Edge hay Firefox mà chưa cài, ứng dụng hiện một dòng gợi ý “Để dùng như ứng dụng: bấm nút Chia sẻ… rồi chọn Thêm vào Màn hình chính”; bấm vào để xem các bước, bấm dấu × để ẩn hẳn. Trong **Cài đặt** có mục **Trên iPhone** ghi lại các giới hạn dưới đây.
+
+**Giới hạn trên iPhone** (do iOS, ứng dụng web không vượt qua được):
+
+- **Chỉ chạy khi ứng dụng đang mở trên màn hình.** Tắt màn hình, khoá máy hay chuyển sang ứng dụng khác thì iPhone tạm dừng ứng dụng: không theo dõi vị trí, không đọc cảnh báo, không báo quá tốc độ. Khi lái, hãy kẹp điện thoại và để Bạn Đường mở trên màn hình.
+- **Giữ màn hình sáng**: ứng dụng tự xin giữ màn hình sáng khi lái (cần iOS 16.4 trở lên). Theo ghi chú phát hành của Safari 18.4, chức năng này mới chạy được trong ứng dụng mở từ Màn hình chính từ **iOS 18.4**; trên iOS cũ hơn màn hình có thể vẫn tự tắt. Khi đó hãy vào **Cài đặt** → **Màn hình & Độ sáng** → **Tự động khóa** và chọn thời gian dài hơn (hoặc **Không bao giờ**) trong lúc lái, rồi đặt lại sau.
+- **Không có kết nối bộ OBD Bluetooth**: iPhone không cho trang web (kể cả Chrome trên iPhone) dùng Bluetooth.
+- **Không có CarPlay**: CarPlay chỉ hiện ứng dụng gốc được Apple duyệt. Có thể nghe giọng đọc qua loa xe bằng Bluetooth như mục [Nghe giọng nói qua loa xe](#nghe-giọng-nói-qua-loa-xe).
+- **Âm thanh**: chỉ phát được sau khi bạn chạm vào ứng dụng (ví dụ bấm **Bắt đầu lái**); khi chế độ im lặng đang bật, âm báo và giọng đọc có thể không kêu. Sau cuộc gọi hay Siri, ứng dụng tự mở lại âm báo khi hiện lại trên màn hình và trước mỗi tiếng bíp; nếu vẫn không nghe tiếng bíp, chạm vào màn hình một lần (cách này mới kiểm bằng kiểm thử tự động, chưa thử trên iPhone thật).
+- **Dữ liệu trên máy**: Safari có thể tự xoá dữ liệu (cài đặt, Nhà, Cơ quan, điểm đánh dấu, biển đã học) của trang web không được mở trong 7 ngày. Ứng dụng đã thêm vào Màn hình chính được tính riêng theo số ngày bạn mở nó, nên thường không bị xoá kiểu này. Vẫn nên **Xuất tệp** điểm đánh dấu để sao lưu.
+- **Camera nhận diện biển**: phải bật lại bằng tay (khi xe đã đỗ) mỗi lần mở ứng dụng, và **chưa được thử trên iPhone thật**.
+
+Các phần trên mới được kiểm bằng kiểm thử tự động và trình duyệt máy tính giả lập iPhone, **chưa được thử trên iPhone thật**. Nếu gặp lỗi trên máy của bạn, hãy ghi lại đời máy và phiên bản iOS.
 
 ## Báo trước biển báo
 
@@ -169,7 +213,7 @@ Tính năng này **tắt sẵn** và đang thử nghiệm. Bật trong **Cài đ
   | Camera có sẵn của hãng xe (camera hành trình, 360°, hỗ trợ lái), Android Auto, CarPlay | Không: trình duyệt không có cách nào truy cập |
   | Camera lùi của màn hình xe | Thường không truy cập được, và lại nhìn ra phía sau |
   | Trình duyệt bên trong Zalo, Facebook; ứng dụng “trình duyệt” dựng sẵn trên màn hình xe | Không |
-  | iPhone | Không hứa hẹn: ứng dụng cài ra màn hình chính không giữ được quyền camera giữa các lần mở |
+  | iPhone, iPad (iOS 16.4 trở lên) | Không hứa hẹn: phải bật lại camera bằng tay mỗi lần mở ứng dụng; chưa được thử trên iPhone thật |
   | Ứng dụng bị ẩn, màn hình tắt, ứng dụng khác che lên | Camera không chạy |
 
   Máy cần hỗ trợ WebAssembly SIMD (Chrome Android 91 trở lên); nếu không, mục cài đặt ghi “Thiết bị này không chạy được tính năng nhận diện biển.”
@@ -197,6 +241,8 @@ Tính năng này **tắt sẵn** và đang thử nghiệm. Bật trong **Cài đ
 | `js/obd.js` | Kết nối bộ OBD qua Web Bluetooth hoặc Web Serial, phiên đọc dữ liệu, nhắc tình trạng xe |
 | `js/obdnative.js` | Bộ OBD trong ứng dụng Android (WebView không có Web Bluetooth/Web Serial): hộp chọn thiết bị và kết nối Bluetooth do máy làm, trang chỉ gửi lệnh đọc trong danh sách được phép; trên trình duyệt thường không làm gì |
 | `js/voice.js` | Giọng đọc và âm báo |
+| `js/ios.js` | iPhone, iPad: nhận ra trình duyệt và chế độ mở từ Màn hình chính, gợi ý cài, mục “Trên iPhone” trong Cài đặt |
+| `js/compat.js` | Báo rõ khi trình duyệt quá cũ (trước iOS 16.4) thay vì để trang đứng yên |
 | `js/search.js` | Tìm địa điểm |
 | `js/store.js` | Cài đặt, địa điểm, điểm đánh dấu, nhật ký (lưu trên thiết bị) |
 | `js/icons.js` | Bộ biểu tượng tự vẽ |
@@ -239,7 +285,7 @@ Các máy chủ công cộng trên phù hợp để dùng cá nhân và thử ng
 - **Xe máy**: tuyến xe máy tính bằng hồ sơ xe hai bánh của Valhalla nên không đi vào đường cao tốc. Nếu Valhalla không phản hồi, ứng dụng chuyển sang OSRM (chỉ có hồ sơ ô tô) và ghi rõ trên màn hình rằng tuyến có thể đi qua cao tốc.
 - **Không có tình trạng giao thông trực tiếp** (kẹt xe theo thời gian thực) vì không có nguồn dữ liệu mở.
 - **Điểm tự đánh dấu chỉ nằm trên thiết bị**. Muốn nhiều người cùng thấy báo cáo của nhau cần thêm một máy chủ lưu trữ chung.
-- **Ứng dụng web không chạy nền**: phải để ứng dụng mở trên màn hình thì mới có định vị và cảnh báo. Ứng dụng đã tự giữ màn hình sáng khi lái.
+- **Ứng dụng web không chạy nền**: phải để ứng dụng mở trên màn hình thì mới có định vị và cảnh báo. Ứng dụng đã tự giữ màn hình sáng khi lái (trên iPhone xem [Cài trên iPhone](#cài-trên-iphone)).
 - **Chưa có bản đồ ngoại tuyến đầy đủ**: chỉ các vùng bản đồ đã xem được lưu lại; tìm đường và tìm địa điểm cần có mạng.
 
 Biển báo và hiệu lệnh thực tế trên đường luôn là căn cứ để tuân theo.

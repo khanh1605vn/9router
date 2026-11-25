@@ -10,6 +10,8 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SW_SOURCE = readFileSync(join(ROOT, 'sw.js'), 'utf8');
 const ORIGIN = 'https://app.test';
 const SCOPE = `${ORIGIN}/ban-duong/`;
+// Tên bộ nhớ đệm vỏ ứng dụng gắn VERSION và phạm vi của service worker.
+const SHELL_NAME = 'banduong-shell-v12@/ban-duong/';
 
 // Tệp giai đoạn 2 (đang được viết song song). Khi chưa có, kiểm tra "có trên đĩa" chỉ là todo, không làm đỏ bộ thử.
 const PHASE2_FILES = ['js/camctl.js', 'js/camui.js', 'js/evalcrops.js'];
@@ -171,8 +173,8 @@ function loadSw({ fetchImpl, now } = {}) {
 
 test('VERSION đã tăng và tên bộ nhớ đệm ML cố định, không gắn VERSION', () => {
   const { sw } = loadSw();
-  assert.equal(sw.VERSION, 'v10');
-  assert.equal(sw.SHELL, 'banduong-shell-v10');
+  assert.equal(sw.VERSION, 'v12');
+  assert.equal(sw.SHELL, SHELL_NAME);
   assert.equal(sw.ML, 'banduong-ml-1');
   assert.ok(!sw.ML.startsWith('banduong-shell-'));
 });
@@ -193,7 +195,7 @@ test('tệp ML: ưu tiên bộ nhớ đệm, khoá bằng cả địa chỉ gồ
   assert.ok(first.handled);
   assert.deepEqual(new Uint8Array(await first.response.arrayBuffer()), body);
   assert.deepEqual([...t.caches.get('banduong-ml-1').map.keys()], [url]);
-  assert.equal(t.caches.get('banduong-shell-v10'), undefined, 'không được lọt vào bộ nhớ đệm vỏ ứng dụng');
+  assert.equal(t.caches.get(SHELL_NAME), undefined, 'không được lọt vào bộ nhớ đệm vỏ ứng dụng');
 
   // Lần sau: không hỏi mạng nữa.
   const second = await t.dispatchFetch(url);
@@ -330,7 +332,7 @@ test('vỏ ứng dụng: như trước, ưu tiên mạng; mất mạng thì dùn
   assert.ok(r.handled);
   assert.equal(await r.response.text(), 'body of /ban-duong/js/main.js');
   await new Promise((res) => setTimeout(res, 0));
-  assert.ok(t.caches.get('banduong-shell-v10').map.has(`${SCOPE}js/main.js`));
+  assert.ok(t.caches.get(SHELL_NAME).map.has(`${SCOPE}js/main.js`));
 
   online = false;
   const off = await t.dispatchFetch(`${SCOPE}js/main.js?x=1`);
@@ -346,7 +348,7 @@ test('vỏ ứng dụng: câu trả lời không ok không được lưu', async
   const t = loadSw({ fetchImpl: (req) => netResponse('nope', { status: 404, url: req.url }) });
   await t.dispatchFetch(`${SCOPE}js/missing.js`);
   await new Promise((res) => setTimeout(res, 0));
-  assert.equal(t.caches.get('banduong-shell-v10').map.size, 0);
+  assert.equal(t.caches.get(SHELL_NAME).map.size, 0);
 });
 
 test('ô bản đồ vẫn ưu tiên bộ nhớ đệm như trước', async () => {
@@ -466,23 +468,108 @@ test('OpenFreeMap: ô .pbf (địa chỉ gắn bản dựng) và phông chữ kh
 test('cài đặt: chỉ nạp trước SHELL_FILES, không có tệp ML, tests/ hay tools/', async () => {
   const t = loadSw();
   await t.dispatchLifecycle('install');
-  const added = t.caches.get('banduong-shell-v10').added;
-  assert.deepEqual(added, t.sw.SHELL_FILES);
+  const added = t.caches.get(SHELL_NAME).added;
+  // Mỗi tệp là một Request tải thẳng từ máy chủ (cache: 'reload'), không lấy bản cũ trong bộ nhớ đệm HTTP.
+  assert.deepEqual(
+    added.map((r) => r.url),
+    t.sw.SHELL_FILES.map((f) => new URL(f, `${SCOPE}sw.js`).href)
+  );
+  for (const r of added) assert.equal(r.cache, 'reload', r.url);
   assert.equal(t.caches.get('banduong-ml-1'), undefined);
-  for (const f of added) {
+  for (const f of t.sw.SHELL_FILES) {
     assert.ok(!/^(models|vendor\/litert|tests|tools)\//.test(f), f);
   }
   assert.equal(t.calls.skipWaiting, 1);
 });
 
-test('kích hoạt: chỉ xoá banduong-shell-* cũ, giữ banduong-ml-1 và ô bản đồ', async () => {
+test('vỏ ứng dụng: luôn hỏi lại máy chủ (cache: no-cache), không dùng bản cũ trong bộ nhớ đệm HTTP (GitHub Pages max-age=600)', async () => {
+  const seen = [];
+  const t = loadSw({
+    fetchImpl: (req) => {
+      seen.push({ url: req.url, cache: req.cache });
+      return netResponse('x', { url: req.url });
+    },
+  });
+  await t.dispatchFetch(`${SCOPE}js/main.js`);
+  await t.dispatchFetch(`${SCOPE}`);
+  assert.deepEqual(seen.map((x) => x.cache), ['no-cache', 'no-cache']);
+  // Yêu cầu đã tự đặt cách khác (tải lại mạnh) thì giữ nguyên.
+  await t.dispatchFetch(`${SCOPE}js/store.js`, { cache: 'reload' });
+  assert.equal(seen.at(-1).cache, 'reload');
+  // Bộ nhớ đệm khoá theo địa chỉ như trước.
+  assert.ok(t.caches.get(SHELL_NAME).map.has(`${SCOPE}js/main.js`));
+  // Ô bản đồ và dịch vụ ngoài không bị đổi cách tải.
+  const tj = 'https://tiles.openfreemap.org/planet';
+  await t.dispatchFetch(tj);
+  assert.equal(seen.at(-1).cache, 'default');
+});
+
+test('kích hoạt: chỉ xoá vỏ ứng dụng cũ của chính phạm vi này, giữ banduong-ml-1, ô bản đồ và bản ở thư mục khác', async () => {
   const t = loadSw();
-  for (const name of ['banduong-shell-v4', 'banduong-shell-v5', 'banduong-shell-v6', 'banduong-shell-v7', 'banduong-shell-v8', 'banduong-shell-v9', 'banduong-shell-v10', 'banduong-ml-1', 'banduong-tiles-v1']) {
+  const home = (scope) => new Response(`trang ${scope}`);
+  // Tên kiểu cũ (trước v12, chưa gắn phạm vi) chứa trang chính /ban-duong/: của phạm vi này, xoá.
+  for (const name of ['banduong-shell-v4', 'banduong-shell-v9', 'banduong-shell-v10', 'banduong-shell-v11']) {
+    await (await t.caches.open(name)).put(SCOPE, home(SCOPE));
+  }
+  // Tên kiểu cũ của một bản Bạn Đường ở thư mục khác trên cùng nguồn gốc: không đụng tới.
+  const other = `${ORIGIN}/other/`;
+  await (await t.caches.open('banduong-shell-v10-other')).put(other, home(other));
+  // Tên mới: bản cũ của phạm vi này xoá; của phạm vi khác giữ; tên đúng bản này giữ.
+  for (const name of ['banduong-shell-v11@/ban-duong/', 'banduong-shell-v12@/other/', 'banduong-shell-v99@/ban-duong/x/', SHELL_NAME, 'banduong-ml-1', 'banduong-tiles-v1']) {
     await t.caches.open(name);
   }
   await t.dispatchLifecycle('activate');
-  assert.deepEqual((await t.caches.keys()).sort(), ['banduong-ml-1', 'banduong-shell-v10', 'banduong-tiles-v1']);
+  assert.deepEqual((await t.caches.keys()).sort(), [
+    'banduong-ml-1',
+    'banduong-shell-v10-other',
+    'banduong-shell-v12@/ban-duong/',
+    'banduong-shell-v12@/other/',
+    'banduong-shell-v99@/ban-duong/x/',
+    'banduong-tiles-v1',
+  ]);
   assert.equal(t.calls.claim, 1);
+});
+
+test('hai bản Bạn Đường trên cùng nguồn gốc (hai thư mục, cùng hay khác VERSION): mỗi bản một bộ nhớ đệm vỏ, bản này kích hoạt không xoá của bản kia', async () => {
+  const caches = new FakeCaches();
+  const make = (scope) => {
+    const listeners = {};
+    const ctx = {
+      URL,
+      Request,
+      Response,
+      Headers,
+      RegExp,
+      crypto: globalThis.crypto,
+      caches,
+      location: new URL(`${scope}sw.js`),
+      registration: { scope },
+      clients: { claim: async () => {} },
+      skipWaiting: async () => {},
+      addEventListener: (type, fn) => (listeners[type] = fn),
+      fetch: async () => {
+        throw new TypeError('offline');
+      },
+    };
+    ctx.self = ctx;
+    vm.createContext(ctx);
+    vm.runInContext(`${SW_SOURCE}\n;self.__shell = SHELL;`, ctx);
+    const run = async (type) => {
+      let p = null;
+      listeners[type]({ waitUntil: (x) => (p = x) });
+      await p;
+    };
+    return { shell: ctx.__shell, run };
+  };
+  const a = make(`${ORIGIN}/9router/`);
+  const b = make(`${ORIGIN}/thu/`);
+  assert.notEqual(a.shell, b.shell);
+  await a.run('install');
+  await a.run('activate');
+  await b.run('install');
+  await b.run('activate');
+  const names = await caches.keys();
+  assert.ok(names.includes(a.shell) && names.includes(b.shell), names.join());
 });
 
 // ---------------------------------------------------------------------------------------------------------------------

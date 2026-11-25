@@ -2,8 +2,13 @@
 // Đổi VERSION mỗi lần phát hành để máy người dùng nhận bản mới, và đổi luôn SHELL_VERSION trong js/appupdate.js cho
 // giống (tests/appupdate.test.mjs kiểm tra hai chỗ khớp nhau).
 
-const VERSION = 'v10';
-const SHELL = `banduong-shell-${VERSION}`;
+const VERSION = 'v12';
+// Mọi trang GitHub Pages của một tài khoản chung một nguồn gốc (khanh1605vn.github.io), nên chung cả bộ nhớ đệm. Tên
+// bộ nhớ đệm vỏ ứng dụng gắn với phạm vi (thư mục) của service worker, để một bản Bạn Đường khác trên cùng tài khoản
+// (bản thử, bản sao) không xoá hay ghi đè vỏ ứng dụng của /9router/ khi đổi bản.
+const SCOPE_PATH = new URL((self.registration && self.registration.scope) || './', self.location.href).pathname;
+const SHELL_PREFIX = 'banduong-shell-';
+const SHELL = `${SHELL_PREFIX}${VERSION}@${SCOPE_PATH}`;
 const TILES = 'banduong-tiles-v1';
 const TILE_LIMIT = 800;
 // Ô bản đồ raster tile.openstreetmap.org: địa chỉ không gắn phiên bản, ảnh đổi khi bản đồ được sửa. Bản đã lưu dùng
@@ -16,7 +21,8 @@ const REVALIDATE_MAX = 4;
 const revalidating = new Set(); // địa chỉ đang được tải lại ngầm
 
 // Tệp mô hình nhận diện biển và LiteRT (khoảng 12 MB mỗi bản dựng): chỉ tải khi người dùng bật camera, nên KHÔNG nằm
-// trong SHELL_FILES. Bộ nhớ đệm riêng, không bị xoá khi đổi VERSION (activate chỉ xoá banduong-shell-*).
+// trong SHELL_FILES. Bộ nhớ đệm riêng, không bị xoá khi đổi VERSION (activate chỉ xoá banduong-shell-*). Ô bản đồ và
+// tệp ML khoá bằng cả địa chỉ (tệp ML còn gắn ?v= mã băm), nên các bản trên cùng nguồn gốc dùng chung được.
 const ML = 'banduong-ml-1';
 // Thư mục (tính từ phạm vi của service worker) đi vào bộ nhớ đệm ML.
 const ML_DIRS = ['models/', 'vendor/litert/'];
@@ -64,29 +70,57 @@ const SHELL_FILES = [
   'js/learnedsigns.js',
   'js/carbridge.js',
   'js/appupdate.js',
+  'js/ios.js',
+  'js/compat.js',
   'vendor/maplibre-gl/maplibre-gl.js',
   'vendor/maplibre-gl/maplibre-gl.css',
   'icons/icon.svg',
   'icons/icon-192.png',
   'icons/icon-512.png',
+  'icons/apple-touch-icon.png',
 ];
 
+// GitHub Pages trả mọi tệp kèm Cache-Control: max-age=600, nên nếu đi qua bộ nhớ đệm HTTP của trình duyệt thì trong 10
+// phút sau khi phát hành, bản mới của service worker vẫn nạp mã cũ vào bộ nhớ đệm vỏ ứng dụng (người dùng bấm "tải lại"
+// vẫn chạy mã cũ, hoặc lẫn tệp cũ với tệp mới). Vì vậy lúc cài luôn tải thẳng từ máy chủ (cache: 'reload').
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches
       .open(SHELL)
-      .then((cache) => cache.addAll(SHELL_FILES))
+      .then((cache) =>
+        cache.addAll(SHELL_FILES.map((u) => new Request(new URL(u, self.location.href), { cache: 'reload' })))
+      )
       .then(() => self.skipWaiting())
   );
 });
 
+/**
+ * Bộ nhớ đệm vỏ ứng dụng cũ cần xoá khi kích hoạt: bản khác của chính phạm vi này (tên kết thúc bằng @<phạm vi>), và bản
+ * đặt tên kiểu cũ (trước v12, chưa gắn phạm vi) nhưng chỉ khi nó chứa trang chính của phạm vi này. Bộ nhớ đệm của bản
+ * Bạn Đường ở thư mục khác trên cùng nguồn gốc không bao giờ bị đụng tới.
+ */
+async function staleShells() {
+  const own = `@${SCOPE_PATH}`;
+  const home = new URL(SCOPE_PATH, self.location.href).href;
+  const out = [];
+  for (const k of await caches.keys()) {
+    if (!k.startsWith(SHELL_PREFIX) || k === SHELL) continue;
+    if (k.endsWith(own)) out.push(k);
+    else if (!k.includes('@')) {
+      try {
+        if (await (await caches.open(k)).match(home)) out.push(k);
+      } catch {
+        /* không đọc được: để nguyên */
+      }
+    }
+  }
+  return out;
+}
+
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches
-      .keys()
-      .then((keys) =>
-        Promise.all(keys.filter((k) => k.startsWith('banduong-shell-') && k !== SHELL).map((k) => caches.delete(k)))
-      )
+    staleShells()
+      .then((old) => Promise.all(old.map((k) => caches.delete(k))))
       .then(() => self.clients.claim())
   );
 });
@@ -103,11 +137,28 @@ self.addEventListener('message', (event) => {
   }
 });
 
-/** Ưu tiên mạng để luôn có bản mới; mất mạng thì dùng bản đã lưu. */
-async function networkFirst(request, cacheName, ignoreSearch = false) {
+/**
+ * Yêu cầu hỏi lại máy chủ thay vì dùng bộ nhớ đệm HTTP của trình duyệt (cache: 'no-cache': tệp không đổi thì máy chủ
+ * chỉ trả 304, rẻ). Yêu cầu đã tự đặt cách khác (tải lại mạnh, no-store…) thì giữ nguyên. Trình duyệt không cho dựng lại
+ * yêu cầu (bản cũ với yêu cầu mở trang) thì dùng yêu cầu gốc.
+ */
+function bypassHttpCache(request) {
+  if (request.cache !== 'default' && request.cache !== 'force-cache') return request;
+  try {
+    return new Request(request, { cache: 'no-cache' });
+  } catch {
+    return request;
+  }
+}
+
+/**
+ * Ưu tiên mạng để luôn có bản mới; mất mạng thì dùng bản đã lưu. fresh: bỏ qua bộ nhớ đệm HTTP (vỏ ứng dụng, xem ghi
+ * chú ở sự kiện install).
+ */
+async function networkFirst(request, cacheName, { ignoreSearch = false, fresh = false } = {}) {
   const cache = await caches.open(cacheName);
   try {
-    const response = await fetch(request);
+    const response = await fetch(fresh ? bypassHttpCache(request) : request);
     if (response.ok) cache.put(request, response.clone());
     return response;
   } catch (err) {
@@ -261,7 +312,7 @@ self.addEventListener('fetch', (event) => {
       return;
     }
     if (under(path, NEVER_CACHE_DIRS)) return;
-    event.respondWith(networkFirst(request, SHELL, true));
+    event.respondWith(networkFirst(request, SHELL, { ignoreSearch: true, fresh: true }));
     return;
   }
   if (url.hostname === 'tiles.openfreemap.org') {

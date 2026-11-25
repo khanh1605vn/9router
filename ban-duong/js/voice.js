@@ -28,6 +28,8 @@ export const PRIORITY = { info: 0, alert: 1, turn: 2 };
 // Câu cảnh báo bị câu rẽ gấp chen ngang được đọc lại ngay sau câu đó nếu mới xếp hàng chưa quá chừng này (ms);
 // lâu hơn thì khoảng cách trong câu đã cũ.
 const REPEAT_WITHIN = 5000;
+// Âm báo chờ mở lại âm thanh quá chừng này (ms) thì không phát nữa.
+const CHIME_LATE = 1500;
 
 class Voice {
   constructor() {
@@ -58,26 +60,73 @@ class Voice {
     return Boolean(this.voice);
   }
 
-  /** Gọi trong sự kiện chạm đầu tiên để mở khoá âm thanh. */
+  /**
+   * Gọi trong sự kiện chạm/bấm để mở khoá âm thanh. Gọi lại nhiều lần cũng được: iOS chỉ coi lần bấm xong (click,
+   * pointerup) là thao tác của người dùng, không tính lúc vừa đặt ngón tay xuống (pointerdown). Khi trình duyệt cho biết
+   * lúc này không có thao tác nào (navigator.userActivation), câu mồi chưa được phát để lần bấm sau phát.
+   * @returns true khi giọng đọc đã được mồi
+   */
   unlock() {
+    const activation = globalThis.navigator?.userActivation;
+    const active = !activation || activation.isActive !== false;
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
       if (AC && !this.ctx) this.ctx = new AC();
-      if (this.ctx?.state === 'suspended') this.ctx.resume();
+      // iOS còn có trạng thái 'interrupted' (cuộc gọi, ứng dụng khác giành loa): cũng phải resume trong lần bấm.
+      if (this.ctx && this.ctx.state !== 'running' && this.ctx.state !== 'closed') this.ctx.resume()?.catch?.(() => {});
     } catch {
       /* không có Web Audio: bỏ qua âm báo */
     }
-    // iOS chỉ cho đọc sau khi đã có một câu được phát trong lúc người dùng chạm: phát một câu im lặng.
-    if (this.supported && !this.primed) {
-      this.primed = true;
+    // iOS chỉ cho đọc sau khi đã có một câu được phát trong lúc người dùng bấm: phát một câu im lặng.
+    if (this.supported && !this.primed && active) {
       try {
+        this.#pickVoice(); // danh sách giọng trên iOS có khi chỉ có sau lần đọc đầu
         const u = new SpeechSynthesisUtterance(' ');
         u.volume = 0;
         window.speechSynthesis.speak(u);
+        this.primed = true;
       } catch {
         /* bỏ qua */
       }
     }
+    return this.primed;
+  }
+
+  /** Âm thanh đã sẵn sàng hết (giọng đọc đã mồi, âm báo chạy được hoặc máy không có Web Audio). */
+  get unlocked() {
+    return (!this.supported || this.primed) && (!this.ctx || this.ctx.state === 'running');
+  }
+
+  /**
+   * Mở lại âm báo đã bị dừng sau lần mở khoá đầu: iOS để AudioContext ở 'interrupted' trong cuộc gọi, Siri, ứng dụng
+   * khác giành loa, và có khi để 'suspended' khi xong mà không tự chạy lại. Sau lần bấm đầu, resume() không cần bấm
+   * nữa, nên gọi được lúc trang hiện lại và ngay trước mỗi âm báo. Không ném lỗi.
+   * @returns Promise<boolean> âm báo chạy được chưa
+   */
+  resumeAudio() {
+    const ctx = this.ctx;
+    if (!ctx || ctx.state === 'closed') return Promise.resolve(false);
+    if (ctx.state === 'running') return Promise.resolve(true);
+    try {
+      return Promise.resolve(ctx.resume?.())
+        .catch(() => {})
+        .then(() => ctx.state === 'running');
+    } catch {
+      return Promise.resolve(false);
+    }
+  }
+
+  /**
+   * Trang hiện lại sau khi bị ẩn: iOS có khi để máy đọc ở trạng thái tạm dừng (các câu sau không bao giờ được đọc) và
+   * âm báo bị dừng sau cuộc gọi.
+   */
+  wake() {
+    try {
+      if (this.supported && window.speechSynthesis.paused) window.speechSynthesis.resume();
+    } catch {
+      /* bỏ qua */
+    }
+    this.resumeAudio();
   }
 
   /** Mức ưu tiên cao nhất trong các câu đang đọc và đang chờ (-1 khi rảnh). */
@@ -113,6 +162,8 @@ class Voice {
   }
 
   #say(entry) {
+    // Danh sách giọng nạp chậm (Safari có khi không phát 'voiceschanged'): chưa chọn được giọng thì thử lại mỗi câu.
+    if (!this.voice) this.#pickVoice();
     const u = new SpeechSynthesisUtterance(normalizeForSpeech(entry.text));
     u.lang = 'vi-VN';
     if (this.voice) u.voice = this.voice;
@@ -144,9 +195,24 @@ class Voice {
     osc.stop(t0 + length + 0.02);
   }
 
-  /** Âm báo: 'alert' (điểm cảnh báo), 'over' (quá tốc độ), 'turn' (sắp rẽ), 'done' (xác nhận). */
+  /**
+   * Âm báo: 'alert' (điểm cảnh báo), 'over' (quá tốc độ), 'turn' (sắp rẽ), 'done' (xác nhận). Âm báo đang bị dừng
+   * (cuộc gọi vừa xong) thì mở lại trước rồi mới phát, chậm vài phần nghìn giây; không mở lại được thì bỏ âm này.
+   */
   chime(kind) {
-    if (!this.beeps || !this.ctx || this.ctx.state !== 'running') return;
+    if (!this.beeps || !this.ctx || this.ctx.state === 'closed') return;
+    if (this.ctx.state !== 'running') {
+      const at = Date.now();
+      this.resumeAudio().then((ok) => {
+        // Trình duyệt có thể giữ resume() tới tận lần chạm sau: khi đó âm báo đã lỗi thời, bỏ đi.
+        if (ok && this.beeps && Date.now() - at < CHIME_LATE) this.#play(kind);
+      });
+      return;
+    }
+    this.#play(kind);
+  }
+
+  #play(kind) {
     try {
       if (kind === 'alert') {
         this.#tone(880, 0, 0.16);

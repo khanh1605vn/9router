@@ -2,13 +2,25 @@
 <html lang="vi">
 <head>
   <meta charset="utf-8">
+  <!-- Chính sách nội dung cho trang (GitHub Pages không gửi được tiêu đề HTTP). Giống HTML_CSP của ứng dụng Android
+       (android/…/web/WebAssets.kt) trừ frame-ancestors (thẻ meta không nhận chỉ thị này); trong WebView hai chính sách
+       giống nhau nên giao của chúng không đổi gì. Phải đứng trước mọi thẻ script. Chỉ áp lên trang: js/vision-worker.js
+       nạp từ tệp riêng nên không mang chính sách này (xem README.md, mục "Nếu thêm Content-Security-Policy"). -->
+  <meta http-equiv="Content-Security-Policy" content="script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-src 'none'; form-action 'self'">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
   <meta name="theme-color" content="#0a57a4">
+  <!-- Mở từ Màn hình chính như ứng dụng (iOS đọc các thẻ apple-*; Android đọc manifest). Thanh trạng thái trong suốt:
+       bản đồ phủ cả dưới tai thỏ, các nút nằm trong vùng an toàn env(safe-area-inset-*) của css/app.css. -->
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Bạn Đường">
+  <meta name="format-detection" content="telephone=no">
   <meta name="description" content="Dẫn đường bằng giọng nói tiếng Việt, báo trước biển báo phía trước, cảnh báo giới hạn tốc độ, camera phạt nguội và trạm thu phí, kết nối bộ OBD của ô tô.">
   <title>Bạn Đường</title>
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
-  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" crossorigin="anonymous" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Be+Vietnam+Pro:wght@400;500;600;700&display=swap">
@@ -60,6 +72,12 @@
     <div id="swUpdate" class="layer-pill app-update" hidden>
       <button id="btnSwReload" class="layer-pill-main" type="button"><span data-icon="download" data-size="18"></span><span id="swUpdateText">Đã có bản mới, bấm để tải lại</span></button>
       <button id="btnSwLater" class="icon-btn quiet" type="button" aria-label="Để sau"><span data-icon="close" data-size="20"></span></button>
+    </div>
+    <!-- Gợi ý thêm vào Màn hình chính: chỉ trên iPhone, iPad khi chưa cài và không lái (js/ios.js điền chữ). Bấm để xem
+         các bước; nút đóng ẩn hẳn (lưu trong cài đặt). -->
+    <div id="iosHint" class="layer-pill app-update ios-hint" hidden>
+      <button id="btnIosHint" class="layer-pill-main" type="button"><span data-icon="share" data-size="18"></span><span id="iosHintText"></span></button>
+      <button id="btnIosHintClose" class="icon-btn quiet" type="button" aria-label="Ẩn gợi ý"><span data-icon="close" data-size="20"></span></button>
     </div>
   </header>
 
@@ -164,6 +182,13 @@
       <h2 class="panel-title">Cài đặt</h2>
     </div>
     <div class="panel-body settings">
+      <!-- Chỉ hiện trên iPhone, iPad (js/main.js renderIosNotes, chữ trong js/ios.js). -->
+      <div id="iosBox" hidden>
+        <h3>Trên iPhone</h3>
+        <div id="iosNotes"></div>
+        <div class="row wrap"><button id="btnIosSteps" class="btn" type="button"><span data-icon="share" data-size="18"></span><span>Cách thêm vào Màn hình chính</span></button></div>
+      </div>
+
       <h3>Phương tiện</h3>
       <div class="segmented" role="group" aria-label="Phương tiện">
         <button id="setCar" type="button"><span data-icon="car" data-size="18"></span><span>Ô tô</span></button>
@@ -307,6 +332,7 @@
 
   <div id="toast" role="status" aria-live="polite"></div>
 
+  <script src="js/compat.js"></script>
   <script src="vendor/maplibre-gl/maplibre-gl.js"></script>
   <script type="module" src="js/main.js"></script>
 </body>

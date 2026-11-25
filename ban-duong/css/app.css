@@ -55,14 +55,39 @@ html, body {
 }
 
 button, input, select { font: inherit; color: inherit; }
+/* Chỉ iOS (-webkit-touch-callout): ô chọn, ô nhập chữ dưới 16px làm Safari tự phóng to trang khi chạm vào. */
+@supports (-webkit-touch-callout: none) {
+  select, textarea, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]) { font-size: max(16px, 1em); }
+}
 button { cursor: pointer; border: 0; background: none; padding: 0; touch-action: manipulation; }
 :focus-visible { outline: 3px solid var(--sign-yellow); outline-offset: 2px; }
 svg { display: block; flex: none; }
 h2, h3, p { margin: 0; }
 
-#map { position: fixed; inset: 0; background: var(--surface-2); }
+#map {
+  position: fixed;
+  inset: 0;
+  background: var(--surface-2);
+  /* Giữ tay trên bản đồ (chọn điểm) không bật kính lúp, bôi chọn chữ hay menu của iOS. */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* Mở từ Màn hình chính trên iPhone: thanh trạng thái trong suốt (black-translucent) nằm đè lên bản đồ, chữ trắng. Dải
+   tối mờ cao đúng vùng tai thỏ giúp đọc được giờ, pin trên bản đồ sáng; máy không có vùng này thì cao 0. */
+body::before {
+  content: "";
+  position: fixed;
+  z-index: 50;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: env(safe-area-inset-top, 0px);
+  background: rgba(10, 20, 30, 0.42);
+  pointer-events: none;
+}
 .map-inverted .maplibregl-canvas { filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.9); }
-.maplibregl-ctrl-bottom-right { bottom: calc(var(--sheet-h) + 4px); right: 66px; }
+.maplibregl-ctrl-bottom-right { bottom: calc(var(--sheet-h) + 4px); right: calc(66px + env(safe-area-inset-right, 0px)); }
 .maplibregl-ctrl-attrib { font: 11px/1.4 var(--ui); }
 
 /* ---------- Vùng trên: ô tìm kiếm, biển chỉ dẫn, cảnh báo ---------- */
@@ -646,6 +671,9 @@ html.car-ui .cam-pick select { height: 56px; }
 .app-update .layer-pill-main > span:first-child { color: var(--sign-green); }
 .app-update .layer-pill-main:disabled { opacity: 1; cursor: default; }
 .app-update { max-width: 100%; }
+.ios-hint .layer-pill-main > span:first-child { color: var(--sign-blue); }
+:root[data-theme="dark"] .ios-hint .layer-pill-main > span:first-child { color: #8cc4ff; }
+.ios-steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; line-height: 1.45; }
 .app-update .layer-pill-main { min-height: 48px; padding-right: 8px; text-align: left; }
 
 /* Màn hình hẹp (360 px): thu gọn hàng nút ở bảng dưới để không tràn mép. */

@@ -44,6 +44,7 @@ import {
   routeWindow,
 } from './carbridge.js';
 import { planPrompts, QuietGate, SHELL_VERSION, SW_RELOAD_TEXT, SwUpdateWatcher } from './appupdate.js';
+import { detectApple, installHint, installSteps, iphoneNotes, requestPersistence, voiceMissingHint } from './ios.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -121,6 +122,9 @@ const car = {
 
 const isDriving = () => state.mode === 'nav' || state.mode === 'drive';
 
+// iPhone, iPad: trình duyệt nào, đã mở từ Màn hình chính chưa (js/ios.js). Trên máy khác ios = false.
+const apple = detectApple();
+
 // Camera nhận diện biển (thử nghiệm): kho biển đã học, bộ học, camera, bộ nhận diện và giới hạn tốc độ từ biển camera
 // đều nằm trong camctl.js. Mọi thao tác với camera chỉ làm được khi xe đã đỗ (camctl.isParked()).
 const camctl = new CameraController({
@@ -197,6 +201,7 @@ function setMode(mode) {
     renderStrip(null);
   }
   updateWakeLock();
+  renderIosHint();
   syncLayout();
   camctl.refresh(); // vào/ra chế độ lái: mở hoặc đóng camera nhận diện biển
   updatePrompts?.refresh(); // lời mời cập nhật ẩn khi đang lái
@@ -338,6 +343,34 @@ async function updateWakeLock() {
   } catch {
     /* thiết bị từ chối giữ màn hình sáng: không ảnh hưởng chức năng khác */
   }
+}
+
+// ---------- iPhone, iPad ----------
+
+/** Gợi ý "thêm vào Màn hình chính": chỉ trên iOS khi chưa cài, chưa bị ẩn, và chỉ lúc không lái. */
+function renderIosHint() {
+  const box = $('iosHint');
+  if (!box) return;
+  const hint = installHint(apple, store.settings.iosHintDismissed);
+  if (hint) $('iosHintText').textContent = hint.text;
+  box.hidden = !hint || state.mode !== 'browse';
+}
+
+/** Hộp thoại các bước cài ra Màn hình chính. */
+function showInstallSteps() {
+  const list = el('ol', { class: 'ios-steps' });
+  for (const step of installSteps(apple)) list.append(el('li', {}, step));
+  openModal('Thêm vào Màn hình chính', el('div', { class: 'view' }, list));
+}
+
+/** Mục "Trên iPhone" trong Cài đặt (chỉ hiện trên iPhone, iPad). */
+function renderIosNotes() {
+  const box = $('iosBox');
+  if (!box) return;
+  box.hidden = !apple.ios;
+  if (!apple.ios) return;
+  $('iosNotes').replaceChildren(...iphoneNotes(apple).map((t) => el('p', { class: 'note' }, t)));
+  $('btnIosSteps').hidden = apple.standalone;
 }
 
 // ---------- Điểm cảnh báo trên bản đồ ----------
@@ -1712,10 +1745,8 @@ function renderSettings() {
   renderRoadFreshness();
 
   const hint = $('voiceState').querySelector('small');
-  hint.textContent =
-    voice.hasVietnamese === false
-      ? 'Máy chưa có giọng đọc tiếng Việt. Hãy cài dữ liệu giọng nói tiếng Việt trong phần cài đặt "Chuyển văn bản thành giọng nói" của thiết bị.'
-      : 'Bấm để nghe thử.';
+  hint.textContent = voice.hasVietnamese === false ? voiceMissingHint(apple) : 'Bấm để nghe thử.';
+  renderIosNotes();
 
   const trips = $('tripList');
   trips.replaceChildren();
@@ -1828,14 +1859,20 @@ function bind() {
   for (const node of document.querySelectorAll('[data-icon]')) {
     node.innerHTML = lineIcon(node.dataset.icon, Number(node.dataset.size) || 24);
   }
-  // Âm thanh chỉ phát được sau lần chạm đầu tiên.
-  window.addEventListener('pointerdown', () => voice.unlock(), { once: true });
+  // Âm thanh chỉ phát được sau lần chạm đầu tiên. iOS chỉ tính lần bấm xong (click, pointerup), không tính lúc vừa đặt
+  // ngón tay xuống, nên nghe cả mấy sự kiện. Không bao giờ thôi nghe: sau cuộc gọi hay Siri, iOS có thể dừng âm báo,
+  // và lần chạm sau (kể cả chạm bản đồ) mở lại. Đã sẵn sàng thì chỉ đọc một thuộc tính rồi thôi.
+  const unlockAudio = () => {
+    if (!voice.unlocked) voice.unlock();
+  };
+  for (const t of ['pointerdown', 'pointerup', 'click', 'keydown']) window.addEventListener(t, unlockAudio, true);
   window.addEventListener('popstate', onPopState);
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') closeOverlays();
     trapModalTab(e);
   });
   document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') voice.wake();
     updateWakeLock();
     applyObdPause(); // trang bị ẩn thì thôi hỏi xe để đỡ tốn pin, trừ khi đang chiếu lên màn hình xe
   });
@@ -1864,6 +1901,12 @@ function bind() {
     openOverlay('settingsPanel');
   });
   $('btnSettingsBack').addEventListener('click', () => closeOverlays());
+  $('btnIosHint').addEventListener('click', showInstallSteps);
+  $('btnIosHintClose').addEventListener('click', () => {
+    store.set('iosHintDismissed', true);
+    renderIosHint();
+  });
+  $('btnIosSteps').addEventListener('click', showInstallSteps);
   $('btnSteps').addEventListener('click', () => {
     renderSteps();
     openOverlay('stepsPanel');
@@ -1924,6 +1967,7 @@ function bind() {
 }
 
 async function boot() {
+  document.documentElement.setAttribute('data-booted', ''); // js/compat.js: mã ứng dụng đã chạy được
   bind();
   carBridge?.start(); // chỉ khi chạy trong ứng dụng Android
   updatePrompts = mountUpdatePrompts(appUpdate, swWatch);
@@ -1932,6 +1976,9 @@ async function boot() {
 
   applyAudio();
   applyCarUi();
+  renderIosHint();
+  // Mở từ Màn hình chính trên iPhone: xin giữ dữ liệu lâu dài (không hiện hộp hỏi nào).
+  if (apple.ios && apple.standalone) requestPersistence();
   state.dark = wantDark();
   document.documentElement.dataset.theme = state.dark ? 'dark' : 'light';
 
