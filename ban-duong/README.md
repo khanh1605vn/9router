@@ -244,6 +244,7 @@ Tính năng này **tắt sẵn** và đang thử nghiệm. Bật trong **Cài đ
 | `js/ios.js` | iPhone, iPad: nhận ra trình duyệt và chế độ mở từ Màn hình chính, gợi ý cài, mục “Trên iPhone” trong Cài đặt |
 | `js/compat.js` | Báo rõ khi trình duyệt quá cũ (trước iOS 16.4) thay vì để trang đứng yên |
 | `js/search.js` | Tìm địa điểm |
+| `js/admin2025.js` | 34 tỉnh, thành sau sắp xếp 2025 và cách đổi địa chỉ có tên tỉnh cũ sang tên mới |
 | `js/store.js` | Cài đặt, địa điểm, điểm đánh dấu, nhật ký (lưu trên thiết bị) |
 | `js/icons.js` | Bộ biểu tượng tự vẽ |
 | `js/camctl.js` | Camera nhận diện biển: điều phối camera, bộ nhận diện, bộ học, kho biển đã học |
@@ -278,6 +279,35 @@ Toàn bộ là dữ liệu © những người đóng góp cho OpenStreetMap (gi
 Mô hình nhận diện biển được huấn luyện từ hình biển tự vẽ của ứng dụng ghép lên ảnh nền đường phố của bộ dữ liệu Open Images V7 (Google; ảnh ghi giấy phép CC BY 2.0, chú thích CC BY 4.0). Không ảnh nào được kèm trong ứng dụng; tác giả và giấy phép của từng ảnh đã dùng được ghi trong `models/ATTRIBUTION-openimages.csv`.
 
 Các máy chủ công cộng trên phù hợp để dùng cá nhân và thử nghiệm. Nếu phát hành cho nhiều người dùng, cần tự dựng máy chủ Valhalla, Photon, Overpass hoặc thuê dịch vụ tương đương rồi đổi các địa chỉ trên, vì máy chủ công cộng giới hạn lưu lượng và không cam kết luôn hoạt động.
+
+## Tỉnh thành sau sắp xếp 2025
+
+Ứng dụng hiển thị địa chỉ theo 34 tỉnh, thành phố trực thuộc Trung ương. Căn cứ là Nghị quyết 202/2025/QH15, chính
+quyền mới hoạt động từ 01/7/2025, và ba nghị quyết năm 2026 đưa Đồng Nai, Quảng Ninh, Bắc Ninh lên thành phố trực thuộc
+Trung ương. Từ 01/7/2025 không còn cấp huyện: địa phương chỉ còn cấp tỉnh và cấp xã (xã, phường, đặc khu).
+
+- **Kết quả tìm kiếm, điểm nhấn giữ trên bản đồ**: phần cấp tỉnh luôn ghi tên mới. Nếu dữ liệu còn tên tỉnh cũ,
+  ứng dụng đổi sang tên mới và ghi thêm gợi ý ngắn, ví dụ “Phường 1, Đồng Tháp · trước đây: Tiền Giang”. Phần có tiền
+  tố quận, huyện, thị xã, hoặc “thành phố” thuộc tỉnh cũ thì bỏ. Tên địa điểm và tên xã, phường thì luôn giữ.
+- **Nhà, Cơ quan, Tìm gần đây** đã lưu từ trước cũng hiện theo tên tỉnh mới. Phần quận, huyện, thị xã trong các địa
+  chỉ này được giữ và có ghi “địa chỉ cũ”, vì phường cũ như “Phường 1” chỉ rõ là nơi nào khi đi cùng quận, ví dụ
+  “Phường 1, Quận 3, TP. Hồ Chí Minh · địa chỉ cũ”. Dữ liệu đã lưu không bị sửa.
+- **Ranh giới cũ** mà OpenStreetMap còn giữ, ví dụ “Tỉnh Bình Dương”, vẫn tìm và chọn được. Các kết quả này xếp sau
+  cùng, có ghi “Ranh giới cũ, nay thuộc TP. Hồ Chí Minh”.
+- **Tìm bằng tên tỉnh cũ** vẫn được. Khi gõ “…, Tiền Giang”, ứng dụng tìm theo “…, Đồng Tháp” vì dữ liệu giờ ghi theo
+  tỉnh mới. Mỗi lần tìm vẫn chỉ gửi một yêu cầu.
+- **Bản đồ nền**: nhãn cấp tỉnh của tỉnh đã bỏ (ví dụ nhãn “Hà Giang” còn sót trong OSM) bị ẩn. Nhãn “Tỉnh Đồng Nai”
+  hiện là “Thành phố Đồng Nai”. Tên thành phố, thị trấn cũ như Mỹ Tho, Kon Tum vẫn hiện, vì đó là tên nơi ở chứ không
+  phải tên tỉnh. Ứng dụng không tự thêm nhãn hay vẽ ranh giới nào.
+
+Giới hạn:
+
+- Tên xã, phường mới lấy hoàn toàn từ OpenStreetMap. Nơi nào OSM chưa cập nhật thì địa chỉ có thể thiếu xã, phường,
+  hoặc còn tên cũ không có tiền tố (ví dụ “Thủ Dầu Một”). Ứng dụng không có bảng xã, phường nên không tự sửa được.
+- Đường ranh giới tỉnh trên bản đồ nền vẽ thẳng từ dữ liệu OSM qua OpenFreeMap (bản dựng lại khoảng mỗi tuần).
+  Kiểm tra ngày 27/11/2026: bản dựng hiện tại đã theo ranh giới mới ở các ô đã xem, ví dụ không còn đường ranh Bình
+  Dương với TP. Hồ Chí Minh cũ. Ở mức thu nhỏ, OpenFreeMap không hiện tên tỉnh nào của Việt Nam.
+- Địa chỉ đã lưu chỉ nhận ra tỉnh khi tên tỉnh đứng cuối chuỗi, như cách ứng dụng vẫn ghép địa chỉ.
 
 ## Giới hạn cần biết
 

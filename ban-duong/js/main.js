@@ -9,7 +9,8 @@ import { CameraSayGate, RouteTracker } from './tracker.js';
 import { clearRoadCache, freshnessText, RoadData } from './roaddata.js';
 import { AlertEngine, describePoint, overSpeedSay, signSpeech, SpeedMonitor } from './alerts.js';
 import { PRIORITY, voice } from './voice.js';
-import { reverseGeocode, searchPlaces } from './search.js';
+import { ADM, reverseGeocode, searchPlaces } from './search.js';
+import { modernizeAddressText } from './admin2025.js';
 import { GLYPH_COLORS, glyphIcon, lineIcon, maneuverIcon } from './icons.js';
 import { SignEngine } from './signengine.js';
 import { categoryEnabled, formatNumberVi, lookupSign, SIGN_CATEGORIES } from './signs.js';
@@ -1039,11 +1040,22 @@ function onFix(fix) {
 
 // ---------- Địa điểm, tìm kiếm, chọn tuyến ----------
 
+/**
+ * Địa chỉ để hiện: địa điểm lưu từ trước năm 2025 (Nhà, Cơ quan, tìm gần đây) còn tên tỉnh cũ hay quận/huyện thì đổi
+ * sang dạng sau sắp xếp, kèm gợi ý ngắn "trước đây: …" (js/admin2025.js).
+ */
+function placeAddress(place) {
+  if (place.adm === ADM) return { address: place.address || '', hint: place.hint || '' };
+  const { address, hint } = modernizeAddressText(place.address);
+  return { address, hint: place.hint || hint };
+}
+
 function showPlace(place, fly = true) {
   state.place = place;
   $('placeName').textContent = place.name;
   const far = state.fix ? `Cách bạn ${formatDistance(distance(state.fix.coord, place.coord))}` : '';
-  $('placeAddress').textContent = [place.address, far].filter(Boolean).join(' · ');
+  const { address, hint } = placeAddress(place);
+  $('placeAddress').textContent = [address, hint, far].filter(Boolean).join(' · ');
   map.clearRoutes();
   map.setDestination(place.coord);
   setMode('place');
@@ -1159,8 +1171,10 @@ function goSaved(slot) {
   planRoute();
 }
 
-function resultRow(place, icon, onPick) {
+function resultRow(place, icon, onPick, shown = placeAddress(place)) {
   const far = state.fix ? formatDistance(distance(state.fix.coord, place.coord)) : '';
+  const { address, hint } = shown;
+  const addr = [address, hint].filter(Boolean).join(' · ');
   return el(
     'button',
     { class: 'result', type: 'button', onclick: onPick },
@@ -1169,7 +1183,7 @@ function resultRow(place, icon, onPick) {
       'span',
       { class: 'result-text' },
       el('div', { class: 'result-name' }, place.name),
-      place.address ? el('div', { class: 'result-addr' }, place.address) : null
+      addr ? el('div', { class: 'result-addr' }, addr) : null
     ),
     far ? el('span', { class: 'result-dist' }, far) : null
   );
@@ -1192,7 +1206,9 @@ function renderSearchHome() {
     body.append(el('div', { class: 'list-label' }, 'Đã lưu'));
     for (const [slot, label, icon] of saved) {
       const p = store.places[slot];
-      body.append(resultRow({ ...p, name: label, address: [p.name, p.address].filter(Boolean).join(', ') }, icon, () => pickResult(p)));
+      const { address, hint } = placeAddress(p);
+      const shown = { address: [p.name, address].filter(Boolean).join(', '), hint };
+      body.append(resultRow({ ...p, name: label }, icon, () => pickResult(p), shown));
     }
   }
   if (store.places.recents.length) {

@@ -2,7 +2,7 @@
 // Đổi VERSION mỗi lần phát hành để máy người dùng nhận bản mới, và đổi luôn SHELL_VERSION trong js/appupdate.js cho
 // giống (tests/appupdate.test.mjs kiểm tra hai chỗ khớp nhau).
 
-const VERSION = 'v12';
+const VERSION = 'v13';
 // Mọi trang GitHub Pages của một tài khoản chung một nguồn gốc (khanh1605vn.github.io), nên chung cả bộ nhớ đệm. Tên
 // bộ nhớ đệm vỏ ứng dụng gắn với phạm vi (thư mục) của service worker, để một bản Bạn Đường khác trên cùng tài khoản
 // (bản thử, bản sao) không xoá hay ghi đè vỏ ứng dụng của /9router/ khi đổi bản.
@@ -49,6 +49,7 @@ const SHELL_FILES = [
   'js/alerts.js',
   'js/voice.js',
   'js/search.js',
+  'js/admin2025.js',
   'js/icons.js',
   'js/signs.js',
   'js/signart.js',

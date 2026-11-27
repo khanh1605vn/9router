@@ -11,7 +11,7 @@ const SW_SOURCE = readFileSync(join(ROOT, 'sw.js'), 'utf8');
 const ORIGIN = 'https://app.test';
 const SCOPE = `${ORIGIN}/ban-duong/`;
 // Tên bộ nhớ đệm vỏ ứng dụng gắn VERSION và phạm vi của service worker.
-const SHELL_NAME = 'banduong-shell-v12@/ban-duong/';
+const SHELL_NAME = 'banduong-shell-v13@/ban-duong/';
 
 // Tệp giai đoạn 2 (đang được viết song song). Khi chưa có, kiểm tra "có trên đĩa" chỉ là todo, không làm đỏ bộ thử.
 const PHASE2_FILES = ['js/camctl.js', 'js/camui.js', 'js/evalcrops.js'];
@@ -173,7 +173,7 @@ function loadSw({ fetchImpl, now } = {}) {
 
 test('VERSION đã tăng và tên bộ nhớ đệm ML cố định, không gắn VERSION', () => {
   const { sw } = loadSw();
-  assert.equal(sw.VERSION, 'v12');
+  assert.equal(sw.VERSION, 'v13');
   assert.equal(sw.SHELL, SHELL_NAME);
   assert.equal(sw.ML, 'banduong-ml-1');
   assert.ok(!sw.ML.startsWith('banduong-shell-'));
@@ -515,15 +515,15 @@ test('kích hoạt: chỉ xoá vỏ ứng dụng cũ của chính phạm vi này
   const other = `${ORIGIN}/other/`;
   await (await t.caches.open('banduong-shell-v10-other')).put(other, home(other));
   // Tên mới: bản cũ của phạm vi này xoá; của phạm vi khác giữ; tên đúng bản này giữ.
-  for (const name of ['banduong-shell-v11@/ban-duong/', 'banduong-shell-v12@/other/', 'banduong-shell-v99@/ban-duong/x/', SHELL_NAME, 'banduong-ml-1', 'banduong-tiles-v1']) {
+  for (const name of ['banduong-shell-v11@/ban-duong/', 'banduong-shell-v12@/ban-duong/', 'banduong-shell-v12@/other/', 'banduong-shell-v99@/ban-duong/x/', SHELL_NAME, 'banduong-ml-1', 'banduong-tiles-v1']) {
     await t.caches.open(name);
   }
   await t.dispatchLifecycle('activate');
   assert.deepEqual((await t.caches.keys()).sort(), [
     'banduong-ml-1',
     'banduong-shell-v10-other',
-    'banduong-shell-v12@/ban-duong/',
     'banduong-shell-v12@/other/',
+    'banduong-shell-v13@/ban-duong/',
     'banduong-shell-v99@/ban-duong/x/',
     'banduong-tiles-v1',
   ]);
