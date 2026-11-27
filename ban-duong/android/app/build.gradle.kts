@@ -50,6 +50,7 @@ val webDistEntries = listOf(
     "icons",
     "vendor",
     "models",
+    "data/community.json", // dữ liệu cộng đồng: chỉ đúng tệp này, không cả thư mục data/
 )
 
 /**

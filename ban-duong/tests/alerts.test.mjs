@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   AlertEngine,
+  CAMERA_AXIS_TOLERANCE,
   CAMERA_LIMIT_AHEAD,
   CAMERA_LIMIT_BEHIND,
   CAMERA_LIMIT_CODE,
@@ -16,6 +17,9 @@ import {
   CAMERA_LIMIT_THROUGH_ANGLE,
   CAMERA_LIMIT_VERTEX_NEAR,
   CameraLimit,
+  ALERT_MIN_SPEED,
+  CAMERA_TRAVEL_TOLERANCE,
+  cameraApplies,
   describePoint,
   JUNCTION_ROADS,
   overSpeedSay,
@@ -28,7 +32,7 @@ import { joinSays, SignEngine } from '../js/signengine.js';
 import { buildQuery, cellKey, cellOf, parseMaxspeed, parseOverpass, RoadData } from '../js/roaddata.js';
 import { parseRoute } from '../js/routing.js';
 import { RouteTracker } from '../js/tracker.js';
-import { destination } from '../js/geo.js';
+import { cumulativeDistances, destination, pointAtDistance } from '../js/geo.js';
 import { LearnedSigns, memoryBackend } from '../js/learnedsigns.js';
 import { Learner } from '../js/signlearn.js';
 import { SIGN_CATALOGUE } from '../js/signs.js';
@@ -927,4 +931,158 @@ test('giới hạn camera: dữ liệu lạ không làm lỗi, thiếu dữ li�
     if (x === 480) assert.equal(noRoads.current?.n, 50);
   }
   assert.equal(noRoads.current, null);
+});
+
+// ------------------------------------------------------------------------------------------
+// Camera: hướng, quan hệ enforcement, giới hạn của đường (PLAN 1.3, 1.4); giới hạn theo chiều (PLAN 1.5)
+// ------------------------------------------------------------------------------------------
+
+test('mô tả camera: đoạn đo tốc độ trung bình, kiểm soát tải trọng và chiều cao, giới hạn của đường chỉ hiện không đọc', () => {
+  const avg = describePoint({ kind: 'camera', sub: 'speed', avg: true, limit: 100 });
+  assert.deepEqual([avg.title, avg.say], ['Đoạn đo tốc độ trung bình · giới hạn 100 km/h', 'có đoạn đo tốc độ trung bình, giới hạn 100 ki lô mét trên giờ']);
+  assert.equal(describePoint({ kind: 'camera', sub: 'traffic', enf: 'weight' }).title, 'Điểm kiểm soát tải trọng xe');
+  assert.equal(describePoint({ kind: 'camera', sub: 'traffic', enf: 'height' }).say, 'có điểm kiểm soát chiều cao xe');
+  assert.equal(describePoint({ kind: 'camera', sub: 'traffic' }).title, 'Camera giám sát giao thông');
+  // Camera không ghi giới hạn: hiện giới hạn của đường đang đi trong tên, câu đọc không có số.
+  const bare = describePoint({ kind: 'camera', sub: 'speed', limit: null }, { roadLimit: 60 });
+  assert.deepEqual([bare.title, bare.say], ['Camera bắn tốc độ · giới hạn đường đang đi 60 km/h', 'có camera bắn tốc độ']);
+  // Camera có giới hạn riêng: chỉ số của camera.
+  assert.equal(describePoint({ kind: 'camera', sub: 'speed', limit: 80 }, { roadLimit: 60 }).title, 'Camera bắn tốc độ · giới hạn 80 km/h');
+  assert.equal(describePoint({ kind: 'camera', sub: 'redlight' }, { roadLimit: 60 }).title, 'Camera phạt vượt đèn đỏ');
+  assert.equal(describePoint({ kind: 'camera', sub: 'speed' }).title, 'Camera bắn tốc độ');
+  // AlertEngine chuyển roadLimit tới tên, câu đọc không đổi.
+  const engine = new AlertEngine();
+  const cam = { id: 'n1', kind: 'camera', sub: 'speed', limit: null, coord: destination(START, 0, 250) };
+  const r = engine.update({ coord: START, speed: 12, heading: 0, time: 1 }, [cam], ALL_ON, null, { roadLimit: 50 });
+  assert.equal(r.active.info.title, 'Camera bắn tốc độ · giới hạn đường đang đi 50 km/h');
+  assert.equal(r.say, 'Còn 250 mét, có camera bắn tốc độ');
+});
+
+test('hướng camera: forward/backward theo hướng vẽ đường, số độ chỉ là trục, thiếu hay không đọc được thì vẫn báo', () => {
+  assert.equal(CAMERA_TRAVEL_TOLERANCE, 90);
+  assert.equal(CAMERA_AXIS_TOLERANCE, 60);
+  const fwd = { kind: 'camera', dir: 'forward', wb: 10 };
+  assert.equal(cameraApplies(fwd, 15), true);
+  assert.equal(cameraApplies(fwd, 190), false, 'đường bên kia của đường đôi');
+  assert.equal(cameraApplies({ ...fwd, dir: 'backward' }, 190), true);
+  assert.equal(cameraApplies({ ...fwd, dir: 'backward' }, 15), false);
+  assert.equal(cameraApplies({ kind: 'camera', dir: 'forward' }, 190), true, 'không biết hướng vẽ: vẫn báo');
+  const deg = { kind: 'camera', dir: '0' };
+  assert.equal(cameraApplies(deg, 0), true);
+  assert.equal(cameraApplies(deg, 180), true, 'hướng chạy hay hướng ống kính: không phân biệt, vẫn báo');
+  assert.equal(cameraApplies(deg, 90), false, 'đường cắt ngang');
+  assert.equal(cameraApplies({ kind: 'camera', dir: '0;90' }, 90), true);
+  for (const dir of [undefined, '', 'both', 'abc', '45-100']) assert.equal(cameraApplies({ kind: 'camera', dir, wb: 0 }, 180), true, String(dir));
+  assert.equal(cameraApplies(fwd, null), true, 'không có hướng đi');
+  assert.equal(cameraApplies({ kind: 'toll', dir: 'forward', wb: 0 }, 180), true);
+});
+
+test('AlertEngine: camera của chiều bên kia không được báo, kể cả lúc kẹt xe; không có hướng GPS thì vẫn báo', () => {
+  const coord = destination(START, 0, 250);
+  const cam = { id: 'n1', kind: 'camera', sub: 'speed', limit: 60, coord, dir: 'forward', wb: 180 }; // áp dụng cho chiều xuống Nam
+  const run = (speed, heading = 0) => new AlertEngine().update({ coord: START, speed, heading, time: 1 }, [cam], ALL_ON);
+  assert.equal(ALERT_MIN_SPEED, 2);
+  assert.equal(run(12).active, null);
+  // Ngưỡng tin hướng GPS bằng ngưỡng báo điểm mới: 7–9 km/h (kẹt xe) vẫn lọc được theo hướng.
+  assert.equal(run(2).active, null);
+  assert.equal(run(2.2).active, null);
+  assert.equal(run(1.9).fired, false, 'dưới 2 m/s: không báo điểm mới');
+  const near = { coord: destination(coord, 180, 30), speed: 12, heading: null, time: 1 };
+  assert.equal(new AlertEngine().update(near, [cam], ALL_ON).fired, true, 'không có hướng GPS: vẫn báo');
+  const own = { ...cam, wb: 0 };
+  assert.equal(new AlertEngine().update({ coord: START, speed: 12, heading: 0, time: 1 }, [own], ALL_ON).fired, true);
+  // Camera trong dữ liệu thật (parseOverpass) trên đường hai chiều vẽ lên Bắc, direction=backward.
+  const a = START;
+  const b = destination(START, 0, 1000);
+  const data = parseOverpass({
+    elements: [
+      { type: 'way', id: 1, geometry: [{ lon: a[0], lat: a[1] }, { lon: coord[0], lat: coord[1] }, { lon: b[0], lat: b[1] }], tags: { highway: 'trunk' } },
+      { type: 'node', id: 5, lon: coord[0], lat: coord[1], tags: { highway: 'speed_camera', direction: 'backward' } },
+    ],
+  });
+  const p = data.points[0];
+  assert.equal(new AlertEngine().update({ coord: START, speed: 12, heading: 0, time: 1 }, [p], ALL_ON).active, null);
+  assert.equal(new AlertEngine().update({ coord: b, speed: 12, heading: 180, time: 1 }, [p], ALL_ON).active, null, 'quá xa');
+  const south = destination(coord, 0, 250);
+  assert.equal(new AlertEngine().update({ coord: south, speed: 12, heading: 180, time: 1 }, [p], ALL_ON).fired, true);
+});
+
+test('AlertEngine: xe bò 2,2 m/s qua camera của chiều bên kia và camera của đường cắt ngang thì im', () => {
+  const sb = { id: 'n1', kind: 'camera', sub: 'speed', limit: null, coord: destination(destination(START, 0, 400), 90, 20), dir: 'forward', wb: 180 };
+  const cross = { id: 'n2', kind: 'camera', sub: 'speed', limit: null, coord: destination(destination(START, 0, 400), 90, 15), dir: '90' };
+  const own = { id: 'n3', kind: 'camera', sub: 'speed', limit: null, coord: destination(START, 0, 420), dir: 'forward', wb: 0 };
+  for (const v of [10, 2.2]) {
+    const engine = new AlertEngine();
+    const said = [];
+    for (let x = 0; x <= 400; x += v) {
+      const r = engine.update({ coord: destination(START, 0, x), speed: v, heading: 0, time: 1e6 + (x * 1000) / v }, [sb, cross, own], ALL_ON);
+      if (r.fired) said.push(r.active.point.id);
+    }
+    assert.deepEqual(said, ['n3'], `tốc độ ${v} m/s`);
+  }
+});
+
+test('AlertEngine dẫn đường: camera ngay sau chỗ rẽ so với hướng tuyến tại camera, không với hướng xe lúc này', () => {
+  // Tuyến đi Đông 600 m rồi rẽ lên Bắc; camera cách chỗ rẽ 150 m trên đoạn đi lên Bắc.
+  const turn = destination(START, 90, 600);
+  const coords = [];
+  for (let d = 0; d <= 600; d += 10) coords.push(destination(START, 90, d));
+  for (let d = 10; d <= 400; d += 10) coords.push(destination(turn, 0, d));
+  const cum = cumulativeDistances(coords);
+  const run = (extra) => {
+    const cam = { id: 'n3', kind: 'camera', sub: 'speed', limit: null, coord: destination(turn, 0, 150), ...extra };
+    const engine = new AlertEngine();
+    const said = [];
+    for (let s = 0; s <= cum.at(-1); s += 15) {
+      const p = pointAtDistance(coords, cum, s);
+      const fix = { coord: p.point, speed: 15, heading: p.bearing, time: 1e6 + s * 100 };
+      const r = engine.update(fix, [cam], ALL_ON, { route: { coords, cum, steps: [] }, seg: p.index, s });
+      if (r.fired) said.push(s);
+    }
+    return said;
+  };
+  const plain = run({});
+  assert.equal(plain.length, 1);
+  assert.deepEqual(run({ dir: '0' }), plain, 'trục Bắc–Nam');
+  assert.deepEqual(run({ dir: 'forward', wb: 0 }), plain, 'chiều vẽ lên Bắc');
+  assert.deepEqual(run({ dir: 'forward', wb: 180 }), [], 'camera của chiều đi xuống');
+  assert.deepEqual(run({ dir: '90' }), [], 'trục Đông–Tây: đường cắt ngang ở chỗ camera');
+  // Điểm tự đánh dấu có hướng số cũng theo hướng tuyến.
+  const rep = { id: 'r1', kind: 'report', type: 'camspeed', coord: destination(turn, 0, 150), direction: 0 };
+  const engine = new AlertEngine();
+  const p = pointAtDistance(coords, cum, plain[0]);
+  const r = engine.update({ coord: p.point, speed: 15, heading: p.bearing, time: 1 }, [rep], ALL_ON, { route: { coords, cum, steps: [] }, seg: p.index, s: plain[0] });
+  assert.equal(r.fired, true);
+});
+
+test('đồng hồ tốc độ: giới hạn theo chiều đi (maxspeed:forward/backward), giữ chiều đã biết khi dừng, chưa biết thì số nhỏ hơn', () => {
+  const roads = new RoadData();
+  const a = START;
+  const b = destination(START, 0, 1000);
+  roads.setCell(cellKey(...cellOf(destination(START, 0, 500))), {
+    ways: [{ id: 1, n: '', h: 'primary', c: null, m: null, cf: 60, cb: 40, mf: 50, mb: 40, o: 0, g: [a[0], a[1], b[0], b[1]] }],
+    points: [],
+  });
+  const fix = (coord, heading, kmh, time) => ({ coord, heading, speed: kmh / 3.6, accuracy: 8, time });
+  const p = destination(START, 0, 400);
+  const mon = new SpeedMonitor();
+  const step = (f) => mon.update(f, roads.matchWay(f), { vehicle: 'car' });
+  assert.equal(step(fix(p, 0, 0, 0)).limit, 40, 'đứng yên, chưa biết chiều: số nhỏ hơn');
+  assert.equal(step(fix(p, 0, 40, 1000)).limit, 60);
+  assert.equal(step(fix(p, 0, 0, 2000)).limit, 60, 'dừng lại: giữ chiều đã biết');
+  const back = new SpeedMonitor();
+  const f2 = fix(p, 180, 40, 0);
+  assert.equal(back.update(f2, roads.matchWay(f2), { vehicle: 'car' }).limit, 40);
+  const moto = new SpeedMonitor();
+  const f3 = fix(p, 0, 40, 0);
+  assert.equal(moto.update(f3, roads.matchWay(f3), { vehicle: 'moto' }).limit, 50);
+  // Giới hạn theo giờ (maxspeed:conditional): theo opts.now.
+  const night = new RoadData();
+  night.setCell(cellKey(...cellOf(destination(START, 0, 500))), {
+    ways: [{ id: 2, n: '', h: 'primary', c: 60, m: 60, o: 0, g: [a[0], a[1], b[0], b[1]], t: { 'maxspeed:conditional': '40 @ (22:00-06:00)' } }],
+    points: [],
+  });
+  const f4 = fix(p, 0, 40, 0);
+  assert.equal(new SpeedMonitor().update(f4, night.matchWay(f4), { now: new Date(2026, 10, 23, 23, 0) }).limit, 40);
+  assert.equal(new SpeedMonitor().update(f4, night.matchWay(f4), { now: new Date(2026, 10, 23, 12, 0) }).limit, 60);
 });

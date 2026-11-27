@@ -12,10 +12,10 @@ Thư mục này là một ứng dụng tĩnh độc lập: không cần build, k
 - **Dẫn đường từng chặng bằng giọng nói tiếng Việt**: nhắc trước khi rẽ ở ba mốc khoảng cách, biển chỉ dẫn lớn trên màn hình, giờ đến dự kiến, tự tìm lại đường khi đi lệch.
 - **Tốc độ**: đồng hồ tốc độ, biển giới hạn tốc độ của đoạn đường đang đi, cảnh báo bằng màu, tiếng bíp và lời nói khi chạy quá; tự đặt tốc độ tối đa cho đoạn đường chưa có dữ liệu. Đang lái mà hơn 5 giây không có vị trí GPS mới (và cũng không có tốc độ từ xe) thì đồng hồ hiện dấu “–” thay vì giữ số cũ.
 - **Báo trước biển báo phía trước** (khoảng 100–200 m): đèn tín hiệu, biển dừng, nhường đường, vòng xuyến, cấm rẽ, cấm đi ngược chiều, đổi giới hạn tốc độ, gờ giảm tốc, đường ngang đường sắt, chỗ ngoặt nguy hiểm… Hiện trên thanh vàng giống cảnh báo camera, kèm hình biển; bấm vào để xem chi tiết. Xem [cách hoạt động và giới hạn](#báo-trước-biển-báo).
-- **Cảnh báo điểm phía trước**: camera bắn tốc độ, camera đèn đỏ, camera giám sát, trạm thu phí.
+- **Cảnh báo điểm phía trước**: camera bắn tốc độ, đoạn đo tốc độ trung bình, camera đèn đỏ, camera giám sát, điểm kiểm soát tải trọng hoặc chiều cao xe, trạm thu phí. Camera có ghi chiều trên bản đồ không bị báo cho chiều bên kia. Vị trí camera ở Việt Nam phần lớn không có trên bản đồ mở, xem [giới hạn](#báo-trước-biển-báo).
 - **Kết nối với ô tô** qua bộ đọc OBD-II Bluetooth (ELM327): lấy tốc độ của xe (vẫn chạy khi mất GPS trong hầm), vòng tua, nhiệt độ nước làm mát, điện áp; nhắc khi máy quá nóng hoặc điện áp thấp; đọc mã lỗi động cơ. Xem [hướng dẫn](#kết-nối-bộ-obd).
 - **Giao diện màn hình ô tô**: bố cục ngang cho màn hình Android trên xe (cũng tự bật khi điện thoại đủ rộng xoay ngang), chữ và nút lớn hơn.
-- **Điểm tự đánh dấu**: camera phạt nguội, cổng trường học, điểm nguy hiểm, công trường, ngập nước, kẹt xe, tai nạn; xuất và nhập tệp để chia sẻ với người khác.
+- **Nút “Báo cáo” và dữ liệu cộng đồng**: tự đánh dấu camera, biển báo mới hoặc đã tháo, tốc độ tối đa thay đổi, đường cấm, cổng trường học, điểm nguy hiểm, công trường, ngập nước, kẹt xe, tai nạn; gửi báo cáo cho chủ ứng dụng qua Zalo, tin nhắn hoặc GitHub; xuất và nhập tệp để chia sẻ với người khác. Điểm chủ ứng dụng đã tự kiểm tra tại chỗ được phát cho mọi người dùng. Xem [Báo cáo và dữ liệu cộng đồng](#báo-cáo-và-dữ-liệu-cộng-đồng).
 - **Chế độ lái tự do**: không cần đặt điểm đến, vẫn theo dõi tốc độ và cảnh báo; tự bật khi phát hiện đang di chuyển.
 - **Chạy thử**: mô phỏng chuyến đi dọc tuyến đã chọn để xem trước chỉ dẫn và cảnh báo.
 - **Camera nhận diện biển (thử nghiệm, tắt sẵn)**: điện thoại kẹp trên xe ghi nhận biển báo khi đi qua và báo trước ở những lần đi sau. Xem [cách hoạt động và giới hạn](#camera-nhận-diện-biển-thử-nghiệm).
@@ -117,18 +117,143 @@ Khi dẫn đường hoặc ở chế độ lái, ứng dụng xét khoảng 320 
 - **Báo lúc nào**: khoảng cách báo bằng quãng đường xe chạy trong 8 giây, giữ trong khoảng 100–200 m (chạy càng nhanh báo càng sớm). Các biển cách nhau dưới 40 m được đọc chung một câu, ví dụ “Phía trước 150 mét, đèn tín hiệu giao thông, cấm rẽ trái”. Tối đa một câu mỗi 3 giây; xe đứng yên thì không đọc câu mới.
 - **Trên màn hình**: khi tới khoảng cách báo (khoảng 100–200 m), biển hiện trên thanh vàng, cùng chỗ với cảnh báo camera; nếu cùng lúc có camera thì cái nào gần hơn hiện, cái kia vẫn được đọc. Các biển xa hơn hiện ở dải nhỏ phía trên đồng hồ tốc độ (tối đa 2 biển). Điện thoại xoay ngang thường đủ rộng (từ 800 px bề ngang) để giao diện màn hình ô tô tự bật, khi đó dải vẫn hiện; màn hình hẹp hơn thì dải ẩn đi để khỏi che bản đồ.
 - **Nguồn**: biển báo được nhập vào OpenStreetMap, cộng với thông tin tương đương biển: đèn tín hiệu, biển dừng và nhường đường, vạch người đi bộ qua đường, gờ giảm tốc, đường ngang đường sắt, vòng xuyến, cấm rẽ, đường một chiều, cấm xe, hạn chế chiều cao, tải trọng, chiều ngang, cấm vượt, chỗ đổi giới hạn tốc độ, hầm, và chỗ ngoặt tính từ hình dạng đường (chỉ báo khi chạy từ 30 km/h).
+- **Cấm xe theo giờ**: ứng dụng đọc các lệnh cấm theo giờ trong tuần ghi trên OpenStreetMap (thẻ `motorcar`, `motorcycle`, `motor_vehicle`, `vehicle`, `access` kèm `:conditional`), ví dụ phố đi bộ Hoàn Kiếm từ tối thứ Sáu đến hết Chủ nhật. Lệnh cấm chỉ được báo khi đang trong giờ cấm, như biển cấm thường: “đường cấm ô tô”, “đường cấm xe máy” hoặc “đường cấm”. Lệnh cấm riêng ô tô không bao giờ được báo cho xe máy, và ngược lại. Đường cấm cố định mà có khung giờ được đi (ví dụ `motor_vehicle=no` và `motor_vehicle:conditional=yes @ (22:00-06:00)`) thì trong khung giờ đó không báo cấm.
+  - Khung có ngày tháng (Tết, 30/4, 2/9, ngày diễu binh…) bị bỏ qua, nên lệnh cấm một lần của các dịp đó **không** được báo. Bỏ như vậy để các khung đã cũ còn nằm trên bản đồ (đo trên dữ liệu đã lưu: hơn 100 đường ở Hoàn Kiếm từ đợt A80, khoảng 50 đường ở Quận 1 và 3, TP. Hồ Chí Minh, từ dịp 30/4) không báo sai hằng năm.
+  - Khung theo ngày lễ, theo giờ mặt trời mọc hoặc lặn, và khung không đọc được thì ứng dụng im lặng, không đoán. Lệnh cấm theo giờ chỉ cho một chiều đường, hay riêng cho taxi, xe tải, xe buýt cũng chưa được báo.
+- **Cấm quay đầu, cấm rẽ qua dải phân cách**: quan hệ cấm rẽ mà chỗ rẽ là một hoặc vài đoạn đường ngắn (thường là chỗ mở dải phân cách) nay cũng được báo, ở chỗ đường đang đi gặp đoạn nối đó. Ứng dụng chỉ báo khi ghép được các đoạn đường đúng chiều đi; thiếu đoạn trong dữ liệu đã tải, chuỗi đứt hoặc đường một chiều ngược chiều thì bỏ, để không báo lệnh cấm của chiều bên kia. Đo trên dữ liệu đã lưu: Hoàn Kiếm ghép được 15/16 quan hệ loại này, Quận 1 và 3 (TP. Hồ Chí Minh) 37/43.
+- **Giới hạn tốc độ theo chiều**: đường ghi giới hạn khác nhau cho hai chiều (`maxspeed:forward`, `maxspeed:backward`, kể cả riêng ô tô, xe máy) thì đồng hồ lấy số của chiều đang đi. Chưa biết chiều thì đường một chiều lấy chiều được đi, đường hai chiều lấy số nhỏ hơn (thiếu số của một chiều thì không hiện). Giới hạn theo giờ (`maxspeed:conditional`) chỉ dùng khi là khung giờ trong tuần đọc được; loại xe có giới hạn riêng (ví dụ `maxspeed:motorcycle=50`) thì giới hạn theo giờ chung không thay được số đó. Ở hai ô đã đo chưa có đường nào ghi kiểu này, nên đây là sửa cho đúng chứ chưa thêm được đường nào.
+- **Biển suy ra từ bản đồ** (không phải biển thật được nhập vào bản đồ):
+  - “Bắt đầu đường cao tốc” (IE.452) khi từ đường thường vào cao tốc hoặc nhánh nối cao tốc, **không kèm con số**: tốc độ trên cao tốc theo biển của từng tuyến. Ra trạm dừng nghỉ rồi vào lại cao tốc thì không báo.
+  - Tốc độ tối thiểu (R.306) khi đường ghi `minspeed`; qua cầu, hầm không ghi số rồi gặp lại cùng số thì không đọc lại.
+  - Đường ngầm (W.216a) khi đường hoặc nút ghi `ford=yes`.
+  - “Đường có thu phí”: chỉ hiện, không đọc.
+- **Camera và trạm thu phí**:
+  - Camera ghi `forward` hoặc `backward` không bị báo cho xe đi chiều bên kia. Hướng ghi bằng số độ chỉ dùng để bỏ camera của đường cắt ngang, vì người vẽ bản đồ không thống nhất số đó là hướng xe chạy hay hướng ống kính. Hướng được xét từ khi xe chạy khoảng 7 km/h, cũng là tốc độ từ đó cảnh báo mới được báo, nên khi bò trong kẹt xe camera của chiều bên kia vẫn không bị báo. Khi dẫn đường, hướng của camera được so với hướng của tuyến tại chỗ camera, nên camera ngay sau chỗ rẽ vẫn được báo sớm. Camera không ghi hướng, ghi hướng không đọc được, hoặc khi điện thoại không báo hướng đi thì vẫn luôn được báo.
+  - “Đoạn đo tốc độ trung bình”, “Điểm kiểm soát tải trọng xe” và “Điểm kiểm soát chiều cao xe” có tên riêng. Camera tốc độ không ghi giới hạn thì thanh cảnh báo hiện kèm giới hạn của đường đang đi; câu đọc không có số này.
+  - Camera nhận dạng biển số (ALPR) được tính là camera giao thông khi không ghi vùng giám sát khác (camera ALPR ghi vùng bãi xe, toà nhà, hay ghi là camera riêng, trong nhà thì không); camera giám sát không ghi là giám sát giao thông thì không. Trạm thu phí vẽ thành vùng cũng được báo, gộp với trạm vẽ thành điểm trong 120 m.
 - **Xe máy**: khi chọn phương tiện là xe máy, đường một chiều có ghi ngoại lệ cho xe máy trên OpenStreetMap (`oneway:motorcycle=no`, hoặc `oneway:moped=no`) được coi là đi được cả hai chiều: không báo “cấm đi ngược chiều”, và khi đi theo chiều ngược lại vẫn có giới hạn tốc độ và các cảnh báo phía trước của đường đó (trừ biển cắm riêng không ghi hướng, vốn quay về phía dòng xe đi theo chiều một chiều). Ô tô vẫn được báo như thường.
 - **Bật/tắt từng nhóm** trong **Cài đặt → Biển báo phía trước**. Vạch người đi bộ qua đường tắt sẵn vì ở đô thị quá dày.
 
 Giới hạn cần biết:
 
-- Ở Việt Nam, biển báo được nhập vào OpenStreetMap còn **rất ít** (một lần đếm năm 2026 chỉ thấy 119 đối tượng có thẻ biển báo trên cả nước). Phần lớn cảnh báo vì thế đến từ thông tin tương đương ở trên, không phải từ biển thật. Không có cảnh báo **không** có nghĩa là không có biển.
+- Ở Việt Nam, biển báo được nhập vào OpenStreetMap còn **rất ít** (đếm ngày 22/11/2026: 119 đối tượng có thẻ biển báo trên cả nước, và không có đối tượng nào trong hai ô đô thị đã đo bên dưới). Phần lớn cảnh báo vì thế đến từ thông tin tương đương ở trên, không phải từ biển thật. Không có cảnh báo **không** có nghĩa là không có biển.
+- **Không có cảnh báo camera không có nghĩa là không có camera.** Cùng lần đếm ngày 22/11/2026, OpenStreetMap chỉ có **46** điểm camera bắn tốc độ (`highway=speed_camera`) và **4** quan hệ kiểm soát (`type=enforcement`) cho cả Việt Nam; hai ô đã đo bên dưới không có camera nào. Trong khi đó, chỉ riêng Hà Nội, báo chí đưa tin khoảng 1.837 camera AI vận hành từ 13/12/2025 ([Nhân Dân](https://nhandan.vn/1837-camera-ai-tai-ha-noi-chinh-thuc-van-hanh-post930057.html)). Vị trí camera phạt nguội ở Việt Nam không phải dữ liệu mở, nên ứng dụng không thể có danh sách đầy đủ, và không chép từ nguồn khác. Đội cảnh sát giao thông bắn tốc độ lưu động thì không nguồn dữ liệu nào có. Hãy tự đánh dấu camera trên tuyến hay đi bằng nút **Báo cáo**.
+- **Giới hạn tốc độ chỉ có trên một phần đường phố.** Tỉ lệ chiều dài đường có ghi `maxspeed`, đo trên dữ liệu OpenStreetMap đã tải về của hai ô:
+
+  | Loại đường | Hoàn Kiếm, Hà Nội (dữ liệu 01/6/2026) | Quận 1 và 3, TP. Hồ Chí Minh (dữ liệu 28/7/2026) |
+  | --- | --- | --- |
+  | Quốc lộ, đường trục (`trunk`) | không đo | 94 % |
+  | Đường chính (`primary`) | 18 % | 44 % |
+  | Đường cấp 2 (`secondary`) | 5 % | 64 % |
+  | Đường cấp 3 (`tertiary`) | 1 % | 28 % |
+  | Đường trong khu dân cư (`residential`) | 2 % | 9 % |
+
+  Nơi khác có thể cao hơn hoặc thấp hơn: chưa đo được trên cả nước. Đoạn đường không ghi giới hạn thì ứng dụng **không tự suy đoán** giới hạn theo luật; hãy dùng **Tốc độ tối đa tự đặt** (Cài đặt), hoặc báo **Tốc độ tối đa thay đổi** ở chỗ có biển.
 - Chỗ ngoặt được tính từ hình dạng đường trên bản đồ, nên đôi khi báo cả khúc cua trong ngõ hẻm hoặc chỗ đường rẽ góc vuông. Khi lái tự do, nếu bạn rẽ ở nút giao thì những gì vừa được báo là của đường đi thẳng, và thanh vàng có thể còn hiện biển đó thêm vài giây sau khi rẽ.
 - Khi lái tự do trên hai đường song song sát nhau (đường hầm và đường bên trên, đường trên cao và đường bên dưới, đường chính và đường song hành, thường chỉ cách nhau vài mét), ứng dụng có thể bám nhầm sang đường kia một lúc, nên có thể bỏ sót biển của đường đang đi hoặc báo biển của đường kia.
 - Khi bò chậm trong kẹt xe (dưới khoảng 9 km/h) trên một con đường chưa biết chiều đi (vừa qua nút giao không rõ hướng, vừa rẽ chậm sang đường khác), ứng dụng chỉ đoán chiều đi từ hướng đi do điện thoại đo được ở hai lần định vị liên tiếp. Nhiều điện thoại không báo hướng đi khi chạy chậm; khi đó, cũng như khi có đường khác gần cùng hướng trong khoảng 25 m (đường gom, hai bên của đường đôi), hoặc khi con đường đó cấm loại xe đang chọn, ứng dụng không báo biển của con đường đó cho tới khi xe chạy nhanh hơn.
 - Khi đang dẫn đường, ứng dụng không báo “cấm đi ngược chiều” cho chính tuyến đang đi; cảnh báo này chỉ có khi lái tự do.
 - Tên biển theo QCVN 41:2024/BGTVT lấy từ nguồn thứ cấp; hình biển trong ứng dụng là hình vẽ giản lược, không phải bản sao hình gốc.
 - **Luôn tuân theo biển báo và hiệu lệnh thực tế trên đường.**
+
+## Báo cáo và dữ liệu cộng đồng
+
+Bản đồ mở thiếu nhiều camera và biển báo (xem [Báo trước biển báo](#báo-trước-biển-báo)). Nút **Báo cáo** giúp bạn tự đánh dấu những gì thấy trên đường và gửi cho chủ ứng dụng; điểm chủ ứng dụng đã tự đi xem tại chỗ được đưa vào **dữ liệu cộng đồng** cho mọi người dùng.
+
+### Báo cáo
+
+1. Bấm nút tròn lớn **Báo cáo** trên bản đồ.
+2. **Khi xe đứng yên hoặc đi dưới 10 km/h**, chọn một loại:
+   - Gửi được cho chủ ứng dụng: **Camera bắn tốc độ**, **Camera phạt vượt đèn đỏ**, **Biển báo mới** (có thể ghi mã biển, ví dụ P.103a; không bắt buộc), **Biển báo đã tháo**, **Tốc độ tối đa thay đổi** (chọn số ghi trên biển), **Đường cấm, rào chắn**.
+   - Mục **Loại khác**: camera phạt nguội và điểm nguy hiểm (cũng gửi được), cùng cổng trường học, công trường, ngập nước, kẹt xe, tai nạn (chỉ lưu trên máy này).
+3. **Khi xe chạy nhanh hơn 10 km/h**, chỉ còn một nút lớn **Camera ở đây**: chạm là lưu ngay trên máy, không gửi gì; khi dừng xe, chạm vào điểm trên bản đồ để gửi. Hộp báo cáo đang mở cũng tự thu về nút này khi xe bắt đầu chạy. Người lái không được cầm hay bấm điện thoại khi xe đang chạy: nút này dành cho người ngồi cạnh; người lái hãy đợi xe dừng hẳn.
+4. Sau khi lưu, chọn cách gửi:
+   - **Chia sẻ hoặc chép**: một đoạn chữ ngắn tiếng Việt gửi qua Zalo hay tin nhắn, gồm toạ độ, đường dẫn OpenStreetMap, ngày thấy và một dòng dữ liệu cho chủ ứng dụng.
+   - **Gửi qua GitHub**: mở trang tạo issue với tiêu đề và nội dung điền sẵn. **Issue là công khai** và hiện tên tài khoản GitHub của người gửi.
+   - Gửi sau cũng được: chạm vào điểm trên bản đồ khi xe đứng yên.
+5. Muốn gửi nhiều điểm một lần: **Cài đặt → Điểm tôi tự đánh dấu → Xuất cho kho dữ liệu** tạo một tệp JSON gồm các điểm gửi được.
+
+Điểm vừa báo được lưu như điểm tự đánh dấu, nên máy này nhắc ngay ở lần đi qua sau. Hướng xe chạy được lưu khi xe đi từ khoảng 7 km/h; khi có hướng, điểm chỉ nhắc xe chạy cùng chiều (lệch tối đa 60°). **Biển báo đã tháo** chỉ để gửi đi, không nhắc khi lái.
+
+**Gửi đi những gì**: chỉ ngày, toạ độ (làm tròn khoảng 1 m) và hướng xe chạy. Ứng dụng không gửi tên, số điện thoại, tài khoản hay giờ phút báo cáo. Nhưng **issue GitHub hiện giờ tạo issue** và tên tài khoản của bạn: gửi ngay tại chỗ thì ai đọc cũng biết tài khoản đó ở đây lúc nào. Nếu ngại, hãy gửi sau, hoặc gửi riêng cho chủ ứng dụng qua Zalo hay tệp xuất. Ứng dụng chỉ mở Zalo, hộp chia sẻ hay trang GitHub khi bạn bấm; không có gì được gửi tự động.
+
+### Dữ liệu cộng đồng
+
+- **Bật/tắt**: **Cài đặt → Điểm cảnh báo → Dùng dữ liệu cộng đồng** (bật sẵn). Ngay dưới là dòng “Dữ liệu cộng đồng: N điểm, cập nhật dd/mm/yyyy”. Tắt thì ứng dụng thôi tải tệp này (ứng dụng Android không liên lạc GitHub Pages cho việc này nữa). Camera cộng đồng còn theo công tắc **Camera giao thông**.
+- **Nhận ra điểm cộng đồng**: tên trên thanh cảnh báo và màn hình xe có thêm “(dữ liệu cộng đồng)”. Chạm vào điểm trên bản đồ để xem nguồn, ngày chủ ứng dụng xác minh và ngày hết hiệu lực nếu có. Cùng một thứ có ở nhiều nguồn (camera cùng loại, hay điểm nguy hiểm, rào chắn trên OpenStreetMap, trong dữ liệu cộng đồng và trong điểm bạn tự đánh dấu, cách nhau không quá 30 m) chỉ được báo một lần; nếu cùng lúc trong tầm báo thì bản đồ thắng, rồi tới dữ liệu cộng đồng. Việc gộp làm sau khi đã bỏ các điểm của chiều đường bên kia, nên camera bản đồ của chiều bên kia đường đôi không làm mất cảnh báo của chiều bạn đang đi.
+- **Cập nhật**: ứng dụng tải lại tệp lúc mở và mỗi 6 giờ, và giữ bản gần nhất để dùng khi mất mạng.
+- **Không đầy đủ**: chỉ có những điểm chủ ứng dụng đã tự kiểm tra tại chỗ, nên không có cảnh báo không có nghĩa là không có camera hay biển. Bản phát hành đầu tiên **chưa có điểm nào**. Luôn tuân theo biển báo thực tế.
+
+### Việc của chủ ứng dụng: cập nhật `data/community.json`
+
+**Nguyên tắc**
+
+- **Chỉ thêm những gì chính bạn đã thấy tại chỗ.** Không chép từ VNeTraffic, báo chí, Google Maps hay ứng dụng khác (bản quyền, và sai thì gây hại). Báo cáo của người dùng chỉ là gợi ý nơi cần đi xem.
+- **Sửa nguồn chung khi có thể.** Biển đã tháo, biển mới có mã rõ thì nên sửa luôn trên OpenStreetMap từ khảo sát của bạn: mọi ứng dụng cùng được lợi. `data/community.json` dành cho những gì OSM chưa có hoặc chưa phù hợp, như camera đèn đỏ hay rào chắn tạm.
+- **Dùng `until` cho điểm có thời hạn**, như rào chắn công trình. Hết hạn thì ứng dụng tự bỏ.
+
+**Định dạng (schema 1)**
+
+```json
+{
+  "schema": 1,
+  "updated": "YYYY-MM-DD",
+  "items": [
+    {"id":"…","type":"camera-speed","coord":[kinh_độ,vĩ_độ],"direction":90,"value":60,"note":"…","source":"…","verified":"YYYY-MM-DD","until":"YYYY-MM-DD"}
+  ]
+}
+```
+
+| Loại (`type`) | Ý nghĩa | Ghi chú |
+| --- | --- | --- |
+| `camera-speed` | Camera bắn tốc độ | `value` không bắt buộc |
+| `camera-redlight` | Camera phạt vượt đèn đỏ | |
+| `camera-traffic` | Camera giám sát, phạt nguội nói chung | |
+| `speed-limit` | Biển tốc độ tối đa | `value` bắt buộc |
+| `sign` | Biển báo khác | `code` bắt buộc: mã QCVN 41:2024 có trong danh mục của ứng dụng, loại không cần con số (ví dụ P.103a, W.207b). Biển tốc độ dùng `speed-limit`. |
+| `hazard` | Điểm nguy hiểm | |
+| `closure` | Đường cấm, rào chắn | |
+
+- `coord`: `[kinh độ, vĩ độ]`, trong khung Việt Nam (gồm Hoàng Sa, Trường Sa), làm tròn 6 chữ số.
+- `direction` (không bắt buộc): số nguyên 0–359, **hướng xe chạy** mà điểm áp dụng (0 = Bắc, 90 = Đông). Không ghi thì báo cả hai chiều.
+- `value`: km/h, số nguyên 5–130, bội của 5.
+- `note` (không bắt buộc): tối đa 120 ký tự, chỉ hiện trong hộp chi tiết, không đọc thành tiếng.
+- `source`: bắt buộc, tối đa 60 ký tự, ví dụ “Chủ ứng dụng khảo sát”.
+- `verified`: ngày bạn kiểm tra, không được ở tương lai. `until` (không bắt buộc): ngày hết hiệu lực, từ ngày `verified` trở đi.
+- `id`: tối đa 48 ký tự `[A-Za-z0-9._-]`; công cụ tự đặt từ loại và toạ độ.
+
+Ứng dụng kiểm tra tệp trước khi dùng. **Bỏ cả tệp** khi `schema` không phải 1, `updated` sai dạng hoặc muộn hơn hôm nay quá 2 ngày, có quá 5000 mục, hoặc tệp lớn hơn 1,5 MB. **Bỏ lặng lẽ** mục sai (không đoán), trường lạ, mục đã quá `until` và mục trùng `id`.
+
+**Bản nào được dùng**: trình duyệt và GitHub Pages dùng bản cùng nguồn gốc. Ứng dụng Android dùng thêm https://khanh1605vn.github.io/9router/data/community.json (không gửi cookie, không gửi Referer, không theo chuyển hướng). Bản có `updated` mới hơn thắng; cùng ngày thì GitHub Pages, rồi bản đi kèm ứng dụng, rồi bản đã lưu. Vì “mới hơn thắng”, **luôn tăng `updated`** khi sửa tệp (công cụ tự làm). Muốn rút lại một điểm sai thì xoá mục đó rồi đăng tệp có `updated` mới hơn.
+
+**Gộp báo cáo bằng `tools/community/add-reports.mjs`** (chỉ cần Node 22, không cài thêm gì; chạy từ thư mục `ban-duong/`):
+
+```bash
+# Xem trước: chỉ in kết quả, không ghi tệp
+node tools/community/add-reports.mjs bao-cao.json --dry-run
+
+# Gộp thật. Ngày xác minh mặc định là hôm nay; ghi rõ nếu bạn đi xem hôm khác
+node tools/community/add-reports.mjs bao-cao.json issue-12.txt --verified 2026-11-26 --source "Chủ ứng dụng khảo sát"
+
+# Rào chắn có thời hạn, kèm ghi chú của chính bạn (áp dụng cho mọi mục thêm mới lần này)
+node tools/community/add-reports.mjs rao-chan.txt --until 2026-12-31 --note "Rào chắn thi công cầu vượt"
+```
+
+- **Đầu vào**: tệp “Xuất cho kho dữ liệu” (`ban-duong-bao-cao-YYYY-MM-DD.json`); một mảng mục, một mục, hoặc một tệp community.json khác; chữ dán từ issue GitHub hay tin Zalo lưu thành `.txt` (mọi dòng bắt đầu bằng `{` và kết thúc bằng `}` được đọc như một mục, kể cả khi bọc trong dấu backtick); hoặc `-` để đọc từ đầu vào chuẩn.
+- **Ngày xác minh và id**: mỗi mục được đặt `verified` là ngày bạn xác minh, không phải ngày người dùng thấy. `id` được tính lại từ loại và toạ độ.
+- **Chỉ lấy trường có cấu trúc**: từ báo cáo, công cụ chỉ lấy `type`, `coord`, `direction`, `value`, `code`. Chữ tự do và ngày do người gửi viết (`note`, `source`, `until`, `verified`, `id`, trường lạ) **không bao giờ** được chép sang tệp đăng lên, vì issue và tin Zalo là chữ của người khác. `source` là `--source` (mặc định “Người dùng Bạn Đường báo cáo”); `note` và `until` chỉ do bạn đặt bằng `--note` và `--until`.
+- **Xem lại trước khi đăng**: công cụ in đủ từng mục sẽ thêm (dòng `+ mục N: {…}`) và vị trí từng mục trùng (dòng `= mục N tại …`). Chạy `--dry-run` và đọc các dòng này trước khi ghi thật.
+- **Kiểm tra**: mục đi qua đúng bộ kiểm tra của ứng dụng (`js/communitydata.js`); mục sai bị từ chối kèm lý do, ví dụ “Từ chối mục 2: tốc độ phải là số nguyên 5–130, bội của 5”. Báo cáo **Biển báo mới** chưa có mã thì bị từ chối: thêm `"code":"P.xxx"` vào dòng đó sau khi xem tại chỗ, rồi chạy lại.
+- **Mục trùng**: mục cùng loại cách mục đã có không quá 20 m không được thêm; công cụ chỉ cập nhật ngày xác minh của mục cũ.
+- **Ghi tệp**: dọn mục đã hết hạn, đặt `updated` bằng hôm nay, kiểm tra lại cả tệp trước khi ghi, mỗi mục một dòng để dễ xem khác biệt trong git.
+- **Mã thoát**: 0 khi mọi mục được nhận; 1 khi có mục bị từ chối (các mục còn lại vẫn được ghi); 2 khi lỗi (không ghi gì).
+
+**Đăng lên**: commit `data/community.json` lên nhánh master. GitHub Pages tự triển khai (`npm run dist` chép đúng `data/community.json`; tệp khác đặt vào `data/` bị `.gitignore` bỏ và không được chép). Ứng dụng đang chạy nhận bản mới khi mở lại hoặc trong vòng 6 giờ, không cần đổi `VERSION` của `sw.js`. Bản APK sau mang theo tệp mới trong `assets/www/data/`.
+
+**An toàn và riêng tư**
+
+- Tệp và báo cáo là dữ liệu từ ngoài vào: ứng dụng chỉ `JSON.parse` rồi kiểm tra, chữ chỉ hiện qua `textContent`. Tệp không được ghim mã băm vì nó cập nhật độc lập với ứng dụng; nếu kho mã bị chiếm quyền, kẻ gian chỉ đưa được điểm cảnh báo sai trong giới hạn của bộ kiểm tra, không chạy được mã.
+- Báo cáo có thể lộ nơi ở, nơi làm việc của người gửi: công cụ không chép ghi chú của họ; đừng tự chép vào `--note`, đừng thêm điểm gần nhà riêng, và xoá hoặc ẩn issue nếu người gửi lỡ để lộ thông tin riêng.
 
 ## Kết nối bộ OBD
 
@@ -244,7 +369,11 @@ Tính năng này **tắt sẵn** và đang thử nghiệm. Bật trong **Cài đ
 | `js/ios.js` | iPhone, iPad: nhận ra trình duyệt và chế độ mở từ Màn hình chính, gợi ý cài, mục “Trên iPhone” trong Cài đặt |
 | `js/compat.js` | Báo rõ khi trình duyệt quá cũ (trước iOS 16.4) thay vì để trang đứng yên |
 | `js/search.js` | Tìm địa điểm |
+| `js/admin2025.js` | 34 tỉnh, thành sau sắp xếp 2025 và cách đổi địa chỉ có tên tỉnh cũ sang tên mới |
 | `js/store.js` | Cài đặt, địa điểm, điểm đánh dấu, nhật ký (lưu trên thiết bị) |
+| `js/report.js` | Nút “Báo cáo”: chế độ khi xe chạy, chữ chia sẻ, đường dẫn tạo issue GitHub, tệp “Xuất cho kho dữ liệu” |
+| `js/communitydata.js`, `js/community.js` | Dữ liệu cộng đồng: bộ kiểm tra `data/community.json` (dùng chung với công cụ của chủ ứng dụng), tải, chọn bản mới nhất, lưu để dùng khi mất mạng |
+| `data/community.json` | Dữ liệu cộng đồng do chủ ứng dụng kiểm tra tại chỗ, xem [Báo cáo và dữ liệu cộng đồng](#báo-cáo-và-dữ-liệu-cộng-đồng) |
 | `js/icons.js` | Bộ biểu tượng tự vẽ |
 | `js/camctl.js` | Camera nhận diện biển: điều phối camera, bộ nhận diện, bộ học, kho biển đã học |
 | `js/camui.js` | Giao diện camera nhận diện biển: mục cài đặt, kiểm tra camera, danh sách biển đã học, xuất và nhập tệp |
@@ -256,6 +385,7 @@ Tính năng này **tắt sẵn** và đang thử nghiệm. Bật trong **Cài đ
 | `models/` | Mô hình nhận diện đã huấn luyện, danh sách nhãn, [thẻ mô hình](models/MODEL_CARD.md), ghi công ảnh Open Images (`ATTRIBUTION-openimages.csv`) |
 | `vendor/litert/` | LiteRT.js 2.6.0 (giấy phép Apache-2.0; bản WebAssembly có XNNPACK, giấy phép BSD; kèm `LICENSE` và `NOTICE-XNNPACK` trong thư mục) |
 | `tools/camera/` | Quy trình tạo dữ liệu và huấn luyện mô hình (không chạy trong ứng dụng), xem `tools/camera/README.md` |
+| `tools/community/add-reports.mjs` | Công cụ của chủ ứng dụng: gộp báo cáo vào `data/community.json` (không chạy trong ứng dụng) |
 | `sw.js`, `manifest.webmanifest` | Cài đặt như ứng dụng, mở được khi mất mạng |
 | `vendor/maplibre-gl/` | Thư viện bản đồ MapLibre GL JS 5.24.1 (giấy phép BSD 3 điều khoản, kèm trong thư mục) |
 | `tests/` | Kiểm thử bằng `node --test` |
@@ -272,19 +402,49 @@ Mọi dữ liệu đều từ các dịch vụ mở, không cần khoá API:
 | Tìm đường | Valhalla (máy chủ công cộng của FOSSGIS); dự phòng: OSRM | `VALHALLA_URL`, `OSRM_URL` trong `js/routing.js` |
 | Giới hạn tốc độ, camera, trạm thu phí, biển báo, cấm rẽ | Overpass API | `OVERPASS_ENDPOINTS` trong `js/roaddata.js` |
 | Tìm địa điểm | Photon, Nominatim | đầu tệp `js/search.js` |
+| Dữ liệu cộng đồng | Tệp tĩnh `data/community.json` của chính ứng dụng (GitHub Pages) | `COMMUNITY_PATH`, `COMMUNITY_REMOTE` trong `js/community.js` |
 
-Toàn bộ là dữ liệu © những người đóng góp cho OpenStreetMap (giấy phép ODbL).
+Bản đồ, đường và điểm cảnh báo là dữ liệu © những người đóng góp cho OpenStreetMap (giấy phép ODbL). Dữ liệu cộng đồng chỉ gồm điểm chủ ứng dụng tự khảo sát, không chép từ nguồn khác.
 
 Mô hình nhận diện biển được huấn luyện từ hình biển tự vẽ của ứng dụng ghép lên ảnh nền đường phố của bộ dữ liệu Open Images V7 (Google; ảnh ghi giấy phép CC BY 2.0, chú thích CC BY 4.0). Không ảnh nào được kèm trong ứng dụng; tác giả và giấy phép của từng ảnh đã dùng được ghi trong `models/ATTRIBUTION-openimages.csv`.
 
 Các máy chủ công cộng trên phù hợp để dùng cá nhân và thử nghiệm. Nếu phát hành cho nhiều người dùng, cần tự dựng máy chủ Valhalla, Photon, Overpass hoặc thuê dịch vụ tương đương rồi đổi các địa chỉ trên, vì máy chủ công cộng giới hạn lưu lượng và không cam kết luôn hoạt động.
 
+## Tỉnh thành sau sắp xếp 2025
+
+Ứng dụng hiển thị địa chỉ theo 34 tỉnh, thành phố trực thuộc Trung ương. Căn cứ là Nghị quyết 202/2025/QH15, chính
+quyền mới hoạt động từ 01/7/2025, và ba nghị quyết năm 2026 đưa Đồng Nai, Quảng Ninh, Bắc Ninh lên thành phố trực thuộc
+Trung ương. Từ 01/7/2025 không còn cấp huyện: địa phương chỉ còn cấp tỉnh và cấp xã (xã, phường, đặc khu).
+
+- **Kết quả tìm kiếm, điểm nhấn giữ trên bản đồ**: phần cấp tỉnh luôn ghi tên mới. Nếu dữ liệu còn tên tỉnh cũ,
+  ứng dụng đổi sang tên mới và ghi thêm gợi ý ngắn, ví dụ “Phường 1, Đồng Tháp · trước đây: Tiền Giang”. Phần có tiền
+  tố quận, huyện, thị xã, hoặc “thành phố” thuộc tỉnh cũ thì bỏ. Tên địa điểm và tên xã, phường thì luôn giữ.
+- **Nhà, Cơ quan, Tìm gần đây** đã lưu từ trước cũng hiện theo tên tỉnh mới. Phần quận, huyện, thị xã trong các địa
+  chỉ này được giữ và có ghi “địa chỉ cũ”, vì phường cũ như “Phường 1” chỉ rõ là nơi nào khi đi cùng quận, ví dụ
+  “Phường 1, Quận 3, TP. Hồ Chí Minh · địa chỉ cũ”. Dữ liệu đã lưu không bị sửa.
+- **Ranh giới cũ** mà OpenStreetMap còn giữ, ví dụ “Tỉnh Bình Dương”, vẫn tìm và chọn được. Các kết quả này xếp sau
+  cùng, có ghi “Ranh giới cũ, nay thuộc TP. Hồ Chí Minh”.
+- **Tìm bằng tên tỉnh cũ** vẫn được. Khi gõ “…, Tiền Giang”, ứng dụng tìm theo “…, Đồng Tháp” vì dữ liệu giờ ghi theo
+  tỉnh mới. Mỗi lần tìm vẫn chỉ gửi một yêu cầu.
+- **Bản đồ nền**: nhãn cấp tỉnh của tỉnh đã bỏ (ví dụ nhãn “Hà Giang” còn sót trong OSM) bị ẩn. Nhãn “Tỉnh Đồng Nai”
+  hiện là “Thành phố Đồng Nai”. Tên thành phố, thị trấn cũ như Mỹ Tho, Kon Tum vẫn hiện, vì đó là tên nơi ở chứ không
+  phải tên tỉnh. Ứng dụng không tự thêm nhãn hay vẽ ranh giới nào.
+
+Giới hạn:
+
+- Tên xã, phường mới lấy hoàn toàn từ OpenStreetMap. Nơi nào OSM chưa cập nhật thì địa chỉ có thể thiếu xã, phường,
+  hoặc còn tên cũ không có tiền tố (ví dụ “Thủ Dầu Một”). Ứng dụng không có bảng xã, phường nên không tự sửa được.
+- Đường ranh giới tỉnh trên bản đồ nền vẽ thẳng từ dữ liệu OSM qua OpenFreeMap (bản dựng lại khoảng mỗi tuần).
+  Kiểm tra ngày 27/11/2026: bản dựng hiện tại đã theo ranh giới mới ở các ô đã xem, ví dụ không còn đường ranh Bình
+  Dương với TP. Hồ Chí Minh cũ. Ở mức thu nhỏ, OpenFreeMap không hiện tên tỉnh nào của Việt Nam.
+- Địa chỉ đã lưu chỉ nhận ra tỉnh khi tên tỉnh đứng cuối chuỗi, như cách ứng dụng vẫn ghép địa chỉ.
+
 ## Giới hạn cần biết
 
-- **Độ phủ dữ liệu**: giới hạn tốc độ, biển báo và vị trí camera do cộng đồng OpenStreetMap nhập, ở Việt Nam còn thiếu nhiều nơi (xem [Báo trước biển báo](#báo-trước-biển-báo)). Đoạn đường chưa có dữ liệu thì ứng dụng không hiện biển giới hạn (không tự suy đoán); hãy dùng mục **Tốc độ tối đa tự đặt** và tự đánh dấu camera trên tuyến hay đi.
+- **Độ phủ dữ liệu**: giới hạn tốc độ, biển báo và vị trí camera do cộng đồng OpenStreetMap nhập, ở Việt Nam còn thiếu nhiều nơi: cả nước chỉ có 46 camera bắn tốc độ trên bản đồ, và ở Hoàn Kiếm chỉ 1–18 % chiều dài đường (ngoài quốc lộ) có ghi giới hạn tốc độ (số đo và nguồn ở [Báo trước biển báo](#báo-trước-biển-báo)). **Không có cảnh báo camera không có nghĩa là không có camera.** Đoạn đường chưa có dữ liệu thì ứng dụng không hiện biển giới hạn (không tự suy đoán); hãy dùng mục **Tốc độ tối đa tự đặt** và tự đánh dấu camera trên tuyến hay đi bằng nút **Báo cáo**.
 - **Xe máy**: tuyến xe máy tính bằng hồ sơ xe hai bánh của Valhalla nên không đi vào đường cao tốc. Nếu Valhalla không phản hồi, ứng dụng chuyển sang OSRM (chỉ có hồ sơ ô tô) và ghi rõ trên màn hình rằng tuyến có thể đi qua cao tốc.
 - **Không có tình trạng giao thông trực tiếp** (kẹt xe theo thời gian thực) vì không có nguồn dữ liệu mở.
-- **Điểm tự đánh dấu chỉ nằm trên thiết bị**. Muốn nhiều người cùng thấy báo cáo của nhau cần thêm một máy chủ lưu trữ chung.
+- **Điểm tự đánh dấu chỉ nằm trên thiết bị**. Không có máy chủ chung: báo cáo chỉ tới người khác khi chủ ứng dụng đã đi xem tại chỗ và thêm vào dữ liệu cộng đồng, nên có độ trễ và không đầy đủ.
 - **Ứng dụng web không chạy nền**: phải để ứng dụng mở trên màn hình thì mới có định vị và cảnh báo. Ứng dụng đã tự giữ màn hình sáng khi lái (trên iPhone xem [Cài trên iPhone](#cài-trên-iphone)).
 - **Chưa có bản đồ ngoại tuyến đầy đủ**: chỉ các vùng bản đồ đã xem được lưu lại; tìm đường và tìm địa điểm cần có mạng.
 
@@ -293,6 +453,8 @@ Biển báo và hiệu lệnh thực tế trên đường luôn là căn cứ đ
 ## Quyền riêng tư
 
 Ứng dụng không có máy chủ riêng và không thu thập dữ liệu. Vị trí chỉ được gửi tới các dịch vụ bản đồ ở bảng trên để tìm đường, tìm địa điểm và tải dữ liệu quanh vị trí hiện tại. Cài đặt, địa điểm đã lưu, điểm đánh dấu và nhật ký chuyến đi nằm trong bộ nhớ trình duyệt của thiết bị.
+
+Báo cáo chỉ rời máy khi bạn bấm **Chia sẻ hoặc chép**, **Gửi qua GitHub** hoặc **Xuất cho kho dữ liệu**, và nội dung chỉ gồm ngày, toạ độ (khoảng 1 m) và hướng xe chạy, không có giờ phút. Issue GitHub là công khai, gắn với tài khoản GitHub của người gửi và hiện giờ tạo issue, nên gửi ngay tại chỗ là cho biết bạn ở đâu lúc nào. Ứng dụng Android tải tệp dữ liệu cộng đồng từ github.io lúc mở và mỗi 6 giờ; lượt tải không kèm vị trí hay cookie, nhưng GitHub thấy địa chỉ IP của máy. Tắt **Dùng dữ liệu cộng đồng** thì không tải nữa.
 
 Camera nhận diện biển xử lý hình ảnh ngay trên máy và không gửi hình ảnh đi đâu; hình ảnh chỉ được lưu (ảnh nhỏ cắt sát biển, tối đa 30 ngày, chỉ trên máy) khi bạn bật **Lưu ảnh biển để kiểm tra độ chính xác**. Biển đã học chỉ nằm trên máy, chỉ được xuất ra tệp khi bạn yêu cầu, và xoá được bất cứ lúc nào (xem [Camera nhận diện biển](#camera-nhận-diện-biển-thử-nghiệm)).
 

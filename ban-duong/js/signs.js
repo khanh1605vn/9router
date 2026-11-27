@@ -801,7 +801,8 @@ function namedFeatures(part, tags, dir) {
 }
 
 const CALMING_SKIP = new Set(['island', 'choked_island', 'painted_island', 'choker', 'chicane', 'dip']);
-const CALMING_OK = new Set(['bump', 'hump', 'table', 'cushion', 'rumble_strip', 'yes']);
+// mini_bumps: dãy gờ nhỏ liền nhau; choked_table: gờ phẳng kèm thu hẹp đường. Cả hai đều là gờ trên mặt đường.
+const CALMING_OK = new Set(['bump', 'hump', 'table', 'cushion', 'rumble_strip', 'yes', 'mini_bumps', 'choked_table']);
 const CROSSING_SKIP = new Set(['traffic_signals', 'unmarked', 'informal', 'no']);
 const CROSSING_OK = new Set(['uncontrolled', 'marked', 'zebra']);
 
@@ -933,6 +934,8 @@ export function classifyNode(tags) {
     if (v != null) out.push(derivedMeasure('height', v, { dirKeys: ['direction'] }, false));
   }
   if (tags.hazard != null && String(tags.hazard).trim() !== '') out.push(hazardFeature(tags.hazard));
+  // Nút đường ngầm (ford=yes) trên đường: dữ liệu bản đồ, không phải biển thật.
+  if (String(tags.ford ?? '').trim() === 'yes') out.push(derived('ford'));
 
   // Bỏ trùng (ví dụ highway=stop kèm traffic_sign=stop): giữ bản đầu tiên cho mỗi loại và chiều.
   const seen = new Set();
@@ -966,7 +969,8 @@ function dimsFor(tags, dir) {
 
 /**
  * Thẻ của một way (tập con thẻ gốc, có thể undefined) → các quy định cần báo khi đi vào way:
- * { roundabout, tunnel, noCar, noMoto, noAll, dims: { forward, backward }, noOvertake, hazard }.
+ * { roundabout, tunnel, noCar, noMoto, noAll, dims: { forward, backward }, noOvertake, hazard, minspeed, ford, toll }.
+ * Chỉ đọc thẻ cố định; cấm theo giờ (*:conditional) do bộ máy biển báo xét theo giờ lúc chạy (signengine.js accessAt).
  */
 export function classifyWay(tags) {
   const t = tags || {};
@@ -990,6 +994,9 @@ export function classifyWay(tags) {
     dims: { forward: dimsFor(t, 'forward'), backward: dimsFor(t, 'backward') },
     noOvertake,
     hazard: val('hazard') || null,
+    minspeed: parseMaxspeed(t.minspeed),
+    ford: val('ford') === 'yes',
+    toll: val('toll') === 'yes',
   };
 }
 
@@ -1008,6 +1015,11 @@ const NOTES = {
   noOvertake: 'Theo dữ liệu cấm vượt của OpenStreetMap.',
   hazard: 'Theo dữ liệu điểm nguy hiểm của OpenStreetMap.',
   turn: 'Theo dữ liệu cấm rẽ của OpenStreetMap.',
+  noAccessTimed: 'Theo dữ liệu hạn chế phương tiện theo giờ của OpenStreetMap: lệnh cấm có hiệu lực vào giờ này.',
+  motorway: 'Theo dữ liệu đường cao tốc của OpenStreetMap, không phải biển thật. Tốc độ tối đa theo biển trên đường.',
+  minspeed: 'Theo dữ liệu tốc độ tối thiểu của OpenStreetMap.',
+  ford: 'Theo dữ liệu đường ngầm của OpenStreetMap, không phải biển thật.',
+  toll: 'Theo dữ liệu đường thu phí của OpenStreetMap.',
   timed: ' Lệnh cấm chỉ áp dụng trong một số khung giờ; ứng dụng chưa đọc được khung giờ này.',
 };
 
@@ -1149,16 +1161,49 @@ export function derived(kind, data = {}) {
         NOTES.oneway,
       );
     case 'noAccess': {
+      // timed: cấm theo giờ và đang trong giờ cấm (câu đọc như lệnh cấm cố định, ghi chú nói rõ là theo giờ).
+      const note = data.timed ? NOTES.noAccessTimed : NOTES.noAccess;
       if (data.all) {
-        return asDerived(feature(SIGN_CATALOGUE['P.101'], { kind: 'noAccess:all', say: 'đường cấm' }), NOTES.noAccess);
+        return asDerived(feature(SIGN_CATALOGUE['P.101'], { kind: 'noAccess:all', say: 'đường cấm' }), note);
       }
       const moto = data.vehicle === 'moto';
       const entry = SIGN_CATALOGUE[moto ? 'P.104' : 'P.103a'];
       return asDerived(
         feature(entry, { kind: `noAccess:${moto ? 'moto' : 'car'}`, say: moto ? 'đường cấm xe máy' : 'đường cấm ô tô' }),
-        NOTES.noAccess,
+        note,
       );
     }
+    case 'motorway':
+      // Bắt đầu đường cao tốc: không kèm con số (tốc độ trên cao tốc đặt theo từng tuyến, phải theo biển).
+      return asDerived(feature(SIGN_CATALOGUE['IE.452'], { kind: 'motorway' }), NOTES.motorway);
+    case 'minspeed': {
+      const n = data.n;
+      return asDerived(
+        feature(SIGN_CATALOGUE['R.306'], {
+          kind: `minspeed:${n}`,
+          title: `Tốc độ tối thiểu ${n} km/h`,
+          say: fillSay(SIGN_CATALOGUE['R.306'].say, n),
+          value: n,
+        }),
+        NOTES.minspeed,
+      );
+    }
+    case 'ford':
+      return asDerived(feature(SIGN_CATALOGUE['W.216a'], { kind: 'ford' }), NOTES.ford);
+    case 'toll':
+      // Chỉ là ghi chú để xem (bộ máy không đọc thành tiếng): trạm thu phí đã có cảnh báo riêng.
+      return asDerived(
+        {
+          kind: 'toll',
+          code: null,
+          cat: 'info',
+          title: 'Đường có thu phí',
+          say: 'đường có thu phí',
+          art: { shape: 'info', pict: 'text', text: 'Thu phí' },
+          value: null,
+        },
+        NOTES.toll,
+      );
     case 'height':
     case 'weight':
     case 'width':

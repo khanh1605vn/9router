@@ -6,7 +6,7 @@
 // 3. Quyết định khi nào đọc, gộp các mục gần nhau vào một câu, chọn mục hiện trên thanh cảnh báo.
 
 import { angleDiff, bearing, distance, nearestOnLine, pointAtDistance } from './geo.js';
-import { onewayFor, vertexKey } from './roaddata.js';
+import { onewayFor, parseMaxspeed, vertexKey } from './roaddata.js';
 import { categoryEnabled, classifyNode, classifyWay, derived, parseDirection, SIGN_CATEGORIES } from './signs.js';
 import { spokenDistance } from './tracker.js';
 
@@ -1139,25 +1139,51 @@ function featItem(feat, all, extra, corr, roads, ctx, out) {
   }
 }
 
-/** Thay đổi khi sang đoạn đường kế tiếp: tốc độ, vòng xuyến, hầm, một chiều, cấm xe, kích thước, cấm vượt. */
+const MOTORWAY = new Set(['motorway', 'motorway_link']);
+// Đường không cho biết xe đến từ ngoài hay từ trong hệ thống cao tốc: đường gom, trạm dừng nghỉ, nhánh nối cao tốc.
+const MOTORWAY_TRANSPARENT = new Set(['service', 'motorway_link']);
+const ACCESS_COND_KEYS = ['motorcar', 'motorcycle', 'motor_vehicle', 'vehicle', 'access'].map((k) => `${k}:conditional`);
+/** Đường có thẻ quyền đi lại theo điều kiện (*:conditional) nào không. */
+const hasAccessConditional = (t) => Boolean(t) && ACCESS_COND_KEYS.some((k) => t[k] != null);
+
+/**
+ * Thay đổi khi sang đoạn đường kế tiếp: tốc độ (theo chiều đi, theo giờ), vòng xuyến, hầm, một chiều, cấm xe (kể cả
+ * cấm theo giờ đang có hiệu lực), kích thước, cấm vượt, bắt đầu đường cao tốc, tốc độ tối thiểu, đường ngầm, đường thu phí.
+ */
 function transitionItems(corr, ctx, out) {
   const moto = ctx.vehicle === 'moto';
-  const blocked = (i) => i.noAll || (moto ? i.noMoto : i.noCar);
+  const vehicle = moto ? 'moto' : 'car';
+  // Cấm cố định (classifyWay), hoặc cấm theo giờ đang trong giờ cấm (accessAt). Đường có thẻ *:conditional về quyền đi
+  // lại thì accessAt quyết định: khung giờ được đi đang đúng ("motor_vehicle=no" + "motor_vehicle:conditional=yes @
+  // (22:00-06:00)" lúc 23:00) thắng lệnh cấm cố định của cùng mức.
+  const access = (way, info) => {
+    const fixed = info.noAll || (moto ? info.noMoto : info.noCar);
+    if (!hasAccessConditional(way.t)) return { no: fixed, all: fixed && info.noAll, timed: false };
+    const a = accessAt(way.t, vehicle, ctx.now);
+    if (!a.no) return { no: false, all: false, timed: false };
+    if (!a.timed) return { no: true, all: info.noAll, timed: false };
+    const other = accessAt(way.t, moto ? 'car' : 'moto', ctx.now);
+    return { no: true, all: a.general && other.no && other.general, timed: true };
+  };
   const noPass = (i, dir) => (dir > 0 ? i.noOvertake.forward : i.noOvertake.backward);
   const dims = (i, dir) => (dir > 0 ? i.dims.forward : i.dims.backward);
   let lastLimit = null;
+  let lastMinspeed = ctx.minspeedHere ?? null; // như lastLimit: đoạn không ghi minspeed (cầu, hầm) không làm đọc lại
+  let lastRoad = null; // hạng đường gần nhất, bỏ qua đường gom (service) và nhánh nối cao tốc
   let prev = null;
   let prevInfo = null;
+  let prevAccess = null;
   for (const p of corr.pieces) {
     if (!p.way) continue;
     const info = ctx.memo.wayInfo(p.way);
-    const limit = moto ? p.way.m : p.way.c;
+    const limit = roadLimit(p.way, vehicle, p.dir, ctx.now);
+    const acc = access(p.way, info);
     if (prev && p.s0 > 0) {
       const coord = pointOn(corr, p.s0);
-      const add = (kind, data) => {
-        const f = derived(kind, data);
+      const add = (kind, data, extra) => {
+        const f = derived(kind, data ?? {});
         if (f && categoryEnabled(f.cat, ctx.settings)) {
-          out.push(makeItem(`w${p.way.id}:${f.kind}:${p.dir}`, f, p.s0, coord));
+          out.push(makeItem(`w${p.way.id}:${f.kind}:${p.dir}`, f, p.s0, coord, extra));
         }
       };
       if (p.against) add('oneway');
@@ -1165,7 +1191,7 @@ function transitionItems(corr, ctx, out) {
         if (limit != null && limit !== lastLimit) add('speedChange', { n: limit });
         if (info.roundabout && !prevInfo.roundabout) add('roundabout');
         if (info.tunnel && !prevInfo.tunnel) add('tunnel');
-        if (blocked(info) && !blocked(prevInfo)) add('noAccess', { vehicle: moto ? 'moto' : 'car', all: info.noAll });
+        if (acc.no && !prevAccess.no) add('noAccess', { vehicle, all: acc.all, timed: acc.timed });
         if (!moto) {
           const d = dims(info, p.dir);
           const pd = dims(prevInfo, prev.dir);
@@ -1175,11 +1201,21 @@ function transitionItems(corr, ctx, out) {
         }
         if (noPass(info, p.dir) && !noPass(prevInfo, prev.dir)) add('noOvertake');
         if (info.hazard && info.hazard !== prevInfo.hazard) add('hazard', { value: info.hazard });
+        // Từ đường thường vào đường cao tốc (kể cả nhánh nối): IE.452, không kèm con số. Từ nhánh nối vào cao tốc,
+        // từ cao tốc sang cao tốc khác, hay ra trạm dừng nghỉ (đường service) rồi vào lại thì không (xe đã ở trên hệ
+        // thống cao tốc). Không biết xe đến từ đường nào (hành lang bắt đầu ở đường service) thì im.
+        if (MOTORWAY.has(p.way.h) && !MOTORWAY.has(prev.way.h) && lastRoad != null && lastRoad !== 'motorway') add('motorway');
+        if (info.minspeed != null && info.minspeed !== lastMinspeed) add('minspeed', { n: info.minspeed });
+        if (info.ford && !prevInfo.ford) add('ford');
+        if (info.toll && !prevInfo.toll) add('toll', null, { quiet: true });
       }
     }
     if (limit != null) lastLimit = limit;
+    if (info.minspeed != null) lastMinspeed = info.minspeed;
+    if (!MOTORWAY_TRANSPARENT.has(p.way.h)) lastRoad = p.way.h;
     prev = p;
     prevInfo = info;
+    prevAccess = acc;
   }
   // Hành lang dừng ngay trước vòng xuyến (các nhánh vòng xuyến lệch nhiều so với hướng đi nên không đoán tiếp).
   if (corr.end && prev && !prevInfo.roundabout) {
@@ -1370,6 +1406,130 @@ export function timeRangesActive(text, date) {
     }
   }
   return active;
+}
+
+// ---- Điều kiện theo giờ trên đường: cấm xe theo giờ, giới hạn tốc độ theo giờ ----
+
+// Khung có ngày tháng (Tết, 2/9, 30/4, ngày diễu binh…): thường là lệnh cấm một lần đã hết, nên không đọc.
+const MONTH_RE = /\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b|\b\d{4}\b|\beaster\b|\bweek\b/i;
+// Ngày lễ (PH, SH) và giờ theo mặt trời: không biết hôm nay có phải ngày đó, nên cả điều kiện là không đọc được.
+const UNKNOWN_DAY_RE = /\b(?:PH|SH)\b|sunrise|sunset|dawn|dusk/i;
+const DASHES = /[\u2012\u2013\u2014\u2212]/g; // dấu gạch dài (–) hay gặp trong dữ liệu TP.HCM
+
+/**
+ * Điều kiện của một mệnh đề *:conditional có đang đúng lúc `now` → true/false, hoặc null nếu không đọc được.
+ * Chỉ đọc khung giờ trong tuần ("Sa-Su 18:30-23:00", "06:00-20:00"); các khung có tháng, ngày, năm bị bỏ (Hoàn Kiếm:
+ * "Feb 16 19:30-23:59; Feb 17 00:01-02:00; Fr 19:00-23:59; Sa-Su 00:00-23:59" còn lại "Fr 19:00-23:59; Sa-Su …"), và
+ * chỉ có khung ngày tháng thì là false. Điều kiện không phải giờ (tải trọng…) không áp dụng cho ô tô con, xe máy: false.
+ */
+export function conditionActive(cond, now) {
+  if (cond == null || !(now instanceof Date) || Number.isNaN(now.getTime())) return null;
+  let text = String(cond).replace(DASHES, '-').trim();
+  while (text.startsWith('(') && text.endsWith(')')) text = text.slice(1, -1).trim();
+  if (!text) return null;
+  if (!TIMEISH.test(text) && !MONTH_RE.test(text)) return false;
+  if (UNKNOWN_DAY_RE.test(text)) return null;
+  const kept = text
+    .split(/\s*;\s*|(?<=\d)\s*,\s*(?=[A-Za-z])/)
+    .map((r) => r.trim())
+    .filter((r) => r && !MONTH_RE.test(r));
+  if (!kept.length) return false;
+  return timeRangesActive(kept.join('; '), now);
+}
+
+/**
+ * Giá trị của thẻ *:conditional đang có hiệu lực lúc `now` → { value } (mệnh đề đầu tiên đang đúng), 'unknown' (không
+ * mệnh đề nào đúng nhưng có mệnh đề không đọc được), hoặc null (không mệnh đề nào đúng).
+ */
+function conditionalValue(text, now) {
+  const clauses = conditionalClauses(text);
+  if (!clauses) return 'unknown';
+  let unknown = false;
+  for (const c of clauses) {
+    const on = conditionActive(c.cond, now);
+    if (on === true) return { value: c.value };
+    if (on === null) unknown = true;
+  }
+  return unknown ? 'unknown' : null;
+}
+
+// Thứ tự thẻ quyền đi lại, riêng trước chung (như classifyWay).
+const ACCESS_KEYS = {
+  car: ['motorcar', 'motor_vehicle', 'vehicle', 'access'],
+  moto: ['motorcycle', 'motor_vehicle', 'vehicle', 'access'],
+};
+const GENERAL_ACCESS = new Set(['vehicle', 'access']);
+
+/**
+ * Quyền đi lại của loại xe này trên đường lúc `now`, tính cả thẻ *:conditional → { no, timed, general }:
+ * no = bị cấm; timed = lệnh cấm đến từ một khung giờ đang có hiệu lực (không phải thẻ cố định); general = lệnh cấm
+ * nằm ở thẻ chung vehicle/access (cấm mọi xe, "đường cấm"). Đi từ thẻ riêng tới thẻ chung: ở mỗi mức, mệnh đề theo giờ
+ * đang đúng thắng giá trị cố định của mức đó; mức đầu tiên có giá trị quyết định. Thẻ theo giờ ở mức riêng hơn mà
+ * không đọc được thì không báo cấm theo giờ từ mức chung hơn (im lặng, không đoán). Thẻ của ô tô (motorcar) không
+ * bao giờ làm cấm xe máy và ngược lại.
+ */
+export function accessAt(tags, vehicle, now) {
+  const none = { no: false, timed: false, general: false };
+  if (!tags) return none;
+  let uncertain = false;
+  for (const k of ACCESS_KEYS[vehicle === 'moto' ? 'moto' : 'car']) {
+    const cond = tags[`${k}:conditional`];
+    if (cond != null) {
+      const r = conditionalValue(cond, now);
+      if (r === 'unknown') uncertain = true;
+      else if (r) {
+        if (r.value === 'no' && uncertain) return none;
+        return { no: r.value === 'no', timed: true, general: GENERAL_ACCESS.has(k) };
+      }
+    }
+    const plain = clean(tags[k]);
+    if (plain != null) return { no: plain === 'no', timed: false, general: GENERAL_ACCESS.has(k) };
+  }
+  return none;
+}
+
+/**
+ * maxspeed:<xe>:conditional rồi maxspeed:conditional: trị số của mệnh đề khung giờ đang đúng, hoặc null.
+ * generic = false: loại xe này có giới hạn riêng (maxspeed:<xe>, maxspeed:<xe>:forward…), thẻ riêng đứng trên thẻ
+ * chung, nên maxspeed:conditional chung không dùng cho loại xe này.
+ */
+function conditionalSpeed(tags, vehicle, now, generic = true) {
+  if (!tags) return null;
+  const keys = generic ? [`maxspeed:${vehicle}:conditional`, 'maxspeed:conditional'] : [`maxspeed:${vehicle}:conditional`];
+  for (const k of keys) {
+    if (tags[k] == null) continue;
+    for (const c of conditionalClauses(tags[k]) || []) {
+      const n = parseMaxspeed(c.value);
+      if (n != null && conditionActive(c.cond, now) === true) return n;
+    }
+  }
+  return null;
+}
+
+/**
+ * Giới hạn tốc độ (km/h) của đường cho loại xe này khi đi theo chiều dir (+1 xuôi chiều vẽ, −1 ngược chiều vẽ, 0 không
+ * biết), hoặc null. Đường có maxspeed:forward/backward (cf/cb, mf/mb của roaddata.js) thì lấy theo chiều; không biết
+ * chiều thì đường một chiều lấy chiều được đi, đường hai chiều lấy số nhỏ hơn của hai chiều (thiếu một chiều thì
+ * null). maxspeed:conditional chỉ dùng khi một khung giờ trong tuần đang đúng; không đọc được thì bỏ qua. Loại xe có
+ * giới hạn riêng (maxspeed:motorcycle=50) thì maxspeed:conditional chung không nâng hay hạ được giới hạn đó.
+ */
+export function roadLimit(way, vehicle = 'car', dir = 0, now = null) {
+  if (!way) return null;
+  const moto = vehicle === 'moto';
+  const d = dir > 0 ? 1 : dir < 0 ? -1 : onewayFor(way, vehicle);
+  const plain = (moto ? way.m : way.c) ?? null;
+  const f = moto ? way.mf : way.cf;
+  const b = moto ? way.mb : way.cb;
+  let limit = plain;
+  if (f !== undefined || b !== undefined) {
+    const fw = f === undefined ? plain : f;
+    const bw = b === undefined ? plain : b;
+    limit = d > 0 ? fw : d < 0 ? bw : fw != null && bw != null ? Math.min(fw, bw) : null;
+  }
+  // cx / mx (roaddata.js): đường có thẻ maxspeed riêng cho ô tô / xe máy.
+  const own = Boolean(moto ? way.mx : way.cx);
+  const timed = now instanceof Date ? conditionalSpeed(way.t, moto ? 'motorcycle' : 'motorcar', now, !own) : null;
+  return timed ?? limit ?? null;
 }
 
 // ---- Chỗ ngoặt tính từ hình dạng đường ----
@@ -1599,6 +1759,9 @@ export class SignEngine {
     this.approached = new Set(); // khoá các mục xe đã tiến lại gần mà chưa đi qua (#waiting)
     this.memo = new Memo();
     this.memoTime = -Infinity;
+    // Tốc độ tối thiểu của đường cao tốc xe đang đi (giữ qua các đoạn cầu, hầm không ghi minspeed; ra khỏi hệ thống
+    // cao tốc thì quên): hành lang bắt đầu ở đoạn không ghi minspeed vẫn không đọc lại cùng trị số R.306.
+    this.minspeedHere = null;
   }
 
   /** Bắt đầu chuyến mới: quên mọi mục đã báo. */
@@ -1612,6 +1775,7 @@ export class SignEngine {
     this.approached.clear();
     this.#corr = null;
     this.#corrTime = null;
+    this.minspeedHere = null;
   }
 
   /**
@@ -1650,6 +1814,12 @@ export class SignEngine {
     if (corr.coords.length < 2) return this.#hold(time, speed);
     // Hành lang theo tuyến cũng được nhớ: rời tuyến khi đang đi chậm thì vẫn biết chiều đi.
     this.track.remember(corr, fix, time, fix.heading != null && speed > MOVING_SPEED);
+    const here = corr.pieces.find((p) => p.way && p.s0 <= 1);
+    if (here) {
+      const ms = this.memo.wayInfo(here.way).minspeed;
+      if (ms != null) this.minspeedHere = ms;
+      else if (!MOTORWAY.has(here.way.h)) this.minspeedHere = null;
+    }
 
     const ctx = {
       settings,
@@ -1657,6 +1827,7 @@ export class SignEngine {
       now,
       nav: corr.start ? null : nav,
       speed,
+      minspeedHere: this.minspeedHere,
       memo: this.memo,
       wayIds: new Set(corr.pieces.filter((p) => p.way).map((p) => p.way.id)),
       junctions: junctionsOn(corr, roads, this.memo),

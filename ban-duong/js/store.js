@@ -2,6 +2,8 @@
 // localStorage có thể bị chặn (chế độ ẩn danh, hết dung lượng) nên mọi thao tác đều bọc try/catch
 // và ứng dụng vẫn chạy bình thường với dữ liệu trong bộ nhớ.
 
+import { validDirection, validSpeed } from './communitydata.js';
+
 const PREFIX = 'banduong:';
 
 function read(key, fallback) {
@@ -34,6 +36,7 @@ export const DEFAULT_SETTINGS = {
   alertToll: true,
   alertRail: true, // đường ngang đường sắt (nay do bộ máy biển báo đọc)
   alertReport: true,
+  communityData: true, // dùng dữ liệu cộng đồng (data/community.json, js/community.js)
   // Nhóm biển báo phía trước (xem SIGN_CATEGORIES trong signs.js)
   signSpeed: true,
   signProhibit: true,
@@ -61,9 +64,18 @@ export const DEFAULT_SETTINGS = {
   camEval: false, // lưu ảnh biển nhỏ trên máy để kiểm tra độ chính xác
 };
 
-/** Loại điểm người dùng tự đánh dấu. ttl = thời gian tồn tại (giờ), 0 = giữ mãi. */
+/**
+ * Loại điểm người dùng tự đánh dấu. ttl = thời gian tồn tại (giờ), 0 = giữ mãi. warn: false = chỉ hiện trên bản đồ và
+ * gửi cho chủ ứng dụng, không báo khi lái (biển đã tháo thì không có gì để báo).
+ */
 export const REPORT_TYPES = {
   camera: { label: 'Camera phạt nguội', icon: 'camera', ttl: 0 },
+  camspeed: { label: 'Camera bắn tốc độ', icon: 'camera', ttl: 0 },
+  camred: { label: 'Camera phạt vượt đèn đỏ', icon: 'camera', ttl: 0 },
+  signnew: { label: 'Biển báo mới', icon: 'hazard', ttl: 0 },
+  signgone: { label: 'Biển báo đã tháo', icon: 'hazard', ttl: 0, warn: false },
+  speed: { label: 'Tốc độ tối đa thay đổi', icon: 'hazard', ttl: 0 },
+  closure: { label: 'Đường cấm, rào chắn', icon: 'works', ttl: 24 * 30 },
   school: { label: 'Cổng trường học', icon: 'school', ttl: 0 },
   hazard: { label: 'Điểm nguy hiểm', icon: 'hazard', ttl: 0 },
   works: { label: 'Công trường', icon: 'works', ttl: 24 * 30 },
@@ -71,6 +83,24 @@ export const REPORT_TYPES = {
   jam: { label: 'Kẹt xe', icon: 'jam', ttl: 1 },
   crash: { label: 'Tai nạn', icon: 'crash', ttl: 2 },
 };
+
+const CODE_RE = /^(?:P|R|W|I|S|DP|IE)\.\d{3}[a-z]{0,2}$/;
+
+/**
+ * Thông tin thêm của một điểm đánh dấu, đã lọc: direction (độ, số nguyên 0–359, hướng xe chạy lúc đánh dấu),
+ * value (km/h, chỉ cho loại 'speed'), code (mã biển QCVN, chỉ cho loại 'signnew'). Sai hay thiếu thì bỏ, không đoán.
+ */
+export function reportExtra(type, extra) {
+  const out = {};
+  if (!extra || typeof extra !== 'object') return out;
+  if (typeof extra.direction === 'number' && Number.isFinite(extra.direction)) {
+    const d = Math.round(((extra.direction % 360) + 360) % 360) % 360;
+    if (validDirection(d)) out.direction = d;
+  }
+  if (type === 'speed' && validSpeed(extra.value)) out.value = extra.value;
+  if (type === 'signnew' && typeof extra.code === 'string' && CODE_RE.test(extra.code.trim())) out.code = extra.code.trim();
+  return out;
+}
 
 class Store {
   constructor() {
@@ -86,6 +116,7 @@ class Store {
     return (Array.isArray(list) ? list : []).filter((r) => {
       const def = REPORT_TYPES[r?.type];
       if (!def || !Array.isArray(r.coord)) return false;
+      if (r.type === 'speed' && !validSpeed(r.value)) return false; // "tốc độ đổi" mà không có trị số thì vô nghĩa
       return def.ttl === 0 || now - r.time < def.ttl * 3600e3;
     });
   }
@@ -118,12 +149,14 @@ class Store {
     this.#emit('places');
   }
 
-  addReport(type, coord) {
+  /** extra: { direction, value, code } (xem reportExtra). */
+  addReport(type, coord, extra = null) {
     const report = {
       id: `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
       type,
       coord: [Number(coord[0].toFixed(6)), Number(coord[1].toFixed(6))],
       time: Date.now(),
+      ...reportExtra(type, extra),
     };
     this.reports.push(report);
     write('reports', this.reports);
@@ -161,11 +194,14 @@ class Store {
         (r) => r.type === item.type && Math.abs(r.coord[0] - lon) < 1e-4 && Math.abs(r.coord[1] - lat) < 1e-4
       );
       if (dup) continue;
+      const extra = reportExtra(item.type, item);
+      if (item.type === 'speed' && extra.value == null) continue;
       this.reports.push({
         id: `r${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`,
         type: item.type,
         coord: [lon, lat],
         time: Number(item.time) || Date.now(),
+        ...extra,
       });
       added++;
     }

@@ -29,7 +29,10 @@ export const REFRESH_GAP = 30e3;
 const REQUEST_TIMEOUT = 70e3; // máy chủ được chạy 60 giây, cộng thêm thời gian truyền dữ liệu
 const MAX_CELLS = 16;
 // Bản ghi cũ hơn vẫn dùng tạm được nhưng sẽ được tải lại. 3: đường có thêm chiều một chiều riêng của xe máy (om).
-const CACHE_VERSION = 3;
+// 4: cấm xe theo giờ (*:conditional), giới hạn tốc độ theo chiều (cf/cb/mf/mb), minspeed, ford, toll trên đường; cấm rẽ
+// có "via" là đường; hướng camera; trạm thu phí vẽ thành vùng; camera đọc biển số (ALPR); quan hệ enforcement đầy đủ hơn.
+// 5: cờ cx/mx (đường có maxspeed riêng cho ô tô / xe máy); camera đọc biển số (ALPR) chỉ khi là camera giao thông.
+export const CACHE_VERSION = 5;
 // matchWay: đường thuộc hành lang vừa dựng được cộng chừng này (m) vào điểm, để một lần định vị lệch không làm
 // nhảy sang đường song song. 8 m xấp xỉ bằng, có chỗ còn lớn hơn, khoảng cách thật giữa hai đường song song cùng
 // chiều (đường hầm và đường bên trên, đường trên cao và đường bên dưới, đường chính và đường song hành: khoảng
@@ -53,7 +56,15 @@ const WAY_KEYS = new Set([
   'maxweight', 'maxweight:forward', 'maxweight:backward',
   'maxwidth', 'maxwidth:forward', 'maxwidth:backward',
   'overtaking', 'overtaking:forward', 'overtaking:backward', 'hazard',
+  // Cấm xe theo giờ (giá trị "no @ (Sa-Su 18:30-23:00)"): bộ máy biển báo chỉ đọc các khung giờ trong tuần.
+  'motorcar:conditional', 'motorcycle:conditional', 'motor_vehicle:conditional', 'vehicle:conditional', 'access:conditional',
+  // Giới hạn tốc độ có điều kiện (đọc lúc chạy, chỉ khung giờ trong tuần), tốc độ tối thiểu, đường ngầm, đường thu phí.
+  'maxspeed:conditional', 'maxspeed:motorcar:conditional', 'maxspeed:motorcycle:conditional',
+  'minspeed', 'ford', 'toll',
 ]);
+// Giá trị *:conditional thường dài (nhiều khung ngày lễ trước khung giờ trong tuần): giữ trọn tới 255 ký tự (giới hạn
+// độ dài giá trị của OSM). Cắt ngắn sẽ làm hỏng khung giờ cuối cùng, đúng phần cần đọc.
+const MAX_COND_LEN = 255;
 
 // Thẻ của nút biển báo cần giữ lại.
 const FEAT_KEYS = new Set([
@@ -61,7 +72,7 @@ const FEAT_KEYS = new Set([
   'traffic_calming', 'hazard', 'hazard:direction',
   'traffic_sign', 'traffic_sign:forward', 'traffic_sign:backward', 'traffic_sign:direction',
   'traffic_signals:direction', 'direction', 'stop', 'stop:direction', 'give_way:direction',
-  'maxspeed', 'overtaking', 'maxheight', 'maxweight', 'maxwidth', 'barrier', 'code', 'content', 'name',
+  'maxspeed', 'overtaking', 'maxheight', 'maxweight', 'maxwidth', 'barrier', 'code', 'content', 'name', 'ford',
 ]);
 
 const FEAT_HIGHWAY = new Set(['traffic_signals', 'stop', 'give_way', 'crossing', 'mini_roundabout']);
@@ -93,13 +104,19 @@ export function buildQuery(cx, cy) {
     `node.rn["traffic_sign:forward"];` +
     `node.rn["traffic_sign:backward"];` +
     `node.rn["hazard"];` +
+    `node.rn["ford"];` +
     // Biển và điểm cảnh báo đứng riêng bên lề đường.
     `node["traffic_sign"];` +
     `node["hazard"];` +
     `node["highway"~"^(speed_camera|stop|give_way|toll_gantry)$"];` +
     `node["man_made"="surveillance"]["surveillance:zone"="traffic"];` +
+    // Camera đọc biển số xe (ALPR): chỉ nhận khi không ghi vùng khác traffic (isTrafficCamera); camera giám sát chung
+    // (không ghi vùng traffic) thì không nhận.
+    `node["man_made"="surveillance"]["surveillance:type"="ALPR"];` +
     `node["barrier"="toll_booth"];` +
     `)->.pts;` +
+    // Trạm thu phí vẽ thành vùng hay đường: chỉ cần tâm.
+    `way["barrier"="toll_booth"]->.tw;` +
     `rel(bw.roads)["type"="restriction"]->.restr;` +
     // Theo mã nguồn Overpass, node(r.restr:"via") là câu lệnh đệ quy đứng riêng nên không bị khung [bbox]
     // chung giới hạn: nút "via" nằm ngoài ô vẫn được in ra (chưa kiểm chứng trên máy chủ thật).
@@ -110,7 +127,8 @@ export function buildQuery(cx, cy) {
     `.pts out body qt;` +
     `.restr out body qt;` +
     `.via out skel qt;` +
-    `.enf out body geom qt;`
+    `.enf out body geom qt;` +
+    `.tw out tags center qt;`
   );
 }
 
@@ -150,7 +168,7 @@ function pickTags(tags, keep, maxLen) {
   for (const k of Object.keys(tags)) {
     if (!keep(k)) continue;
     if (!out) out = {};
-    out[k] = String(tags[k]).slice(0, maxLen);
+    out[k] = String(tags[k]).slice(0, k.endsWith(':conditional') ? Math.max(maxLen, MAX_COND_LEN) : maxLen);
   }
   return out;
 }
@@ -169,7 +187,8 @@ function isFeatureNode(tags) {
     tags.traffic_calming != null ||
     tags.railway === 'level_crossing' ||
     FEAT_HIGHWAY.has(tags.highway) ||
-    tags.barrier === 'height_restrictor'
+    tags.barrier === 'height_restrictor' ||
+    tags.ford === 'yes'
   );
 }
 
@@ -203,9 +222,55 @@ function parseWay(el) {
   // khác o, để bản ghi gọn.
   const om = onewayValue(tags['oneway:motorcycle']) ?? onewayValue(tags['oneway:moped']);
   if (om != null && om !== o) way.om = om;
+  // Giới hạn theo chiều vẽ (f) và ngược chiều vẽ (b), chỉ ghi khi đường có thẻ maxspeed theo chiều cho loại xe đó.
+  Object.assign(way, directionalSpeeds(tags, 'motorcar', 'c'), directionalSpeeds(tags, 'motorcycle', 'm'));
+  // Có thẻ maxspeed riêng cho loại xe (không kể :conditional): thẻ riêng đứng trên maxspeed:conditional chung
+  // (roadLimit của signengine.js). Chỉ ghi khi có, để bản ghi gọn.
+  if (OWN_SPEED_KEYS.motorcar.some((k) => tags[k] != null)) way.cx = 1;
+  if (OWN_SPEED_KEYS.motorcycle.some((k) => tags[k] != null)) way.mx = 1;
   const t = pickTags(tags, keepWayTag, MAX_TAG_LEN);
   if (t) way.t = t;
   return way;
+}
+
+/**
+ * Camera giám sát là camera giao thông: surveillance:zone=traffic, hoặc camera đọc biển số (ALPR) không ghi vùng và
+ * không phải camera riêng, trong nhà. ALPR có vùng khác (parking, building, shop…) là camera cổng bãi xe, cổng toà nhà:
+ * không nhận, để không báo nhầm cạnh bãi xe.
+ */
+function isTrafficCamera(tags) {
+  if (tags.man_made !== 'surveillance') return false;
+  const zone = String(tags['surveillance:zone'] ?? '').trim();
+  if (zone === 'traffic') return true;
+  if (tags['surveillance:type'] !== 'ALPR' || zone) return false;
+  return !ALPR_NOT_TRAFFIC.has(String(tags.surveillance ?? '').trim());
+}
+const ALPR_NOT_TRAFFIC = new Set(['private', 'indoor']);
+
+const SPEED_DIRS = [['forward', 'f'], ['backward', 'b']];
+const OWN_SPEED_KEYS = Object.fromEntries(
+  ['motorcar', 'motorcycle'].map((v) => [v, [`maxspeed:${v}`, `maxspeed:${v}:forward`, `maxspeed:${v}:backward`]])
+);
+
+/**
+ * maxspeed:forward / maxspeed:backward (và maxspeed:<loại xe>:forward…) → { cf, cb } (hay { mf, mb }), hoặc {} khi
+ * đường không có thẻ theo chiều nào cho loại xe này. Mỗi chiều lấy khoá có mặt đầu tiên trong thứ tự
+ * maxspeed:<xe>:<chiều> → maxspeed:<xe> → maxspeed:<chiều> → maxspeed (giống dimsFor của signs.js, thẻ riêng của loại
+ * xe đứng trước). Khoá có mặt mà không đọc được (none, signals…) thì chiều đó là null: không biết, không đoán tiếp.
+ */
+function directionalSpeeds(tags, vehicle, prefix) {
+  if (!SPEED_DIRS.some(([d]) => tags[`maxspeed:${vehicle}:${d}`] != null || tags[`maxspeed:${d}`] != null)) return {};
+  const out = {};
+  for (const [d, s] of SPEED_DIRS) {
+    let v = null;
+    for (const k of [`maxspeed:${vehicle}:${d}`, `maxspeed:${vehicle}`, `maxspeed:${d}`, 'maxspeed']) {
+      if (tags[k] == null) continue;
+      v = parseMaxspeed(tags[k]);
+      break;
+    }
+    out[prefix + s] = v;
+  }
+  return out;
 }
 
 /**
@@ -214,11 +279,68 @@ function parseWay(el) {
  */
 export const onewayFor = (way, vehicle) => (vehicle === 'moto' && way.om != null ? way.om : way.o);
 
+const MAX_VIA_WAYS = 4; // cấm rẽ qua nhiều đoạn đường hơn chừng này: bỏ (hiếm, dễ ghép sai)
+
+/** Khoá hai đầu mút của một đường đã đọc (parseWay). */
+function endKeys(way) {
+  const g = way.g;
+  return [vkey(g[0], g[1]), vkey(g[g.length - 2], g[g.length - 1])];
+}
+
 /**
- * Quan hệ cấm rẽ: chỉ nhận loại có đúng một đường "from", một đường "to" và một NÚT "via" biết toạ độ.
- * Loại "via" là đường (cấm quay đầu qua dải phân cách…) bị bỏ qua vì cần ghép nhiều đoạn đường.
+ * Ghép chuỗi from → các đường "via" → to của một quan hệ cấm rẽ qua đường (cấm quay đầu qua dải phân cách…).
+ * Theo quy ước OSM mỗi đường phải bắt đầu hoặc kết thúc ở đường kế tiếp, nên chỉ ghép qua đầu mút: bắt đầu ở đầu mút
+ * của from chạm một đường via, đi hết các đường via (mỗi bước đúng một đường chạm đầu mút hiện tại, thứ tự thành viên
+ * không quan trọng), rồi to phải bắt đầu hoặc kết thúc ở đó. Chiều đi suy ra từ chuỗi phải hợp với đường một chiều:
+ * đi trên from về phía chỗ nối, đi qua từng đường via và đi vào to đều không được ngược chiều (không thì quan hệ thuộc
+ * về chiều đường bên kia, hoặc bị vẽ sai). Thiếu đường nào trong ô, chuỗi đứt, hay ghép được theo hai cách: null.
+ * Trả về toạ độ chỗ from gặp đường via đầu tiên: nơi đặt biển.
  */
-function parseRestriction(el, coordOf) {
+function chainVia(from, vias, to) {
+  if (!from || !to || !vias.length || vias.some((w) => !w)) return null;
+  const [fa, fb] = endKeys(from);
+  const [ta, tb] = endKeys(to);
+  if (fa === fb || ta === tb) return null;
+  const found = [];
+  for (const start of [fa, fb]) {
+    // Đi trên from về phía start: start là đỉnh cuối thì xuôi chiều vẽ (+1), đỉnh đầu thì ngược chiều vẽ (−1).
+    const fromDir = start === fb ? 1 : -1;
+    if (from.o !== 0 && from.o !== fromDir) continue;
+    let cur = start;
+    let ok = true;
+    const left = [...vias];
+    while (left.length) {
+      const next = [];
+      left.forEach((w, k) => {
+        if (endKeys(w).includes(cur)) next.push(k);
+      });
+      if (next.length !== 1) {
+        ok = false;
+        break;
+      }
+      const w = left.splice(next[0], 1)[0];
+      const [a, b] = endKeys(w);
+      const dir = cur === a ? 1 : -1;
+      if (a === b || (w.o !== 0 && w.o !== dir)) {
+        ok = false;
+        break;
+      }
+      cur = dir > 0 ? b : a;
+    }
+    if (!ok || (cur !== ta && cur !== tb)) continue;
+    const toDir = cur === ta ? 1 : -1;
+    if (to.o !== 0 && to.o !== toDir) continue;
+    found.push(start === fa ? [from.g[0], from.g[1]] : [from.g[from.g.length - 2], from.g[from.g.length - 1]]);
+  }
+  return found.length === 1 ? found[0] : null;
+}
+
+/**
+ * Quan hệ cấm rẽ: đúng một đường "from", một đường "to", và "via" là một NÚT biết toạ độ hoặc một đến bốn ĐƯỜNG có
+ * trong ô (ghép được bằng chainVia). Với "via" là đường, toạ độ "via" là chỗ from gặp đường via đầu tiên (biển đặt ở
+ * đó) và viaWays là id các đường via. wayById: id → đường đã đọc của cùng phản hồi.
+ */
+function parseRestriction(el, coordOf, wayById) {
   const from = [];
   const to = [];
   const via = [];
@@ -227,37 +349,128 @@ function parseRestriction(el, coordOf) {
     else if (m.role === 'to') to.push(m);
     else if (m.role === 'via') via.push(m);
   }
-  if (from.length !== 1 || to.length !== 1 || via.length !== 1) return null;
-  if (from[0].type !== 'way' || to[0].type !== 'way' || via[0].type !== 'node') return null;
-  const coord = coordOf(via[0].ref);
-  if (!coord) return null;
-  return {
-    id: `r${el.id}`,
-    from: from[0].ref,
-    to: to[0].ref,
-    via: coord,
-    tags: pickTags(el.tags || {}, keepRestrTag, MAX_RESTR_TAG_LEN) || {},
-  };
+  if (from.length !== 1 || to.length !== 1 || !via.length) return null;
+  if (from[0].type !== 'way' || to[0].type !== 'way') return null;
+  const tags = pickTags(el.tags || {}, keepRestrTag, MAX_RESTR_TAG_LEN) || {};
+  const base = { id: `r${el.id}`, from: from[0].ref, to: to[0].ref };
+  if (via.length === 1 && via[0].type === 'node') {
+    const coord = coordOf(via[0].ref);
+    return coord ? { ...base, via: coord, tags } : null;
+  }
+  if (via.length > MAX_VIA_WAYS || via.some((m) => m.type !== 'way')) return null;
+  const at = chainVia(wayById.get(from[0].ref), via.map((m) => wayById.get(m.ref)), wayById.get(to[0].ref));
+  return at ? { ...base, via: at, viaWays: via.map((m) => m.ref), tags } : null;
+}
+
+/**
+ * Hướng vẽ (độ) của đường tại đỉnh có khoá key, khi đỉnh đó thuộc đúng một đường, hoặc mọi đường chứa nó cho cùng
+ * một hướng (lệch không quá 30°, ví dụ chỗ nối hai đoạn của cùng một con đường vẽ cùng chiều). Không thì null: không
+ * biết forward/backward là chiều nào.
+ */
+function drawnBearingAt(key, vertexIndex, ways) {
+  const list = vertexIndex.get(key);
+  if (!list) return null;
+  let first = null;
+  for (let k = 0; k < list.length; k += 2) {
+    const g = ways[list[k]].g;
+    const i = list[k + 1];
+    const n = g.length / 2;
+    const a = i > 0 ? i - 1 : i;
+    const b = i < n - 1 ? i + 1 : i;
+    if (a === b) return null;
+    const brg = bearing([g[2 * a], g[2 * a + 1]], [g[2 * b], g[2 * b + 1]]);
+    if (first == null) first = brg;
+    else if (Math.abs(angleDiff(first, brg)) > 30) return null;
+  }
+  return first;
+}
+
+/**
+ * Hướng ghi trên camera: speed_camera đọc direction rồi camera:direction, camera giám sát ngược lại. Giữ giá trị thô
+ * (bộ cảnh báo đọc bằng parseDirection), và với forward/backward thì kèm hướng vẽ của đường tại nút (wb) nếu biết.
+ */
+function cameraDirection(tags, key, vertexIndex, ways) {
+  const keys = tags.highway === 'speed_camera' ? ['direction', 'camera:direction'] : ['camera:direction', 'direction'];
+  for (const k of keys) {
+    const v = tags[k] == null ? '' : String(tags[k]).trim();
+    if (!v) continue;
+    const out = { dir: v.slice(0, 40) };
+    if (/^(forward|backward|reverse)$/i.test(v)) {
+      const wb = drawnBearingAt(key, vertexIndex, ways);
+      if (wb != null) out.wb = Math.round(wb * 10) / 10;
+    }
+    return out;
+  }
+  return {};
+}
+
+/** Tâm (trung bình các đỉnh) của hình học Overpass [{ lat, lon }], hoặc null. */
+function centroid(geometry) {
+  let x = 0;
+  let y = 0;
+  let n = 0;
+  for (const p of geometry || []) {
+    if (!p || !Number.isFinite(p.lat) || !Number.isFinite(p.lon)) continue;
+    x += p.lon;
+    y += p.lat;
+    n++;
+  }
+  return n ? [x / n, y / n] : null;
+}
+
+const isCoord = (m) => Number.isFinite(m?.lat) && Number.isFinite(m?.lon);
+
+/**
+ * Điểm camera của một quan hệ enforcement (out body geom): mỗi thành viên "device" là một điểm, nút thì lấy toạ độ
+ * nút, đường thì lấy tâm. Có nút "from" (chỗ bắt đầu đoạn kiểm soát) thì điểm cảnh báo đặt ở đó. average_speed là đoạn
+ * đo tốc độ trung bình (avg); maxweight/maxheight là điểm kiểm soát tải trọng/chiều cao (enf), không phải camera tốc độ.
+ */
+function enforcementPoints(el, tags, add) {
+  const enf = String(tags.enforcement ?? '').trim();
+  const sub = enf === 'maxspeed' || enf === 'average_speed' ? 'speed' : enf === 'traffic_signals' ? 'redlight' : 'traffic';
+  const extra = enf === 'average_speed' ? { avg: true } : enf === 'maxweight' ? { enf: 'weight' } : enf === 'maxheight' ? { enf: 'height' } : {};
+  const members = Array.isArray(el.members) ? el.members : [];
+  const from = members.find((m) => m.role === 'from' && m.type === 'node' && isCoord(m));
+  const limit = parseMaxspeed(tags.maxspeed);
+  for (const mem of members) {
+    if (mem.role !== 'device') continue;
+    let coord = null;
+    if (mem.type === 'node' && isCoord(mem)) coord = [mem.lon, mem.lat];
+    else if (mem.type === 'way') coord = centroid(mem.geometry);
+    if (!coord) continue;
+    add({
+      id: `${mem.type === 'way' ? 'w' : 'n'}${mem.ref}`,
+      kind: 'camera',
+      sub,
+      limit,
+      coord: from ? [from.lon, from.lat] : coord,
+      fromRelation: true,
+      ...extra,
+    });
+  }
 }
 
 /** Chuyển phản hồi Overpass thành { ways, points, feats, restr, base } gọn nhẹ. */
 export function parseOverpass(json) {
   const elements = json?.elements || [];
   const ways = [];
-  const vertices = new Set();
+  const wayById = new Map();
   for (const el of elements) {
     if (el.type !== 'way') continue;
     const way = parseWay(el);
     if (!way) continue;
     ways.push(way);
-    for (let i = 0; i < way.g.length; i += 2) vertices.add(vkey(way.g[i], way.g[i + 1]));
+    if (!wayById.has(way.id)) wayById.set(way.id, way);
   }
+  const vertexIndex = buildVertexIndex(ways);
 
   const byId = new Map();
   const add = (p) => {
     const old = byId.get(p.id);
-    // Thông tin từ quan hệ "enforcement" chi tiết hơn thẻ trên nút nên được ưu tiên.
-    if (!old || p.fromRelation) byId.set(p.id, { ...old, ...p });
+    // Thông tin từ quan hệ "enforcement" chi tiết hơn thẻ trên nút nên được ưu tiên (trừ giới hạn tốc độ quan hệ
+    // không ghi: giữ của nút).
+    if (!old) byId.set(p.id, p);
+    else if (p.fromRelation) byId.set(p.id, { ...old, ...p, limit: p.limit ?? old.limit ?? null });
   };
   const nodeCoord = new Map(); // mọi nút được in ra, kể cả bản "out skel" không có thẻ
   const feats = new Map();
@@ -268,11 +481,13 @@ export function parseOverpass(json) {
     if (el.type === 'node' && Number.isFinite(el.lat) && Number.isFinite(el.lon)) {
       const coord = [el.lon, el.lat];
       const id = `n${el.id}`;
+      const key = vkey(el.lon, el.lat);
       nodeCoord.set(el.id, coord);
       if (tags.highway === 'speed_camera') {
-        add({ id, kind: 'camera', sub: 'speed', limit: parseMaxspeed(tags.maxspeed), coord });
-      } else if (tags.man_made === 'surveillance' && tags['surveillance:zone'] === 'traffic') {
-        add({ id, kind: 'camera', sub: 'traffic', limit: null, coord });
+        const dir = cameraDirection(tags, key, vertexIndex, ways);
+        add({ id, kind: 'camera', sub: 'speed', limit: parseMaxspeed(tags.maxspeed), coord, ...dir });
+      } else if (isTrafficCamera(tags)) {
+        add({ id, kind: 'camera', sub: 'traffic', limit: null, coord, ...cameraDirection(tags, key, vertexIndex, ways) });
       } else if (tags.barrier === 'toll_booth' || tags.highway === 'toll_gantry') {
         add({ id, kind: 'toll', sub: '', limit: null, coord, name: tags.name || '' });
       } else if (tags.railway === 'level_crossing') {
@@ -283,29 +498,18 @@ export function parseOverpass(json) {
         feats.set(id, {
           id,
           coord,
-          onWay: vertices.has(vkey(el.lon, el.lat)),
+          onWay: vertexIndex.has(key),
           tags: pickTags(tags, keepFeatTag, MAX_TAG_LEN) || {},
         });
       }
-    } else if (el.type === 'relation' && tags.type === 'enforcement') {
-      const sub =
-        tags.enforcement === 'maxspeed' || tags.enforcement === 'average_speed'
-          ? 'speed'
-          : tags.enforcement === 'traffic_signals'
-            ? 'redlight'
-            : 'traffic';
-      for (const mem of el.members || []) {
-        if (mem.type === 'node' && mem.role === 'device' && Number.isFinite(mem.lat)) {
-          add({
-            id: `n${mem.ref}`,
-            kind: 'camera',
-            sub,
-            limit: parseMaxspeed(tags.maxspeed),
-            coord: [mem.lon, mem.lat],
-            fromRelation: true,
-          });
-        }
+    } else if (el.type === 'way' && tags.barrier === 'toll_booth' && el.center) {
+      // Trạm thu phí vẽ thành vùng/đường (.tw out center): dùng tâm, gộp với các nút trạm thu phí gần đó (120 m).
+      const { lat, lon } = el.center;
+      if (Number.isFinite(lat) && Number.isFinite(lon)) {
+        add({ id: `w${el.id}`, kind: 'toll', sub: '', limit: null, coord: [lon, lat], name: tags.name || '' });
       }
+    } else if (el.type === 'relation' && tags.type === 'enforcement') {
+      enforcementPoints(el, tags, add);
     } else if (el.type === 'relation' && tags.type === 'restriction') {
       restrEls.push(el);
     }
@@ -314,7 +518,7 @@ export function parseOverpass(json) {
   // Toạ độ nút "via" lấy từ nhóm ".via out skel" (hoặc nhóm điểm, nếu nút có thẻ).
   const restr = [];
   for (const el of restrEls) {
-    const r = parseRestriction(el, (ref) => nodeCoord.get(ref));
+    const r = parseRestriction(el, (ref) => nodeCoord.get(ref), wayById);
     if (r) restr.push(r);
   }
 

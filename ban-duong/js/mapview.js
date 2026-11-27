@@ -4,6 +4,7 @@
 import { angleDiff, circlePolygon, distance } from './geo.js';
 import { badgeImage, GLYPHS } from './icons.js';
 import { signDataUrl } from './signart.js';
+import { abolishedLabelNames, provinceLabelRenames } from './admin2025.js';
 
 export const STYLE_URLS = {
   light: 'https://tiles.openfreemap.org/styles/liberty',
@@ -40,6 +41,68 @@ export function localizeLabels(style) {
   for (const layer of style.layers || []) {
     const field = layer.layout?.['text-field'];
     if (field != null) layer.layout['text-field'] = swap(field);
+  }
+  return style;
+}
+
+/**
+ * Bộ lọc kiểu biểu thức (["==", ["get", …], …]) hay kiểu cũ (["==", "class", "state"]). Theo cách MapLibre phân biệt
+ * (isExpressionFilter trong style-spec), vì hai kiểu không được trộn trong cùng một "all".
+ */
+export function isExpressionFilter(filter) {
+  if (filter === true || filter === false) return true;
+  if (!Array.isArray(filter) || filter.length === 0) return false;
+  switch (filter[0]) {
+    case 'has':
+      return filter.length >= 2 && filter[1] !== '$id' && filter[1] !== '$type';
+    case 'in':
+      return filter.length >= 3 && (typeof filter[1] !== 'string' || Array.isArray(filter[2]));
+    case '!in':
+    case '!has':
+    case 'none':
+      return false;
+    case '==':
+    case '!=':
+    case '>':
+    case '>=':
+    case '<':
+    case '<=':
+      return filter.length !== 3 || Array.isArray(filter[1]) || Array.isArray(filter[2]);
+    case 'any':
+    case 'all':
+      return filter.slice(1).every((f) => typeof f === 'boolean' || isExpressionFilter(f));
+    default:
+      return true;
+  }
+}
+
+// Lớp nhãn cấp tỉnh trong lược đồ OpenMapTiles: class "state" (OpenFreeMap dùng cho Việt Nam) và "province".
+const PROVINCE_CLASSES = ['state', 'province'];
+
+/**
+ * Nhãn tỉnh/thành theo sắp xếp 2025 (NQ 202/2025/QH15, js/admin2025.js). Ô bản đồ lấy tên từ OSM. Nút place=state còn
+ * sót của tỉnh đã bỏ (như "Hà Giang") thì ẩn. Nhãn của tỉnh nay là thành phố ("Tỉnh Đồng Nai") hoặc đã đổi tên
+ * ("Thừa Thiên Huế") thì hiện tên mới. Không thêm nhãn hay toạ độ nào: chỉ lọc và đổi chữ của nhãn có sẵn trong ô.
+ * Ranh giới tỉnh vẽ thẳng từ dữ liệu OSM trong ô, nên không đổi ở đây.
+ */
+export function modernizeAdminLabels(style) {
+  const hidden = abolishedLabelNames();
+  const renames = provinceLabelRenames();
+  for (const layer of style.layers || []) {
+    if (layer.type !== 'symbol' || layer['source-layer'] !== 'place') continue;
+    const isProvince = () => ['match', ['get', 'class'], [...PROVINCE_CLASSES], true, false];
+    if (layer.filter == null || isExpressionFilter(layer.filter)) {
+      const keep = ['!', ['all', isProvince(), ['match', ['get', 'name'], [...hidden], true, false]]];
+      layer.filter = layer.filter == null ? keep : ['all', layer.filter, keep];
+    } else {
+      layer.filter = ['all', layer.filter, ['none', ['all', ['in', 'class', ...PROVINCE_CLASSES], ['in', 'name', ...hidden]]]];
+    }
+    const field = layer.layout?.['text-field'];
+    // Chỉ đổi chữ khi text-field là biểu thức; chuỗi kiểu "{name}" giữ nguyên.
+    if (Array.isArray(field)) {
+      const byName = ['match', ['get', 'name'], ...renames.flatMap(([from, to]) => [[...from], to]), structuredClone(field)];
+      layer.layout['text-field'] = ['case', isProvince(), byName, field];
+    }
   }
   return style;
 }
@@ -183,7 +246,10 @@ export class MapView {
     for (const url of urls) {
       try {
         const res = await fetch(url);
-        if (res.ok) return { style: localizeLabels(await res.json()), inverted: dark && url !== STYLE_URLS.dark };
+        if (res.ok) {
+          const style = modernizeAdminLabels(localizeLabels(await res.json()));
+          return { style, inverted: dark && url !== STYLE_URLS.dark };
+        }
       } catch {
         /* thử nguồn kế tiếp */
       }

@@ -548,6 +548,17 @@ body::before {
 .report-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(98px, 1fr)); gap: 10px; }
 .report-btn { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px 6px; border-radius: 14px; background: var(--surface-2); font-size: 13px; font-weight: 600; text-align: center; line-height: 1.25; }
 .report-badge { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 50%; color: #fff; }
+/* Nút "Báo cáo": to hơn các nút nổi khác, có chữ, để bấm trúng khi xe đã dừng. */
+.fab.report-fab { width: 64px; height: 64px; display: flex; flex-direction: column; justify-content: center; gap: 1px; }
+.fab.report-fab small { font-size: 11px; font-weight: 700; line-height: 1; }
+.report-quick { width: 100%; min-height: 96px; font-size: 22px; gap: 12px; border-radius: 20px; }
+.report-h { margin: 16px 0 8px; font-size: 15px; }
+.speed-grid { grid-template-columns: repeat(auto-fill, minmax(76px, 1fr)); }
+.speed-btn { min-height: 76px; justify-content: center; gap: 2px; }
+.speed-btn b { font: 700 28px/1 var(--num); }
+.report-code { width: 100%; height: 52px; margin: 4px 0 12px; padding: 0 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-2); color: var(--ink); font-size: 18px; }
+.report-text { margin: 0 0 10px; padding: 10px 12px; max-height: 9.5em; overflow: auto; border-radius: 12px; background: var(--surface-2); color: var(--ink-2); font: 12.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.report-send .row { margin-bottom: 4px; }
 .stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 .stat { padding: 12px; border-radius: 14px; background: var(--surface-2); }
 .stat b { display: block; font: 700 28px/1.05 var(--num); }
@@ -731,6 +742,7 @@ html.car-ui #side {
 html.car-ui .fab { width: 60px; height: 60px; }
 html.car-ui .fab svg { width: 28px; height: 28px; }
 html.car-ui .fab.text { font-size: 24px; }
+html.car-ui .fab.report-fab { width: 72px; height: 72px; }
 html.car-ui #speedo,
 html.car-ui .sign-strip { left: calc(var(--col-w) + 16px + env(safe-area-inset-left, 0px)); }
 html.car-ui #speedo { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }

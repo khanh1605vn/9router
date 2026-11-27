@@ -2,7 +2,7 @@
 // Đổi VERSION mỗi lần phát hành để máy người dùng nhận bản mới, và đổi luôn SHELL_VERSION trong js/appupdate.js cho
 // giống (tests/appupdate.test.mjs kiểm tra hai chỗ khớp nhau).
 
-const VERSION = 'v12';
+const VERSION = 'v14';
 // Mọi trang GitHub Pages của một tài khoản chung một nguồn gốc (khanh1605vn.github.io), nên chung cả bộ nhớ đệm. Tên
 // bộ nhớ đệm vỏ ứng dụng gắn với phạm vi (thư mục) của service worker, để một bản Bạn Đường khác trên cùng tài khoản
 // (bản thử, bản sao) không xoá hay ghi đè vỏ ứng dụng của /9router/ khi đổi bản.
@@ -49,6 +49,7 @@ const SHELL_FILES = [
   'js/alerts.js',
   'js/voice.js',
   'js/search.js',
+  'js/admin2025.js',
   'js/icons.js',
   'js/signs.js',
   'js/signart.js',
@@ -69,6 +70,9 @@ const SHELL_FILES = [
   'js/signlearn.js',
   'js/learnedsigns.js',
   'js/carbridge.js',
+  'js/communitydata.js',
+  'js/community.js',
+  'js/report.js',
   'js/appupdate.js',
   'js/ios.js',
   'js/compat.js',
@@ -78,6 +82,10 @@ const SHELL_FILES = [
   'icons/icon-192.png',
   'icons/icon-512.png',
   'icons/apple-touch-icon.png',
+  // Dữ liệu cộng đồng: nạp trước chỉ để lần mở đầu tiên khi mất mạng vẫn có. Khi chạy, tệp này đi qua nhánh cùng nguồn
+  // gốc chung (networkFirst, bỏ qua bộ nhớ đệm HTTP), nên bản mới trên máy chủ luôn tới mà không cần đổi VERSION; mất
+  // mạng thì dùng bản đã lưu gần nhất.
+  'data/community.json',
 ];
 
 // GitHub Pages trả mọi tệp kèm Cache-Control: max-age=600, nên nếu đi qua bộ nhớ đệm HTTP của trình duyệt thì trong 10

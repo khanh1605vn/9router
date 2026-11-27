@@ -3,7 +3,8 @@
 
 import { angleDiff, bearing, distance, nearestOnLine } from './geo.js';
 import { SPEED_MAX, SPEED_MIN, travelFor } from './learnedsigns.js';
-import { joinSays, locate, mapItems } from './signengine.js';
+import { joinSays, locate, mapItems, roadLimit } from './signengine.js';
+import { parseDirection } from './signs.js';
 import { APPLY_ANGLE, ARM_CHORD } from './signlearn.js';
 import { REPORT_TYPES } from './store.js';
 import { spokenDistance } from './tracker.js';
@@ -11,13 +12,29 @@ import { spokenDistance } from './tracker.js';
 const RAD = Math.PI / 180;
 const isNum = (v) => typeof v === 'number' && Number.isFinite(v);
 
-/** Tên hiển thị, câu đọc và biểu tượng của một điểm cảnh báo. */
-export function describePoint(p) {
+/**
+ * Tên hiển thị, câu đọc và biểu tượng của một điểm cảnh báo.
+ * roadLimit: giới hạn (km/h) của đường xe đang đi, hoặc null. Camera tốc độ không ghi giới hạn thì giới hạn này chỉ
+ * hiện trong tên (nói rõ là của đường đang đi), không đọc thành tiếng: dữ liệu không nói camera đo theo số nào.
+ */
+export function describePoint(p, { roadLimit: road = null } = {}) {
   if (p.kind === 'camera') {
     const limit = p.limit ? ` · giới hạn ${p.limit} km/h` : '';
     const say = p.limit ? `, giới hạn ${p.limit} ki lô mét trên giờ` : '';
-    if (p.sub === 'speed') return { title: `Camera bắn tốc độ${limit}`, say: `có camera bắn tốc độ${say}`, icon: 'camera' };
+    if (p.sub === 'speed') {
+      const roadNote = !p.limit && isNum(road) && road > 0 ? ` · giới hạn đường đang đi ${road} km/h` : '';
+      if (p.avg) {
+        return {
+          title: `Đoạn đo tốc độ trung bình${limit}${roadNote}`,
+          say: `có đoạn đo tốc độ trung bình${say}`,
+          icon: 'camera',
+        };
+      }
+      return { title: `Camera bắn tốc độ${limit}${roadNote}`, say: `có camera bắn tốc độ${say}`, icon: 'camera' };
+    }
     if (p.sub === 'redlight') return { title: 'Camera phạt vượt đèn đỏ', say: 'có camera phạt vượt đèn đỏ', icon: 'camera' };
+    if (p.enf === 'weight') return { title: 'Điểm kiểm soát tải trọng xe', say: 'có điểm kiểm soát tải trọng xe', icon: 'camera' };
+    if (p.enf === 'height') return { title: 'Điểm kiểm soát chiều cao xe', say: 'có điểm kiểm soát chiều cao xe', icon: 'camera' };
     return { title: 'Camera giám sát giao thông', say: 'có camera giám sát giao thông', icon: 'camera' };
   }
   if (p.kind === 'toll') return { title: p.name || 'Trạm thu phí', say: 'có trạm thu phí', icon: 'toll' };
@@ -36,6 +53,83 @@ export function describePoint(p) {
 
 const SETTING_OF = { camera: 'alertCamera', toll: 'alertToll', rail: 'alertRail', report: 'alertReport' };
 
+// Hướng ghi trên camera (direction / camera:direction, roaddata.js giữ ở p.dir):
+// - forward/backward trên một nút của đường (biết hướng vẽ p.wb): chiều xe chịu kiểm soát. Xe đi lệch chiều đó quá
+//   CAMERA_TRAVEL_TOLERANCE độ (đường bên kia của đường đôi, đi ngược lại) thì không báo.
+// - số độ: người vẽ bản đồ không thống nhất đó là hướng xe chạy hay hướng ống kính nhìn (ngược nhau 180°), nên chỉ
+//   dùng như một trục: xe đi gần trục đó theo chiều nào cũng báo; chỉ bỏ khi xe đi lệch trục quá CAMERA_AXIS_TOLERANCE
+//   độ (đường cắt ngang chỗ đặt camera).
+// - không có, không đọc được, both, forward/backward mà không biết hướng vẽ, không biết hướng xe: vẫn báo.
+// Hướng xe dùng để so: khi dẫn đường và điểm nằm trên tuyến phía trước thì là hướng của tuyến tại chỗ điểm đó (camera
+// ngay sau chỗ rẽ vẫn được báo sớm); ngoài ra là hướng GPS, chỉ khi xe chạy từ ALERT_MIN_SPEED trở lên.
+export const CAMERA_TRAVEL_TOLERANCE = 90;
+export const CAMERA_AXIS_TOLERANCE = 60;
+// Điểm tự đánh dấu và điểm cộng đồng có hướng (số độ, hướng xe chạy lúc đánh dấu): chỉ báo khi xe đi lệch không quá
+// chừng này (độ).
+export const POINT_FACING_TOLERANCE = 60;
+// m/s: dưới tốc độ này không báo điểm mới, và cũng là tốc độ từ đó hướng GPS được tin để lọc theo hướng. Hai việc dùng
+// chung một ngưỡng: nếu ngưỡng tin hướng cao hơn ngưỡng báo thì trong lúc kẹt xe (7–9 km/h) camera của chiều bên kia
+// được báo vì không có hướng để lọc.
+export const ALERT_MIN_SPEED = 2;
+// Hai điểm cùng loại (cùng họ, xem alertFamily) cách nhau không quá chừng này (m) coi là một: chỉ báo một lần.
+export const ALERT_DUP_M = 30;
+
+/** Camera có áp dụng cho xe đang đi theo hướng heading (độ) không. Không chắc thì luôn là có. */
+export function cameraApplies(p, heading) {
+  if (!p || p.kind !== 'camera' || !isNum(heading) || typeof p.dir !== 'string' || !p.dir) return true;
+  const d = parseDirection({ direction: p.dir }, ['direction']);
+  if (d.mode === 'forward' || d.mode === 'backward') {
+    if (!isNum(p.wb)) return true;
+    const travel = d.mode === 'forward' ? p.wb : (p.wb + 180) % 360;
+    return Math.abs(angleDiff(heading, travel)) <= CAMERA_TRAVEL_TOLERANCE;
+  }
+  if (d.mode === 'deg') {
+    return d.degs.some((deg) => {
+      const off = Math.abs(angleDiff(heading, deg));
+      return Math.min(off, 180 - off) <= CAMERA_AXIS_TOLERANCE;
+    });
+  }
+  return true;
+}
+
+/** Điểm có hướng dạng số (điểm tự đánh dấu, điểm cộng đồng) có áp dụng cho xe đi theo hướng heading không. */
+export function facingApplies(p, heading) {
+  const dir = p?.direction;
+  if (!Number.isInteger(dir) || !isNum(heading)) return true;
+  return Math.abs(angleDiff(heading, dir)) <= POINT_FACING_TOLERANCE;
+}
+
+/** Điểm có áp dụng cho hướng đi heading không (hướng camera của bản đồ và hướng số của điểm đánh dấu). */
+export const pointApplies = (p, heading) => cameraApplies(p, heading) && facingApplies(p, heading);
+
+// Họ của điểm tự đánh dấu và điểm cộng đồng không phải camera: chỉ các loại chắc chắn cùng nghĩa.
+const REPORT_FAMILY = { camspeed: 'cam:speed', camred: 'cam:redlight', camera: 'cam:traffic', hazard: 'hazard', closure: 'closure' };
+const COMMUNITY_FAMILY = { hazard: 'hazard', closure: 'closure' };
+
+/**
+ * Họ của một điểm: điểm của bản đồ, của dữ liệu cộng đồng và của người dùng cùng họ, gần nhau, là cùng một thứ ngoài
+ * đường. Camera theo loại (tốc độ, đèn đỏ, giám sát; kiểm soát tải trọng, chiều cao riêng). Loại khác không chắc cùng
+ * nghĩa thì mỗi điểm một họ riêng (không bao giờ gộp).
+ */
+export function alertFamily(p) {
+  if (p.kind === 'camera') return `cam:${p.enf || p.sub || 'traffic'}`;
+  if (p.kind === 'report') return REPORT_FAMILY[p.type] || `id:${p.id}`;
+  if (p.kind === 'community') return COMMUNITY_FAMILY[p.type] || `id:${p.id}`;
+  return p.kind === 'toll' ? 'toll' : `id:${p.id}`;
+}
+
+/** Thứ tự ưu tiên khi nhiều điểm là cùng một thứ: bản đồ, rồi dữ liệu cộng đồng, rồi điểm người dùng tự đánh dấu. */
+const sourceRank = (p) => (p.kind === 'report' ? 2 : p.src === 'community' ? 1 : 0);
+const sameThing = (a, b) => alertFamily(a) === alertFamily(b) && distance(a.coord, b.coord) <= ALERT_DUP_M;
+
+/** Hướng (độ) của tuyến dẫn đường ở đoạn index; đoạn quá ngắn thì lấy đoạn kế tiếp. null nếu không có. */
+function routeBearing(coords, index) {
+  for (let i = Math.max(0, index); i < coords.length - 1 && i < index + 5; i++) {
+    if (distance(coords[i], coords[i + 1]) >= 1) return bearing(coords[i], coords[i + 1]);
+  }
+  return null;
+}
+
 export class AlertEngine {
   constructor() {
     this.seen = new Map(); // id → thời điểm đã báo
@@ -47,15 +141,21 @@ export class AlertEngine {
    * @param points   danh sách điểm { id, kind, coord, … }
    * @param settings cài đặt bật/tắt từng loại
    * @param nav      khi đang dẫn đường: { route, seg, s } để chỉ báo điểm nằm trên tuyến phía trước
+   * @param opts     { roadLimit: giới hạn (km/h) của đường đang đi, chỉ để hiện kèm camera tốc độ không ghi giới hạn }
+   * Điểm có hướng (camera của bản đồ, điểm đánh dấu có direction) chỉ báo khi đúng chiều (pointApplies). Nhiều điểm
+   * cùng họ trong ALERT_DUP_M (bản đồ, cộng đồng, tự đánh dấu) chỉ báo một lần, sau khi đã lọc theo hướng: camera
+   * của chiều bên kia không bao giờ làm mất cảnh báo của chiều xe đang đi.
    * @returns { active: { point, distance, info } | null, fired: boolean, say: string | null }
    */
-  update(fix, points, settings, nav = null) {
+  update(fix, points, settings, nav = null, { roadLimit: road = null } = {}) {
     const speed = fix.speed || 0;
     const reach = Math.max(300, Math.min(1200, speed * 22));
+    const gps = isNum(fix.heading) && speed >= ALERT_MIN_SPEED ? fix.heading : null;
+    const enabled = (p) => !(settings && settings[SETTING_OF[p.kind]] === false);
     const candidates = [];
 
     for (const p of points) {
-      if (settings && settings[SETTING_OF[p.kind]] === false) continue;
+      if (!enabled(p)) continue;
       const d = distance(fix.coord, p.coord);
       if (d > reach) {
         // Đi xa hẳn rồi thì lần sau quay lại vẫn được báo.
@@ -63,6 +163,7 @@ export class AlertEngine {
         continue;
       }
       let ahead = null;
+      let heading = gps;
       if (nav) {
         const { route, seg, s } = nav;
         let to = seg + 1;
@@ -70,7 +171,11 @@ export class AlertEngine {
         const hit = nearestOnLine(p.coord, route.coords, seg, to);
         if (hit && hit.dist <= 40) {
           const along = route.cum[hit.index] + hit.t * (route.cum[hit.index + 1] - route.cum[hit.index]) - s;
-          if (along >= -10 && along <= reach) ahead = Math.max(0, along);
+          if (along >= -10 && along <= reach) {
+            ahead = Math.max(0, along);
+            // Điểm trên tuyến phía trước: so hướng của điểm với hướng tuyến tại đó, không với hướng xe lúc này.
+            heading = routeBearing(route.coords, hit.index) ?? gps;
+          }
         }
       } else if (d < 40) {
         ahead = d;
@@ -78,26 +183,42 @@ export class AlertEngine {
         const diff = Math.abs(angleDiff(fix.heading, bearing(fix.coord, p.coord)));
         if (diff < 75 && d * Math.sin(diff * RAD) <= 45) ahead = d;
       }
-      if (ahead != null) candidates.push({ point: p, distance: ahead });
+      if (ahead == null) continue;
+      if (!pointApplies(p, heading)) continue; // camera hay điểm của chiều đường bên kia, của đường cắt ngang
+      candidates.push({ point: p, distance: ahead, heading });
     }
 
     candidates.sort((a, b) => a.distance - b.distance);
     const current = candidates.find((c) => c.point.id === this.activeId);
-    const fresh = speed >= 2 ? candidates.find((c) => !this.seen.has(c.point.id)) : null;
+    let fresh = null;
+    let same = [];
+    if (speed >= ALERT_MIN_SPEED) {
+      const first = candidates.find((c) => !this.seen.has(c.point.id));
+      if (first) {
+        // Cùng một thứ có trong nhiều nguồn (bản đồ, cộng đồng, tự đánh dấu): chọn một điểm theo thứ tự ưu tiên.
+        same = candidates.filter((c) => !this.seen.has(c.point.id) && sameThing(c.point, first.point));
+        fresh = same.reduce((a, b) => (sourceRank(b.point) < sourceRank(a.point) ? b : a), first);
+      }
+    }
 
     let fired = false;
     let chosen = current || null;
     if (fresh && (!current || fresh.distance < current.distance)) {
       chosen = fresh;
       fired = true;
-      this.seen.set(fresh.point.id, fix.time);
+      for (const c of same) this.seen.set(c.point.id, fix.time);
+      // Các điểm khác là cùng thứ đó (kể cả điểm chưa vào tầm báo, ở xa hơn vài mét) coi như đã báo: không báo lại.
+      for (const p of points) {
+        if (p.id === fresh.point.id || this.seen.has(p.id) || !enabled(p)) continue;
+        if (sameThing(p, fresh.point) && pointApplies(p, fresh.heading)) this.seen.set(p.id, fix.time);
+      }
     }
     this.activeId = chosen ? chosen.point.id : null;
     if (!chosen) return { active: null, fired: false, say: null };
 
-    const info = describePoint(chosen.point);
+    const info = describePoint(chosen.point, { roadLimit: road });
     return {
-      active: { ...chosen, info, reach },
+      active: { point: chosen.point, distance: chosen.distance, info, reach },
       fired,
       say: fired ? `Còn ${spokenDistance(chosen.distance)}, ${info.say}` : null,
     };
@@ -625,6 +746,8 @@ export class SpeedMonitor {
   constructor() {
     this.limit = null; // giới hạn của đoạn đường hiện tại (km/h)
     this.wayId = null;
+    this.way = null; // đường đang đi (đã chắc)
+    this.dir = 0; // chiều đi đã biết trên đường đó (+1/−1), 0 khi chưa biết
     this.candidate = null;
     this.candidateCount = 0;
     this.missCount = 0;
@@ -639,17 +762,24 @@ export class SpeedMonitor {
    * @param match     kết quả RoadData.matchWay (hoặc null)
    * @param camera    giới hạn từ biển do camera ghi nhận (CameraLimit.current, hoặc một số km/h), hoặc null
    * @param camSpeed  cài đặt "Dùng biển tốc độ do camera ghi nhận cho đồng hồ tốc độ"; false thì bỏ qua camera
+   * @param now       Date cho giới hạn theo giờ (maxspeed:conditional); mặc định lấy theo fix.time
+   * Giới hạn của đường tính theo chiều đi (roadLimit): maxspeed:forward/backward theo chiều đã biết trên đường đó (giữ
+   * khi xe dừng), chưa biết chiều thì số nhỏ hơn.
    * Giới hạn hiện ra là min(bản đồ ?? tốc độ tối đa tự đặt, camera): camera không bao giờ nâng giới hạn, kể cả giới
    * hạn tự đặt (customMax, chỉ dùng khi bản đồ không có). source là 'camera' chỉ khi trị số của camera thấp hơn hẳn
    * (hoặc cả bản đồ lẫn tự đặt đều không có).
    * @returns { limit, source: 'road'|'camera'|'custom'|null, level: 'ok'|'near'|'over', sound: null|'voice'|'beep',
    *            announce: number|null }
    */
-  update(fix, match, { vehicle = 'car', tolerance = 3, customMax = 0, hasData = true, camera = null, camSpeed = true } = {}) {
+  update(fix, match, { vehicle = 'car', tolerance = 3, customMax = 0, hasData = true, camera = null, camSpeed = true, now = null } = {}) {
+    const when = now instanceof Date ? now : new Date(isNum(fix.time) ? fix.time : Date.now());
     if (match) {
       this.missCount = 0;
+      const dir = match.dir === 1 || match.dir === -1 ? match.dir : 0;
       if (match.way.id === this.wayId) {
         this.candidate = null;
+        this.way = match.way;
+        if (dir) this.dir = dir;
       } else {
         // Phải khớp hai lần liên tiếp mới đổi đường, tránh nhảy số khi qua giao lộ.
         if (this.candidate === match.way.id) this.candidateCount++;
@@ -659,12 +789,17 @@ export class SpeedMonitor {
         }
         if (this.candidateCount >= WAY_CONFIRM_FIXES || this.wayId == null) {
           this.wayId = match.way.id;
-          this.limit = vehicle === 'moto' ? match.way.m : match.way.c;
+          this.way = match.way;
+          this.dir = dir;
           this.candidate = null;
         }
       }
+      // Tính lại mỗi lần: chiều đi có thể mới biết, khung giờ có thể vừa bắt đầu hay vừa hết.
+      if (this.way) this.limit = roadLimit(this.way, vehicle, this.dir, when);
     } else if (++this.missCount >= WAY_LOST_FIXES || !hasData) {
       this.wayId = null;
+      this.way = null;
+      this.dir = 0;
       this.limit = null;
     }
 

@@ -100,10 +100,16 @@ jobs:
           set -euo pipefail
           export LC_ALL=C
           # Đúng các mục của `npm run dist`, cộng .nojekyll.
-          want=$(printf '%s\n' .nojekyll css icons index.html js manifest.webmanifest models sw.js vendor | sort)
+          want=$(printf '%s\n' .nojekyll css data icons index.html js manifest.webmanifest models sw.js vendor | sort)
           have=$(find . -mindepth 1 -maxdepth 1 -printf '%f\n' | sort)
           if [ "$have" != "$want" ]; then
             echo "::error::dist có mục lạ / unexpected entries in dist:"; diff <(echo "$want") <(echo "$have") || true
+            exit 1
+          fi
+          # data/ chỉ có đúng community.json (dist chép một tệp, không cả thư mục).
+          data=$(find data -mindepth 1 -printf '%P\n' | sort)
+          if [ "$data" != "community.json" ]; then
+            echo "::error::data/ chỉ được có community.json / data/ must contain only community.json:"; echo "$data"
             exit 1
           fi
           # Tệp ẩn duy nhất được phép là .nojekyll (bước tải lên bật include-hidden-files để giữ tệp này).
