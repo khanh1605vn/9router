@@ -303,7 +303,7 @@ test('classifyNode: vạch người đi bộ', () => {
 });
 
 test('classifyNode: gờ giảm tốc và vạch giảm tốc', () => {
-  for (const v of ['bump', 'hump', 'table', 'cushion', 'yes']) {
+  for (const v of ['bump', 'hump', 'table', 'cushion', 'yes', 'mini_bumps', 'choked_table']) {
     const f = one({ traffic_calming: v });
     assert.equal(f.code, 'W.221b');
     assert.equal(f.cat, 'calming');
@@ -805,4 +805,47 @@ test('signDataUrl: data URL mã hoá đúng nội dung SVG', () => {
   assert.ok(url.startsWith('data:image/svg+xml;charset=utf-8,'));
   assert.equal(decodeURIComponent(url.slice(url.indexOf(',') + 1)), signSvg(art, { value: 60, size: 40 }));
   assert.ok(!/[<>"#\s]/.test(url.slice(url.indexOf(',') + 1)));
+});
+
+// ------------------------------------------------------------------------------------------
+// Biển suy ra từ thẻ sẵn có (PLAN 1.6)
+// ------------------------------------------------------------------------------------------
+
+test('classifyWay: tốc độ tối thiểu, đường ngầm, đường thu phí; giá trị lạ thì không có', () => {
+  const w = classifyWay({ minspeed: '60', ford: 'yes', toll: 'yes' });
+  assert.deepEqual([w.minspeed, w.ford, w.toll], [60, true, true]);
+  const none = classifyWay({ minspeed: 'VN:motorway', ford: 'stepping_stones', toll: 'no' });
+  assert.deepEqual([none.minspeed, none.ford, none.toll], [null, false, false]);
+  assert.deepEqual([classifyWay(undefined).minspeed, classifyWay(undefined).ford, classifyWay(undefined).toll], [null, false, false]);
+});
+
+test('classifyNode: nút ford=yes là đường ngầm W.216a (suy ra, không phải biển thật)', () => {
+  const f = one({ ford: 'yes' });
+  assert.equal(f.code, 'W.216a');
+  assert.equal(f.cat, 'danger');
+  assert.equal(f.derived, true);
+  assert.match(f.note, /không phải biển thật/);
+  assert.deepEqual(classifyNode({ ford: 'boat' }), []);
+});
+
+test('derived: bắt đầu đường cao tốc (không kèm con số), tốc độ tối thiểu, đường ngầm, đường thu phí, cấm theo giờ', () => {
+  const mw = derived('motorway');
+  assert.deepEqual([mw.code, mw.title, mw.say, mw.value], ['IE.452', 'Bắt đầu đường cao tốc', 'bắt đầu đường cao tốc', null]);
+  assert.ok(!/\d/.test(mw.title + mw.say), 'không có trị số tốc độ');
+  const min = derived('minspeed', { n: 60 });
+  assert.deepEqual([min.code, min.kind, min.title, min.say, min.value], ['R.306', 'minspeed:60', 'Tốc độ tối thiểu 60 km/h', 'tốc độ tối thiểu 60 ki lô mét trên giờ', 60]);
+  assert.deepEqual([derived('ford').code, derived('ford').say], ['W.216a', 'đường ngầm, chú ý nước']);
+  const toll = derived('toll');
+  assert.deepEqual([toll.code, toll.cat, toll.title], [null, 'info', 'Đường có thu phí']);
+  const timed = derived('noAccess', { vehicle: 'car', timed: true });
+  assert.deepEqual([timed.code, timed.say], ['P.103a', 'đường cấm ô tô']);
+  assert.match(timed.note, /theo giờ/);
+  assert.doesNotMatch(derived('noAccess', { vehicle: 'car' }).note, /theo giờ/);
+  for (const f of [mw, min, derived('ford'), toll, timed]) {
+    assert.equal(f.derived, true, f.kind);
+    assert.ok(typeof f.note === 'string' && f.note.length > 10, f.kind);
+    assert.ok(f.kind && f.title && f.say && f.cat && f.art, f.kind);
+    assert.deepEqual(f.dirKeys, []);
+    assertWellFormed(signSvg(f.art, { value: f.value }), f.kind);
+  }
 });

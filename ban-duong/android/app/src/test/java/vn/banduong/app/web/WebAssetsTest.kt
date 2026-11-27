@@ -39,6 +39,7 @@ class WebAssetsTest {
         assertEquals("application/octet-stream", WebAssets.mimeTypeFor("models/sign-det.int8.tflite"))
         assertEquals("image/svg+xml", WebAssets.mimeTypeFor("icons/icon.svg"))
         assertEquals("text/html", WebAssets.mimeTypeFor("index.html"))
+        assertEquals("application/json", WebAssets.mimeTypeFor("data/community.json"))
     }
 
     @Test
@@ -94,13 +95,22 @@ class WebAssetsTest {
     fun webAppIsBundledInAssets() {
         val ctx = ApplicationProvider.getApplicationContext<Context>()
         for (p in listOf("index.html", "manifest.webmanifest", "sw.js", "css/app.css", "js/main.js", "icons/icon.svg",
-            "vendor/maplibre-gl/maplibre-gl.js", "models/labels.json")) {
+            "vendor/maplibre-gl/maplibre-gl.js", "models/labels.json", "data/community.json",
+            "js/community.js", "js/communitydata.js", "js/report.js")) {
             ctx.assets.open("www/$p").use { assertNotNull(p, it.read()) }
         }
+        // Robolectric liệt kê cả tệp trong thư mục con ("data/community.json"), thiết bị thật chỉ liệt kê tên ở mức
+        // trên cùng ("data"): xét cả hai dạng.
         val top = ctx.assets.list("www")!!.toSet()
-        assertFalse("tests/ không được đóng gói", "tests" in top)
-        assertFalse("tools/ không được đóng gói", "tools" in top)
-        assertFalse("android/ không được đóng gói", "android" in top)
+        fun has(dir: String) = top.any { it == dir || it.startsWith("$dir/") }
+        assertTrue("data/ (dữ liệu cộng đồng) phải được đóng gói", has("data"))
+        // data/ chỉ có đúng community.json (webDistEntries chép một tệp, không cả thư mục).
+        val dataFiles = ctx.assets.list("www/data")!!.map { it.substringAfterLast('/') }.toSet()
+        assertEquals(setOf("community.json"), dataFiles)
+        assertTrue(top.filter { it.startsWith("data/") }.all { it == "data/community.json" })
+        assertFalse("tests/ không được đóng gói", has("tests"))
+        assertFalse("tools/ không được đóng gói", has("tools"))
+        assertFalse("android/ không được đóng gói", has("android"))
         assertFalse("package.json không được đóng gói", "package.json" in top)
     }
 }

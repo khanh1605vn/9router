@@ -46,6 +46,27 @@ import {
 } from './carbridge.js';
 import { planPrompts, QuietGate, SHELL_VERSION, SW_RELOAD_TEXT, SwUpdateWatcher } from './appupdate.js';
 import { detectApple, installHint, installSteps, iphoneNotes, requestPersistence, voiceMissingHint } from './ios.js';
+import { inNativeApp } from './obdnative.js';
+import {
+  CommunityData,
+  communitySummary,
+  detailLines,
+  withOwnInfo,
+} from './community.js';
+import { isoDate } from './communitydata.js';
+import {
+  captureHeading,
+  exportForRepo,
+  githubIssueUrl,
+  localPointInfo,
+  QUICK_TYPE,
+  REPORT_MENU,
+  reportLabel,
+  reportMode,
+  sendable,
+  shareText,
+  SPEED_CHOICES,
+} from './report.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -102,6 +123,8 @@ const state = {
 };
 
 const locator = new LocationService();
+// Dữ liệu cộng đồng (data/community.json); trong ứng dụng Android tải thêm bản trên GitHub Pages.
+const community = new CommunityData({ native: () => inNativeApp() });
 const roads = new RoadData();
 const alerts = new AlertEngine();
 const signs = new SignEngine();
@@ -376,7 +399,32 @@ function renderIosNotes() {
 
 // ---------- Điểm cảnh báo trên bản đồ ----------
 
-const reportPoints = () => store.reports.map((r) => ({ id: r.id, kind: 'report', type: r.type, coord: r.coord }));
+const reportPoints = () =>
+  store.reports.map((r) => {
+    const info = localPointInfo(r);
+    return {
+      id: r.id,
+      kind: 'report',
+      type: r.type,
+      coord: r.coord,
+      direction: Number.isInteger(r.direction) ? r.direction : null,
+      ...(info ? { info } : {}),
+    };
+  });
+
+/** Điểm tự đánh dấu dùng để cảnh báo khi lái (bỏ loại chỉ để gửi đi, như "Biển báo đã tháo"). */
+const warnReportPoints = () => reportPoints().filter((p) => REPORT_TYPES[p.type]?.warn !== false);
+
+/** Điểm dữ liệu cộng đồng (tắt công tắc "Dùng dữ liệu cộng đồng" thì không có). */
+const communityOn = () => store.settings.communityData !== false;
+
+const COMMUNITY_OFF_TEXT = 'Dữ liệu cộng đồng: đang tắt, ứng dụng không tải tệp này.';
+
+/** Câu "Dữ liệu cộng đồng: N điểm, cập nhật …" trong phần cài đặt (đang tắt thì nói rõ là không tải). */
+function renderCommunityLine() {
+  const line = $('communityLine');
+  if (line) line.textContent = communityOn() ? communitySummary(community) : COMMUNITY_OFF_TEXT;
+}
 
 /** Câu "Dữ liệu đường quanh đây cập nhật lúc …" trong phần cài đặt (quanh xe; chưa có GPS thì quanh tâm bản đồ). */
 function renderRoadFreshness() {
@@ -390,6 +438,7 @@ function refreshPoints() {
   const list = [
     ...roads.allPoints().map((p) => ({ ...p, icon: describePoint(p).icon })),
     ...reportPoints().map((p) => ({ ...p, icon: REPORT_TYPES[p.type].icon })),
+    ...(communityOn() ? community.points : []),
   ];
   map.setPoints(list);
 }
@@ -397,12 +446,15 @@ function refreshPoints() {
 function showPoint(props) {
   const report = store.reports.find((r) => r.id === props.id);
   if (report) {
-    const def = REPORT_TYPES[report.type];
     const when = new Date(report.time);
     const body = el(
       'div',
       { class: 'view' },
       el('p', { class: 'sub' }, `Bạn đánh dấu lúc ${formatClock(when)} ngày ${when.toLocaleDateString('vi-VN')}.`),
+      REPORT_TYPES[report.type]?.warn === false
+        ? el('p', { class: 'note' }, 'Loại này chỉ để gửi cho chủ ứng dụng sửa bản đồ, ứng dụng không nhắc khi lái.')
+        : null,
+      sendable(report.type) && reportMode(currentKmh()) === 'full' ? sendBox(report) : null,
       el(
         'button',
         {
@@ -418,7 +470,15 @@ function showPoint(props) {
         el('span', {}, 'Xoá điểm này')
       )
     );
-    openModal(def.label, body);
+    openModal(reportLabel(report), body);
+    return;
+  }
+  const shared = community.points.find((p) => p.id === props.id);
+  if (shared) {
+    openModal(
+      shared.info.title,
+      el('div', { class: 'view' }, ...detailLines(shared).map((t) => el('p', { class: 'sub' }, t)))
+    );
     return;
   }
   const point = roads.allPoints().find((p) => p.id === props.id);
@@ -429,41 +489,197 @@ function showPoint(props) {
   );
 }
 
+/** Lưu một điểm đánh dấu tại vị trí hiện tại (chưa có GPS thì tâm bản đồ), kèm hướng xe chạy nếu biết. */
+function saveReport(type, extra = {}) {
+  const coord = state.fix?.coord || map.center;
+  const direction = state.fix ? captureHeading(state.fix) : null;
+  const report = store.addReport(type, coord, { ...extra, ...(direction != null ? { direction } : {}) });
+  voice.chime('done');
+  return report;
+}
+
+/**
+ * Nút "Báo cáo". Đang chạy nhanh hơn QUICK_KMH: chỉ một nút lớn "Camera ở đây" (lưu trên máy, không gửi gì). Đứng yên
+ * hoặc đi chậm: chọn loại, lưu trên máy, rồi có thể gửi cho chủ ứng dụng.
+ */
 function openReport() {
   voice.unlock();
-  const coord = state.fix?.coord || map.center;
-  const grid = el('div', { class: 'report-grid' });
-  for (const [type, def] of Object.entries(REPORT_TYPES)) {
+  if (reportMode(currentKmh()) === 'quick') openQuickReport();
+  else openFullReport();
+}
+
+function openQuickReport() {
+  const btn = el(
+    'button',
+    {
+      class: 'btn primary report-quick',
+      type: 'button',
+      onclick: () => {
+        saveReport(QUICK_TYPE);
+        closeOverlays();
+        toast('Đã lưu camera trên thiết bị này. Khi dừng xe, chạm vào điểm trên bản đồ để gửi cho chủ ứng dụng.');
+      },
+    },
+    el('span', { html: glyphIcon('camera', 30) }),
+    el('span', {}, 'Camera ở đây')
+  );
+  openModal(
+    'Báo cáo',
+    el('div', { class: 'view' }, btn, el('p', { class: 'note' }, 'Đang chạy xe: chỉ lưu nhanh. Dừng xe để chọn loại khác và gửi đi.'))
+  );
+}
+
+function openFullReport() {
+  const where = state.fix ? 'tại vị trí hiện tại của bạn' : 'tại tâm bản đồ (chưa có vị trí GPS)';
+  const tile = (type, onclick) => {
+    const def = REPORT_TYPES[type];
     const badge = el('span', { class: 'report-badge', html: glyphIcon(def.icon, 26) });
     badge.style.background = GLYPH_COLORS[def.icon];
+    return el('button', { class: 'report-btn', type: 'button', onclick }, badge, el('span', {}, def.label));
+  };
+  const done = (report) => {
+    toast(`Đã lưu: ${reportLabel(report)}.`);
+    if (sendable(report.type)) openSendReport(report);
+    else closeOverlays();
+  };
+  const main = el('div', { class: 'report-grid' });
+  for (const type of REPORT_MENU) {
+    main.append(
+      tile(type, () => {
+        if (type === 'speed') openSpeedChoice();
+        else if (type === 'signnew') openSignCode();
+        else done(saveReport(type));
+      })
+    );
+  }
+  const local = el('div', { class: 'report-grid' });
+  const localTypes = Object.keys(REPORT_TYPES).filter((type) => !REPORT_MENU.includes(type));
+  for (const type of localTypes) local.append(tile(type, () => done(saveReport(type))));
+  // Trong nhóm này có loại vẫn gửi được (camera phạt nguội, điểm nguy hiểm): ghi rõ, để tiêu đề không nói sai.
+  const sendLocal = localTypes.filter((type) => sendable(type)).map((type) => REPORT_TYPES[type].label.toLowerCase());
+  const localNote = sendLocal.length
+    ? `Loại ${sendLocal.join(', ')} gửi được cho chủ ứng dụng; các loại còn lại chỉ lưu trên thiết bị này.`
+    : 'Các loại này chỉ lưu trên thiết bị này.';
+  openModal(
+    'Báo cáo',
+    el(
+      'div',
+      { class: 'view', 'data-report': 'full' },
+      el('p', { class: 'sub' }, `Điểm được đặt ${where} và lưu trên thiết bị này; lần sau đi qua, ứng dụng sẽ nhắc bạn. Sau đó bạn có thể gửi cho chủ ứng dụng để thêm vào dữ liệu cộng đồng.`),
+      main,
+      el('h3', { class: 'report-h' }, 'Loại khác'),
+      el('p', { class: 'note' }, localNote),
+      local
+    )
+  );
+}
+
+function openSpeedChoice() {
+  const grid = el('div', { class: 'report-grid speed-grid' });
+  for (const v of SPEED_CHOICES) {
     grid.append(
       el(
         'button',
         {
-          class: 'report-btn',
+          class: 'report-btn speed-btn',
           type: 'button',
           onclick: () => {
-            store.addReport(type, coord);
-            closeOverlays();
-            voice.chime('done');
-            toast(`Đã đánh dấu: ${def.label}.`);
+            const report = saveReport('speed', { value: v });
+            toast(`Đã lưu: ${reportLabel(report)}.`);
+            openSendReport(report);
           },
         },
-        badge,
-        el('span', {}, def.label)
+        el('b', {}, String(v)),
+        el('span', {}, 'km/h')
       )
     );
   }
-  const where = state.fix ? 'tại vị trí hiện tại của bạn' : 'tại tâm bản đồ (chưa có vị trí GPS)';
+  openModal('Tốc độ tối đa mới', el('div', { class: 'view', 'data-report': 'full' }, el('p', { class: 'sub' }, 'Chọn số ghi trên biển mới.'), grid));
+}
+
+function openSignCode() {
+  const input = el('input', {
+    class: 'report-code',
+    type: 'text',
+    inputmode: 'text',
+    autocomplete: 'off',
+    maxlength: '8',
+    placeholder: 'Ví dụ P.103a',
+    'aria-label': 'Mã biển (nếu biết)',
+  });
+  const save = () => {
+    const code = input.value.trim();
+    const report = saveReport('signnew', code ? { code } : {});
+    toast(code && !report.code ? 'Mã biển không đúng dạng, đã lưu không kèm mã.' : `Đã lưu: ${reportLabel(report)}.`);
+    openSendReport(report);
+  };
   openModal(
-    'Đánh dấu điểm cảnh báo',
+    'Biển báo mới',
     el(
       'div',
-      { class: 'view' },
-      el('p', { class: 'sub' }, `Điểm sẽ được đặt ${where} và lưu trên thiết bị này. Lần sau đi qua, ứng dụng sẽ nhắc bạn.`),
-      grid
+      { class: 'view', 'data-report': 'full' },
+      el('p', { class: 'sub' }, 'Nếu biết mã biển (in ở QCVN 41:2024, ví dụ P.103a, W.207b) thì ghi vào; không biết thì để trống.'),
+      input,
+      el('button', { class: 'btn primary', type: 'button', onclick: save }, el('span', {}, 'Lưu'))
     )
   );
+}
+
+/** Các nút gửi một điểm cho chủ ứng dụng: chia sẻ hoặc chép chữ (Zalo…), và mở trang tạo issue trên GitHub. */
+function sendBox(report) {
+  const text = shareText(report);
+  const share = async () => {
+    try {
+      if (typeof navigator.share === 'function') {
+        await navigator.share({ title: 'Báo cáo Bạn Đường', text });
+        return;
+      }
+    } catch (err) {
+      if (err?.name === 'AbortError') return; // người dùng tự đóng hộp chia sẻ
+    }
+    try {
+      await navigator.clipboard.writeText(text);
+      toast('Đã chép nội dung báo cáo. Dán vào Zalo hoặc tin nhắn để gửi cho chủ ứng dụng.');
+    } catch {
+      toast('Không chép được. Hãy dùng nút “Gửi qua GitHub”.');
+    }
+  };
+  return el(
+    'div',
+    { class: 'report-send' },
+    el('h3', { class: 'report-h' }, 'Gửi cho chủ ứng dụng'),
+    el('pre', { class: 'report-text' }, text),
+    el(
+      'div',
+      { class: 'row wrap' },
+      el('button', { class: 'btn primary', type: 'button', onclick: share }, el('span', { html: lineIcon('share', 18) }), el('span', {}, 'Chia sẻ hoặc chép')),
+      el('a', { class: 'btn', href: githubIssueUrl(report), target: '_blank', rel: 'noopener noreferrer' }, el('span', {}, 'Gửi qua GitHub'))
+    ),
+    el(
+      'p',
+      { class: 'note' },
+      GITHUB_PRIVACY_NOTE
+    )
+  );
+}
+
+// Lời nhắc dưới hộp gửi: issue GitHub công khai có giờ tạo, gắn với tài khoản, nên gửi ngay tại chỗ là công khai
+// "tài khoản này ở đây lúc này", dù nội dung không có giờ phút.
+const GITHUB_PRIVACY_NOTE =
+  'Chỉ gửi ngày, vị trí và hướng xe chạy; nội dung không có tên, số điện thoại hay giờ phút. Issue trên GitHub là ' +
+  'công khai, hiện tên tài khoản GitHub của bạn và giờ tạo issue: ai đọc cũng biết bạn ở chỗ này lúc nào. Nếu ngại, ' +
+  'hãy gửi sau, hoặc gửi riêng cho chủ ứng dụng qua Zalo hay tệp xuất. Chủ ứng dụng kiểm tra tại chỗ trước khi thêm ' +
+  'vào dữ liệu cộng đồng.';
+
+function openSendReport(report) {
+  openModal(`Đã lưu: ${reportLabel(report)}`, el('div', { class: 'view', 'data-report': 'full' }, sendBox(report)));
+}
+
+/** Đang mở phần báo cáo đầy đủ mà xe bắt đầu chạy nhanh: thu về nút "Camera ở đây". */
+function guardReportWhileMoving() {
+  if ($('modal').hidden || reportMode(currentKmh()) !== 'quick') return;
+  if ($('modalBody').querySelector('[data-report="full"]')) openQuickReport();
+  else for (const n of $('modalBody').querySelectorAll('.report-send')) n.hidden = true; // hộp chi tiết một điểm
 }
 
 // ---------- Tốc độ và cảnh báo ----------
@@ -985,8 +1201,14 @@ function onFix(fix) {
 
   if (driving) {
     // Đường ngang đường sắt nay do bộ máy biển báo đọc, nên không đưa vào bộ cảnh báo điểm nữa.
-    const near = [...roads.pointsNear(fix.coord, 1300).filter((p) => p.kind !== 'rail'), ...reportPoints()];
-    const result = alerts.update(fix, near, s, nav);
+    // Điểm bản đồ, điểm tự đánh dấu và dữ liệu cộng đồng đi qua cùng một bộ cảnh báo. AlertEngine lọc theo hướng
+    // trước (điểm có hướng chỉ báo cho xe chạy đúng chiều), rồi mới gộp các điểm là cùng một thứ (bản đồ thắng, rồi
+    // cộng đồng, rồi tự đánh dấu): camera của chiều bên kia không làm mất cảnh báo của chiều xe đang đi.
+    const osm = roads.pointsNear(fix.coord, 1300).filter((p) => p.kind !== 'rail');
+    const shared = communityOn() ? community.near(fix.coord, 1300) : [];
+    const near = [...osm, ...warnReportPoints(), ...shared];
+    // Camera tốc độ không ghi giới hạn: tên trên thanh cảnh báo kèm giới hạn của đường đang đi (chỉ hiện, không đọc).
+    const result = withOwnInfo(alerts.update(fix, near, s, nav, { roadLimit: speedMon.limit }));
     const signSay = signSpeech(sr, s); // tắt "Đọc giới hạn tốc độ khi thay đổi" thì câu này không có biển tốc độ
     if (s.speakLimit !== false) {
       for (const it of sr.fired) {
@@ -1018,6 +1240,8 @@ function onFix(fix) {
       startDrive(true);
     }
   }
+
+  guardReportWhileMoving();
 
   if (!fix.simulated) {
     const status = $('gpsStatus');
@@ -1744,6 +1968,8 @@ function renderSettings() {
   $('optCamera').checked = s.alertCamera;
   $('optToll').checked = s.alertToll;
   $('optReport').checked = s.alertReport;
+  $('optCommunity').checked = s.communityData !== false;
+  renderCommunityLine();
   for (const c of SIGN_CATEGORIES) $(signOptId(c)).checked = categoryEnabled(c.key, s);
   $('optObdSpeed').checked = s.obdUseSpeed;
   $('optCarUi').value = s.carUi;
@@ -1756,8 +1982,9 @@ function renderSettings() {
   const n = store.reports.length;
   $('reportCount').textContent = n
     ? `Bạn đang có ${n} điểm đánh dấu trên thiết bị này. Xuất tệp để sao lưu hoặc gửi cho người khác; nhập tệp để thêm điểm từ người khác.`
-    : 'Bạn chưa đánh dấu điểm nào. Bấm nút tam giác cảnh báo trên bản đồ khi đi qua nơi cần nhớ.';
+    : 'Bạn chưa đánh dấu điểm nào. Bấm nút “Báo cáo” trên bản đồ khi đi qua nơi cần nhớ.';
   $('btnExport').disabled = n === 0;
+  $('btnExportRepo').disabled = !store.reports.some((r) => sendable(r.type) && REPORT_TYPES[r.type]);
   renderRoadFreshness();
 
   const hint = $('voiceState').querySelector('small');
@@ -1789,6 +2016,7 @@ function bindSettings() {
     optCamera: 'alertCamera',
     optToll: 'alertToll',
     optReport: 'alertReport',
+    optCommunity: 'communityData',
     optObdSpeed: 'obdUseSpeed',
     optAwake: 'keepAwake',
   };
@@ -1843,6 +2071,20 @@ function bindSettings() {
     const data = { app: 'ban-duong', version: 1, reports: store.reports };
     const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
     const a = el('a', { href: url, download: `ban-duong-diem-danh-dau-${new Date().toISOString().slice(0, 10)}.json` });
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  });
+  // Tệp cho chủ ứng dụng: các điểm gửi vào kho được, theo định dạng mục của data/community.json (không có giờ phút).
+  $('btnExportRepo').addEventListener('click', () => {
+    const data = exportForRepo(store.reports, { today: isoDate() });
+    if (!data.items.length) {
+      toast('Chưa có điểm nào gửi vào dữ liệu cộng đồng được.');
+      return;
+    }
+    const url = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' }));
+    const a = el('a', { href: url, download: `ban-duong-bao-cao-${data.exported}.json` });
     document.body.append(a);
     a.click();
     a.remove();
@@ -2025,9 +2267,24 @@ async function boot() {
   refreshPoints();
 
   roads.onUpdate(refreshPoints);
+  let communityWas = communityOn();
   store.onChange((what) => {
     if (what === 'reports') refreshPoints();
+    if (what === 'settings' && communityOn() !== communityWas) {
+      communityWas = communityOn();
+      // Tắt "Dùng dữ liệu cộng đồng" thì thôi tải hẳn (không chỉ ẩn điểm): ứng dụng Android không liên lạc GitHub Pages.
+      if (communityWas) community.start();
+      else community.stop();
+      refreshPoints();
+      renderCommunityLine();
+    }
   });
+  community.onChange(() => {
+    refreshPoints();
+    renderCommunityLine();
+  });
+  // Tải ngay rồi mỗi 6 giờ; lỗi mạng thì dùng bản đã lưu. Công tắc "Dùng dữ liệu cộng đồng" tắt thì không tải.
+  if (communityOn()) community.start();
   camctl.init(); // không mở camera: chỉ đọc kho biển đã học và labels.json
   if (carBridge) {
     state.camFeed = cameraStatus(camctl.state);

@@ -75,7 +75,7 @@ export const SW_RELOAD_TEXT = 'Đã có bản mới, bấm để tải lại';
  * nắm trang, trang hỏi nó là bản nào; trùng bản này nghĩa là trang đã chạy mã mới (vỏ ứng dụng ưu tiên mạng, hay vừa cập
  * nhật bản cài Android) nên không mời tải lại.
  */
-export const SHELL_VERSION = 'v13';
+export const SHELL_VERSION = 'v14';
 
 /** Hạn chờ service worker trả lời "bạn là bản nào?" (ms). Không trả lời thì coi như bản khác. */
 export const SW_VERSION_WAIT_MS = 3000;

@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildQuery,
+  CACHE_VERSION,
   CELL,
   cellKey,
   cellOf,
@@ -235,8 +236,8 @@ function fakeFetch(responses, onCall = () => {}) {
   return { calls, impl };
 }
 
-// Phiên bản bản ghi bộ đệm hiện tại (3: đường có thêm chiều một chiều riêng của xe máy).
-const VERSION = 3;
+// Phiên bản bản ghi bộ đệm hiện tại (roaddata.js CACHE_VERSION).
+const VERSION = CACHE_VERSION;
 
 // Giữa ô, để không kéo theo ô bên cạnh.
 const CENTER = [(Math.floor(106.7 / CELL) + 0.5) * CELL, (Math.floor(10.77 / CELL) + 0.5) * CELL];
@@ -961,4 +962,228 @@ test('đường dài qua bốn ô tải vào bốn lúc khác nhau: vẫn khớp
     const m = roads.matchWay({ coord: p, speed: 10, heading: 90, accuracy: 5 });
     assert.equal(m?.way.id, 9);
   }
+});
+
+// ------------------------------------------------------------------------------------------
+// Bản 4 của bộ đệm: cấm theo giờ, tốc độ theo chiều, cấm rẽ qua đường, camera, trạm thu phí vẽ thành vùng
+// ------------------------------------------------------------------------------------------
+
+const geomOf = (pts) => pts.map((p) => ({ lat: p.lat, lon: p.lon }));
+
+test('truy vấn Overpass bản 4: nút đường ngầm, camera ALPR, trạm thu phí vẽ thành vùng (out center)', () => {
+  const q = buildQuery(...cellOf([106.7, 10.77]));
+  assert.ok(q.includes('node.rn["ford"];'));
+  assert.ok(q.includes('node["man_made"="surveillance"]["surveillance:type"="ALPR"];'));
+  assert.ok(q.includes('way["barrier"="toll_booth"]->.tw;'));
+  assert.ok(q.endsWith('.tw out tags center qt;'));
+  // Camera giám sát chung không ghi vùng traffic vẫn không được lấy.
+  assert.ok(!/node\["man_made"="surveillance"\];/.test(q));
+  assert.equal(CACHE_VERSION, 5);
+});
+
+test('parseOverpass: thẻ cấm theo giờ giữ trọn (chuỗi phố đi bộ Hoàn Kiếm dài hơn 80 ký tự), minspeed, ford, toll', () => {
+  // Chuỗi lấy nguyên từ dữ liệu OSM Hoàn Kiếm (mốc 2026-06-01): khung giờ phố đi bộ nằm sau các khung ngày lễ 2/9,
+  // nên cắt ở 80 ký tự là mất đúng phần cần đọc.
+  const hk = 'no @ (Aug 29 21:30-23:59; Aug 30 00:01-13:30; Sep 1 17:00-23:59; Sep 2 00:01-16:00; Fr 19:00-23:59; Sa-Su 06:00-23:59)';
+  assert.ok(hk.length > 110);
+  const data = parseOverpass({
+    elements: [
+      {
+        type: 'way',
+        id: 1,
+        geometry: [N1, N2],
+        tags: { highway: 'tertiary', name: 'Phố Hàng Đào', 'motor_vehicle:conditional': hk, 'taxi:conditional': 'no @ (Mo-Fr 06:00-09:00)' },
+      },
+      { type: 'way', id: 2, geometry: [N2, N3], tags: { highway: 'motorway', minspeed: '60', toll: 'yes', ford: 'yes' } },
+    ],
+  });
+  assert.equal(data.ways[0].t['motor_vehicle:conditional'], hk);
+  assert.equal(data.ways[0].t['taxi:conditional'], undefined, 'thẻ của taxi không cần cho ô tô con, xe máy');
+  assert.deepEqual(data.ways[1].t, { minspeed: '60', toll: 'yes', ford: 'yes' });
+});
+
+test('parseOverpass: giới hạn tốc độ theo chiều (maxspeed:forward/backward, kể cả riêng ô tô, xe máy)', () => {
+  const w = (id, tags) => ({ type: 'way', id, geometry: [N1, N2], tags: { highway: 'primary', ...tags } });
+  const data = parseOverpass({
+    elements: [
+      w(1, { maxspeed: '60' }),
+      w(2, { 'maxspeed:forward': '60', 'maxspeed:backward': '40' }),
+      w(3, { maxspeed: '50', 'maxspeed:forward': '60' }),
+      w(4, { 'maxspeed:motorcar:forward': '80', 'maxspeed:forward': '60', 'maxspeed:backward': '50', 'maxspeed:motorcycle': '40' }),
+      w(5, { 'maxspeed:forward': 'signals', 'maxspeed:backward': '50' }),
+    ],
+  });
+  const pick = (way) => ({ c: way.c, cf: way.cf, cb: way.cb, m: way.m, mf: way.mf, mb: way.mb });
+  const [a, b, c, d, e] = data.ways.map(pick);
+  assert.deepEqual(a, { c: 60, cf: undefined, cb: undefined, m: 60, mf: undefined, mb: undefined }, 'không có thẻ theo chiều: như trước');
+  assert.deepEqual(b, { c: null, cf: 60, cb: 40, m: null, mf: 60, mb: 40 });
+  assert.deepEqual(c, { c: 50, cf: 60, cb: 50, m: 50, mf: 60, mb: 50 });
+  assert.deepEqual(d, { c: null, cf: 80, cb: 50, m: 40, mf: 40, mb: 40 }, 'thẻ riêng của loại xe đứng trước thẻ theo chiều chung');
+  assert.deepEqual(e, { c: null, cf: null, cb: 50, m: null, mf: null, mb: 50 }, 'giá trị không đọc được: chiều đó không biết');
+});
+
+// Ngã tư Minh Khai – Lạc Trung (Hà Nội): cấm quay đầu qua dải phân cách, "via" là đoạn đường Lạc Trung (OSM 2026-06-01).
+const MK_FROM = { type: 'way', id: 711053410, tags: { highway: 'secondary', name: 'Phố Minh Khai', oneway: 'yes' }, geometry: [{ lat: 21.0029308, lon: 105.8698536 }, { lat: 21.0030465, lon: 105.8698084 }] };
+const MK_VIA = { type: 'way', id: 711053408, tags: { highway: 'secondary', name: 'Phố Lạc Trung' }, geometry: [{ lat: 21.0030465, lon: 105.8698084 }, { lat: 21.0030382, lon: 105.8697268 }] };
+const MK_TO = { type: 'way', id: 711053409, tags: { highway: 'secondary', name: 'Phố Minh Khai', oneway: 'yes' }, geometry: [{ lat: 21.0030382, lon: 105.8697268 }, { lat: 21.0029058, lon: 105.8697779 }] };
+const MK_REL = {
+  type: 'relation',
+  id: 9886764,
+  members: [
+    { type: 'way', ref: 711053410, role: 'from' },
+    { type: 'way', ref: 711053408, role: 'via' },
+    { type: 'way', ref: 711053409, role: 'to' },
+  ],
+  tags: { restriction: 'no_u_turn', type: 'restriction' },
+};
+
+test('parseOverpass: cấm quay đầu có "via" là đường (Minh Khai – Lạc Trung): biển đặt ở chỗ from gặp via', () => {
+  const data = parseOverpass({ elements: [MK_FROM, MK_VIA, MK_TO, MK_REL] });
+  assert.deepEqual(data.restr, [
+    { id: 'r9886764', from: 711053410, to: 711053409, via: [105.8698084, 21.0030465], viaWays: [711053408], tags: { restriction: 'no_u_turn', type: 'restriction' } },
+  ]);
+  // Thiếu đường "via" trong ô: bỏ, không đoán.
+  assert.deepEqual(parseOverpass({ elements: [MK_FROM, MK_TO, MK_REL] }).restr, []);
+  assert.deepEqual(parseOverpass({ elements: [MK_VIA, MK_TO, MK_REL] }).restr, []);
+});
+
+test('parseOverpass: cấm rẽ qua đường mà chiều suy ra ngược đường một chiều thì bỏ (Nguyễn Thị Minh Khai – Bà Huyện Thanh Quan)', () => {
+  // Dữ liệu TP.HCM (OSM 2026-07-28): đường "to" một chiều đi VÀO chỗ nối, nên đi theo chuỗi from → via → to là đi
+  // ngược chiều. Quan hệ thuộc về chiều khác hoặc vẽ sai: không báo.
+  const elements = [
+    { type: 'way', id: 227739703, tags: { highway: 'primary', oneway: 'yes' }, geometry: [{ lat: 10.7739193, lon: 106.6897713 }, { lat: 10.7740833, lon: 106.6899262 }, { lat: 10.7747067, lon: 106.69053 }, { lat: 10.7747314, lon: 106.690554 }, { lat: 10.7747898, lon: 106.6906105 }] },
+    { type: 'way', id: 1265405856, tags: { highway: 'secondary' }, geometry: [{ lat: 10.7748572, lon: 106.6905386 }, { lat: 10.7747898, lon: 106.6906105 }] },
+    { type: 'way', id: 1176155754, tags: { highway: 'secondary', oneway: 'yes' }, geometry: [{ lat: 10.7757532, lon: 106.6895684 }, { lat: 10.7753993, lon: 106.6899518 }, { lat: 10.7749159, lon: 106.6904754 }, { lat: 10.7748572, lon: 106.6905386 }] },
+    { type: 'relation', id: 19216405, members: [{ type: 'way', ref: 227739703, role: 'from' }, { type: 'way', ref: 1265405856, role: 'via' }, { type: 'way', ref: 1176155754, role: 'to' }], tags: { restriction: 'no_left_turn', type: 'restriction' } },
+  ];
+  assert.deepEqual(parseOverpass({ elements }).restr, []);
+  // Cùng hình học, đường "to" hai chiều: ghép được.
+  const twoWay = elements.map((e) => (e.id === 1176155754 ? { ...e, tags: { highway: 'secondary' } } : e));
+  assert.deepEqual(parseOverpass({ elements: twoWay }).restr.map((r) => r.via), [[106.6906105, 10.7747898]]);
+});
+
+test('parseOverpass: cấm rẽ qua nhiều đường via (thứ tự thành viên bất kỳ), from một chiều đi ra xa chỗ nối thì bỏ', () => {
+  // A (một chiều lên Bắc) → V1 → V2 → B, các đường vẽ nối đầu nhau; thành viên via ghi ngược thứ tự.
+  const P = (k) => ({ lat: 10.77 + k * 0.0001, lon: 106.7 });
+  const Q = (k) => ({ lat: 10.775, lon: 106.7 + k * 0.0001 });
+  const A = { type: 'way', id: 1, geometry: [P(0), P(50)], tags: { highway: 'primary', oneway: 'yes' } };
+  const V1 = { type: 'way', id: 2, geometry: [P(50), Q(1)], tags: { highway: 'primary' } };
+  const V2 = { type: 'way', id: 3, geometry: [Q(2), Q(1)], tags: { highway: 'primary' } }; // vẽ ngược chiều đi
+  const B = { type: 'way', id: 4, geometry: [Q(2), P(-10)], tags: { highway: 'primary' } };
+  const rel = (from, extra = {}) => ({
+    type: 'relation',
+    id: 50,
+    members: [
+      { type: 'way', ref: from, role: 'from' },
+      { type: 'way', ref: 3, role: 'via' },
+      { type: 'way', ref: 2, role: 'via' },
+      { type: 'way', ref: 4, role: 'to' },
+    ],
+    tags: { type: 'restriction', restriction: 'no_u_turn', ...extra },
+  });
+  const ok = parseOverpass({ elements: [A, V1, V2, B, rel(1)] }).restr;
+  assert.deepEqual(ok.map((r) => [r.via, r.viaWays]), [[[106.7, 10.775], [3, 2]]]);
+  // V2 một chiều ngược hướng đi của chuỗi: bỏ.
+  const v2oneway = { ...V2, tags: { highway: 'primary', oneway: 'yes' } };
+  assert.deepEqual(parseOverpass({ elements: [A, V1, v2oneway, B, rel(1)] }).restr, []);
+  // from một chiều đi ra xa chỗ nối (vẽ từ chỗ nối xuống phía Nam): bỏ.
+  const away = { type: 'way', id: 5, geometry: [P(50), P(0)], tags: { highway: 'primary', oneway: 'yes' } };
+  assert.deepEqual(parseOverpass({ elements: [away, V1, V2, B, rel(5)] }).restr, []);
+});
+
+test('parseOverpass: hướng camera (direction, camera:direction), forward/backward kèm hướng vẽ của đường tại nút', () => {
+  const S0 = { lat: 10.77, lon: 106.7 };
+  const S1 = { lat: 10.771, lon: 106.7 };
+  const S2 = { lat: 10.772, lon: 106.7 };
+  const E1 = { lat: 10.771, lon: 106.701 };
+  const data = parseOverpass({
+    elements: [
+      { type: 'way', id: 1, geometry: [S0, S1, S2], tags: { highway: 'trunk' } },
+      { type: 'way', id: 2, geometry: [S1, E1], tags: { highway: 'residential' } },
+      { type: 'way', id: 3, geometry: [{ lat: 10.78, lon: 106.71 }, { lat: 10.781, lon: 106.71 }], tags: { highway: 'trunk' } },
+      { type: 'node', id: 10, lat: 10.7705, lon: 106.7, tags: { highway: 'speed_camera', direction: 'backward' } }, // không nằm trên đường
+      { type: 'node', id: 11, lat: 10.781, lon: 106.71, tags: { highway: 'speed_camera', direction: 'forward', maxspeed: '80' } },
+      { type: 'node', id: 12, ...S1, tags: { highway: 'speed_camera', direction: 'forward' } }, // nút giao: hai hướng vẽ
+      { type: 'node', id: 13, lat: 10.79, lon: 106.72, tags: { man_made: 'surveillance', 'surveillance:type': 'ALPR', 'camera:direction': '135', direction: '0' } },
+      { type: 'node', id: 14, lat: 10.795, lon: 106.72, tags: { man_made: 'surveillance', 'surveillance:type': 'camera', 'camera:direction': '90' } },
+      // ALPR ở cổng bãi xe, cổng toà nhà, camera riêng hay trong nhà: không phải camera giao thông.
+      { type: 'node', id: 15, lat: 10.796, lon: 106.72, tags: { man_made: 'surveillance', 'surveillance:type': 'ALPR', 'surveillance:zone': 'parking', surveillance: 'private' } },
+      { type: 'node', id: 16, lat: 10.797, lon: 106.72, tags: { man_made: 'surveillance', 'surveillance:type': 'ALPR', 'surveillance:zone': 'building' } },
+      { type: 'node', id: 17, lat: 10.798, lon: 106.72, tags: { man_made: 'surveillance', 'surveillance:type': 'ALPR', surveillance: 'private' } },
+      { type: 'node', id: 18, lat: 10.799, lon: 106.72, tags: { man_made: 'surveillance', 'surveillance:type': 'ALPR', surveillance: 'indoor' } },
+      { type: 'node', id: 19, lat: 10.7995, lon: 106.72, tags: { man_made: 'surveillance', 'surveillance:type': 'ALPR', 'surveillance:zone': 'traffic', surveillance: 'public' } },
+    ],
+  });
+  const cam = (id) => data.points.find((p) => p.id === `n${id}`);
+  assert.deepEqual([cam(10).dir, cam(10).wb], ['backward', undefined], 'không nằm trên đường: không biết hướng vẽ');
+  assert.equal(cam(11).dir, 'forward');
+  assert.ok(Math.abs(cam(11).wb) < 0.5, `đường 3 vẽ lên Bắc: ${cam(11).wb}`);
+  assert.deepEqual([cam(12).dir, cam(12).wb], ['forward', undefined], 'nút giao của hai đường khác hướng');
+  assert.deepEqual([cam(13).kind, cam(13).sub, cam(13).dir], ['camera', 'traffic', '135'], 'ALPR là camera giao thông, đọc camera:direction trước');
+  assert.equal(cam(14), undefined, 'camera giám sát chung không ghi vùng traffic: không nhận');
+  for (const id of [15, 16, 17, 18]) assert.equal(cam(id), undefined, `ALPR không phải camera giao thông: n${id}`);
+  assert.equal(cam(19).sub, 'traffic');
+});
+
+test('parseOverpass: quan hệ enforcement có thiết bị là đường (lấy tâm), nút from, đo tốc độ trung bình, tải trọng, chiều cao', () => {
+  const data = parseOverpass({
+    elements: [
+      { type: 'node', id: 1, lat: 10.8, lon: 106.8, tags: { highway: 'speed_camera', maxspeed: '80', direction: 'forward' } },
+      {
+        type: 'relation',
+        id: 90,
+        tags: { type: 'enforcement', enforcement: 'maxspeed' }, // không ghi maxspeed: giữ của nút
+        members: [
+          { type: 'node', ref: 1, role: 'device', lat: 10.8, lon: 106.8 },
+          { type: 'node', ref: 2, role: 'from', lat: 10.799, lon: 106.8 },
+        ],
+      },
+      {
+        type: 'relation',
+        id: 91,
+        tags: { type: 'enforcement', enforcement: 'average_speed', maxspeed: '100' },
+        members: [
+          { type: 'way', ref: 7, role: 'device', geometry: [{ lat: 10.9, lon: 106.9 }, { lat: 10.9002, lon: 106.9002 }] },
+          { type: 'node', ref: 8, role: 'to', lat: 10.95, lon: 106.9 },
+        ],
+      },
+      { type: 'relation', id: 92, tags: { type: 'enforcement', enforcement: 'maxweight' }, members: [{ type: 'node', ref: 3, role: 'device', lat: 11, lon: 107 }] },
+      { type: 'relation', id: 93, tags: { type: 'enforcement', enforcement: 'maxheight' }, members: [{ type: 'node', ref: 4, role: 'device', lat: 11.1, lon: 107 }] },
+      { type: 'relation', id: 94, tags: { type: 'enforcement', enforcement: 'maxspeed' }, members: [{ type: 'node', ref: 5, role: 'from', lat: 11.2, lon: 107 }] }, // không có thiết bị
+    ],
+  });
+  const byId = Object.fromEntries(data.points.map((p) => [p.id, p]));
+  assert.deepEqual(Object.keys(byId).sort(), ['n1', 'n3', 'n4', 'w7']);
+  assert.deepEqual(byId.n1.coord, [106.8, 10.799], 'điểm cảnh báo đặt ở nút from');
+  assert.equal(byId.n1.limit, 80);
+  assert.equal(byId.n1.dir, 'forward');
+  assert.ok(distance(byId.w7.coord, [106.9001, 10.9001]) < 0.01, 'tâm của đường thiết bị');
+  assert.deepEqual([byId.w7.sub, byId.w7.avg, byId.w7.limit], ['speed', true, 100]);
+  assert.deepEqual([byId.n3.sub, byId.n3.enf], ['traffic', 'weight']);
+  assert.deepEqual([byId.n4.sub, byId.n4.enf], ['traffic', 'height']);
+});
+
+test('parseOverpass: trạm thu phí vẽ thành vùng (out center) gộp với nút trạm thu phí trong 120 m', () => {
+  const data = parseOverpass({
+    elements: [
+      { type: 'way', id: 70, center: { lat: 10.85, lon: 106.75 }, tags: { barrier: 'toll_booth', name: 'Trạm thu phí An Sương' } },
+      { type: 'node', id: 71, lat: 10.8505, lon: 106.75, tags: { barrier: 'toll_booth' } },
+      { type: 'way', id: 72, center: { lat: 10.9, lon: 106.75 }, tags: { barrier: 'toll_booth' } },
+      { type: 'way', id: 73, tags: { barrier: 'toll_booth' } }, // không có tâm: bỏ
+    ],
+  });
+  const tolls = data.points.filter((p) => p.kind === 'toll');
+  assert.deepEqual(tolls.map((p) => [p.id, p.name]), [['w70', 'Trạm thu phí An Sương'], ['w72', '']]);
+  assert.deepEqual(tolls[0].coord, [106.75, 10.85]);
+});
+
+test('parseOverpass: nút đường ngầm ford=yes trên đường là nút biển', () => {
+  const data = parseOverpass({
+    elements: [
+      { type: 'way', id: 1, geometry: [N1, N2], tags: { highway: 'unclassified' } },
+      { type: 'node', id: 1, ...N1, tags: { ford: 'yes' } },
+      { type: 'node', id: 2, ...N2, tags: { ford: 'stepping_stones' } },
+    ],
+  });
+  assert.deepEqual(data.feats.map((f) => [f.id, f.tags]), [['n1', { ford: 'yes' }]]);
 });

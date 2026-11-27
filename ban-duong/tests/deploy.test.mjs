@@ -4,7 +4,9 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
 const read = (p) => readFileSync(new URL(`../${p}`, import.meta.url), 'utf8');
@@ -35,13 +37,31 @@ function swLists() {
 
 test('npm run dist: chép đủ tệp để chạy, không có tests/ và tools/', () => {
   const entries = distEntries();
-  assert.deepEqual(entries, ['index.html', 'manifest.webmanifest', 'sw.js', 'css', 'js', 'icons', 'vendor', 'models']);
+  assert.deepEqual(entries, ['index.html', 'manifest.webmanifest', 'sw.js', 'css', 'js', 'icons', 'vendor', 'models', 'data/community.json']);
   const covered = (p) => entries.some((e) => p === e || p.startsWith(`${e}/`));
   const { SHELL_FILES, ML_DIRS, NEVER_CACHE_DIRS } = swLists();
   for (const f of SHELL_FILES) if (f !== './') assert.ok(covered(f), `${f} thiếu trong dist`);
   for (const d of ML_DIRS) assert.ok(covered(d.replace(/\/$/, '')), `${d} thiếu trong dist`);
   for (const d of NEVER_CACHE_DIRS) assert.ok(!covered(d.replace(/\/$/, '')), `${d} không được có trong dist`);
   assert.match(read('.gitignore'), /^\/dist\/$/m);
+});
+
+test('data/: chỉ community.json được vào kho, dist và APK', (t) => {
+  // dist và copyWebAssets chép đúng một tệp, không cả thư mục.
+  assert.ok(distEntries().includes('data/community.json'));
+  assert.ok(!distEntries().includes('data'));
+  const gradle = read('android/app/build.gradle.kts');
+  assert.match(gradle, /"data\/community\.json"/);
+  assert.doesNotMatch(gradle, /^\s*"data",/m);
+  // Bước "Kiểm tra dist" của GitHub Pages: data/ chỉ có community.json.
+  const wf = readFileSync(new URL('../../.github/workflows/ban-duong-pages.yml', import.meta.url), 'utf8');
+  assert.match(wf, /find data -mindepth 1 -printf/);
+  // .gitignore chỉ mở đúng tệp đó.
+  assert.match(read('.gitignore'), /^!\/data\/\n\/data\/\*\n!\/data\/community\.json$/m);
+  const probe = fileURLToPath(new URL('../data/khong-dua-len.json', import.meta.url));
+  const r = spawnSync('git', ['check-ignore', '-q', probe], { encoding: 'utf8' });
+  if (r.error || r.status === 128) return t.skip('không nằm trong kho git');
+  assert.equal(r.status, 0, 'tệp khác trong data/ phải bị .gitignore bỏ');
 });
 
 test('README: đưa thư mục dist lên, không đưa tests/ và tools/ lên trang dùng khi lái', () => {

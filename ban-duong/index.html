@@ -86,7 +86,7 @@
     <button id="btnCamChip" class="fab cam-chip" type="button" aria-label="Camera nhận diện biển. Bấm để tắt." hidden><span data-icon="camera"></span></button>
     <button id="btnSimSpeed" class="fab text" type="button" aria-label="Tốc độ chạy thử" hidden>×1</button>
     <button id="btnMute" class="fab" type="button" aria-label="Bật hoặc tắt âm thanh"><span data-icon="volume"></span></button>
-    <button id="btnReport" class="fab" type="button" aria-label="Đánh dấu điểm cảnh báo"><span data-icon="report"></span></button>
+    <button id="btnReport" class="fab report-fab" type="button" aria-label="Báo cáo camera, biển báo hoặc điểm cảnh báo"><span data-icon="report"></span><small>Báo cáo</small></button>
     <button id="btnLocate" class="fab" type="button" aria-label="Về vị trí của tôi"><span data-icon="locate"></span></button>
   </div>
 
@@ -219,6 +219,8 @@
       <label class="opt"><span>Camera giao thông</span><input id="optCamera" type="checkbox" class="switch"></label>
       <label class="opt"><span>Trạm thu phí</span><input id="optToll" type="checkbox" class="switch"></label>
       <label class="opt"><span>Điểm tôi tự đánh dấu</span><input id="optReport" type="checkbox" class="switch"></label>
+      <label class="opt"><span>Dùng dữ liệu cộng đồng<small>Camera, biển báo và điểm cảnh báo do người dùng báo cáo, chủ ứng dụng đã kiểm tra tại chỗ. Không đầy đủ: không có cảnh báo không có nghĩa là không có camera.</small></span><input id="optCommunity" type="checkbox" class="switch"></label>
+      <p id="communityLine" class="note"></p>
 
       <h3>Biển báo phía trước</h3>
       <p class="note">Ứng dụng báo trước khoảng 100–200 m, xa hơn khi chạy nhanh. Biển lấy từ dữ liệu OpenStreetMap; ở Việt Nam biển được nhập vào bản đồ còn rất ít, nên ứng dụng dùng thêm thông tin tương đương: đèn tín hiệu, vạch qua đường, cấm rẽ, đường một chiều, giới hạn tốc độ và chỗ ngoặt tính từ hình dạng đường. Luôn tuân theo biển thực tế trên đường.</p>
@@ -287,6 +289,8 @@
         <button id="btnImport" class="btn" type="button"><span data-icon="download" data-size="18"></span><span>Nhập tệp</span></button>
         <input id="importFile" type="file" accept="application/json,.json" hidden>
       </div>
+      <div class="row wrap"><button id="btnExportRepo" class="btn" type="button"><span data-icon="share" data-size="18"></span><span>Xuất cho kho dữ liệu</span></button></div>
+      <p class="note">“Xuất cho kho dữ liệu” tạo tệp gửi cho chủ ứng dụng: chỉ camera, biển báo, tốc độ, đường cấm và điểm nguy hiểm, kèm ngày và vị trí, không có giờ phút.</p>
 
       <h3>Chuyến đi gần đây</h3>
       <div id="tripList" class="trip-list"></div>

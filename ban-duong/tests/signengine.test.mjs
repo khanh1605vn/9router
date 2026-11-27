@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildCorridor, detectCurves, SignEngine, timeRangesActive } from '../js/signengine.js';
-import { CELL, cellKey, cellOf, parseOverpass, RoadData } from '../js/roaddata.js';
+import { CACHE_VERSION, CELL, cellKey, cellOf, parseOverpass, RoadData } from '../js/roaddata.js';
 import { cumulativeDistances, destination, distance, pointAtDistance } from '../js/geo.js';
 import { LocationService } from '../js/location.js';
 
@@ -1284,7 +1284,7 @@ test('xe máy trên phố ngược chiều được phép, bản cũ của phố
   const westKey = cellKey(...cellOf(pts2[0]));
   assert.notEqual(westKey, cellKey(...cellOf(J)));
   const roads = new RoadData();
-  roads.setCell(cellKey(...cellOf(J)), { ...data, v: 3, t: Date.now() });
+  roads.setCell(cellKey(...cellOf(J)), { ...data, v: CACHE_VERSION, t: Date.now() });
   roads.setCell(westKey, { ways: [stale2], points: [], v: 2, t: Date.now() });
   const said = (vehicle) => spoken(drive(roads, { from: start, end: 700, speed: 10, vehicle })).map((r) => r.say);
   const moto = said('moto');
@@ -1604,4 +1604,296 @@ test('đường đôi tách chếch 27° (hai bên cách 10 m): hướng GPS l�
     const shown = log.filter((r) => r.active?.item.key === 'n1:signals' || r.upcoming.some((u) => u.key === 'n1:signals'));
     assert.deepEqual(shown.map((r) => r.s.toFixed(1)), [], vehicle);
   }
+});
+
+// ------------------------------------------------------------------------------------------
+// Điều kiện theo giờ trên đường, cấm rẽ qua đường, giới hạn theo chiều, biển suy ra (PLAN 1.1, 1.2, 1.5, 1.6)
+// ------------------------------------------------------------------------------------------
+
+// Chuỗi lấy nguyên từ dữ liệu OSM: phố đi bộ Hoàn Kiếm (2026-06-01) và TP.HCM (2026-07-28).
+const HK_WALK = 'no @ (Feb 16 19:30-23:59; Feb 17 00:01-02:00; Fr 19:00-23:59; Sa-Su 00:00-23:59)';
+const HN_A80 = 'no @ (Aug 29 21:30-23:59; Aug 30 00:00-13:30; Sep 1 17:00-23:59; Sep 2 00:00-16:00)';
+const HCM_APR = 'no @ (Apr 20–Apr 25 22:00–23:59, Apr 21–Apr 26 00:00–05:00)';
+const HCM_DEC = 'no @ (Dec 19 23:00-24:00, Dec 20 00:00-04:00)';
+const HCM_WEEKEND = 'no @ (Sa-Su 18:30-23:00)';
+const FRI_20 = new Date(2026, 10, 27, 20, 0); // thứ Sáu 27/11/2026
+const SAT_12 = new Date(2026, 10, 28, 12, 0);
+const SAT_19 = new Date(2026, 10, 28, 19, 0);
+const SEP_1_18 = new Date(2026, 8, 1, 18, 0); // thứ Ba 1/9/2026: trong khung A80 đã cũ
+
+test('conditionActive: chỉ đọc khung giờ trong tuần, bỏ khung có ngày tháng, chuẩn hoá dấu gạch dài', async () => {
+  const { conditionActive } = await import('../js/signengine.js');
+  const cond = (v) => v.slice(v.indexOf('@') + 1).trim();
+  assert.equal(conditionActive(cond(HK_WALK), FRI_20), true);
+  assert.equal(conditionActive(cond(HK_WALK), SAT_12), true);
+  assert.equal(conditionActive(cond(HK_WALK), NOON), false);
+  assert.equal(conditionActive(cond(HK_WALK), new Date(2026, 1, 16, 21, 0)), false, '16/2 (thứ Hai): khung ngày lễ bị bỏ');
+  for (const stale of [HN_A80, HCM_APR, HCM_DEC]) {
+    for (const t of [NOON, FRI_20, SAT_19, SEP_1_18, new Date(2026, 3, 21, 23, 0), new Date(2026, 11, 19, 23, 30)]) {
+      assert.equal(conditionActive(cond(stale), t), false, `${stale} @ ${t}`);
+    }
+  }
+  assert.equal(conditionActive(cond(HCM_WEEKEND), SAT_19), true);
+  assert.equal(conditionActive(cond(HCM_WEEKEND), FRI_20), false);
+  assert.equal(conditionActive('(06:00–20:00)', NOON), true, 'dấu gạch dài');
+  assert.equal(conditionActive('(18:00 - 20:00)', new Date(2026, 10, 23, 19, 0)), true);
+  assert.equal(conditionActive('(weight>3.5)', NOON), false, 'không phải giờ: không áp dụng cho ô tô con');
+  for (const unknown of ['(sunrise-sunset)', '(Mo-Fr 06:00-09:00; PH off)', '(Mo-Fr 6h-9h)', '(25:00-26:00)']) {
+    assert.equal(conditionActive(unknown, NOON), null, unknown);
+  }
+});
+
+test('accessAt: thẻ riêng trước thẻ chung, ô tô và xe máy tách bạch, không đọc được thì im lặng', async () => {
+  const { accessAt } = await import('../js/signengine.js');
+  const a = (tags, vehicle, now = NOON) => {
+    const r = accessAt(tags, vehicle, now);
+    return [r.no, r.timed, r.general];
+  };
+  assert.deepEqual(a({ 'motor_vehicle:conditional': HK_WALK }, 'car', FRI_20), [true, true, false]);
+  assert.deepEqual(a({ 'motor_vehicle:conditional': HK_WALK }, 'moto', FRI_20), [true, true, false]);
+  assert.deepEqual(a({ 'motor_vehicle:conditional': HK_WALK }, 'car'), [false, false, false]);
+  assert.deepEqual(a({ 'motorcar:conditional': 'no @ (06:00-20:00)' }, 'car'), [true, true, false]);
+  assert.deepEqual(a({ 'motorcar:conditional': 'no @ (06:00-20:00)' }, 'moto'), [false, false, false], 'thẻ của ô tô không cấm xe máy');
+  assert.deepEqual(a({ 'motorcycle:conditional': 'no @ (23:00-04:00)' }, 'car', new Date(2026, 10, 23, 23, 30)), [false, false, false]);
+  assert.deepEqual(a({ 'motorcycle:conditional': 'no @ (23:00-04:00)' }, 'moto', new Date(2026, 10, 23, 23, 30)), [true, true, false]);
+  assert.deepEqual(a({ 'vehicle:conditional': 'no @ (Sa-Su 18:30-23:00)' }, 'car', SAT_19), [true, true, true]);
+  assert.deepEqual(a({ 'access:conditional': 'no @ (Sa-Su 18:30-23:00)' }, 'moto', SAT_19), [true, true, true]);
+  // Thẻ riêng cố định thắng thẻ chung theo giờ; thẻ chung theo giờ thắng thẻ cố định cùng mức.
+  assert.deepEqual(a({ motorcar: 'yes', 'motor_vehicle:conditional': HK_WALK }, 'car', FRI_20), [false, false, false]);
+  assert.deepEqual(a({ motor_vehicle: 'yes', 'motor_vehicle:conditional': HK_WALK }, 'car', FRI_20), [true, true, false]);
+  assert.deepEqual(a({ 'motorcar:conditional': 'yes @ (Fr 19:00-23:59)', 'motor_vehicle:conditional': HK_WALK }, 'car', FRI_20), [false, true, false]);
+  // Thẻ riêng theo giờ không đọc được: không báo cấm theo giờ của thẻ chung.
+  assert.deepEqual(a({ 'motorcar:conditional': 'yes @ (sunrise-sunset)', 'motor_vehicle:conditional': HK_WALK }, 'car', FRI_20), [false, false, false]);
+  // Chỉ ngày lễ đã cũ, hay không có thẻ: không cấm.
+  assert.deepEqual(a({ 'motor_vehicle:conditional': HN_A80 }, 'car', SEP_1_18), [false, false, false]);
+  assert.deepEqual(a(undefined, 'car'), [false, false, false]);
+});
+
+test('cấm xe theo giờ: phố đi bộ Hoàn Kiếm chỉ báo trong giờ cấm, khung ngày lễ đã cũ không bao giờ báo', () => {
+  const roadsWith = (t) => roadsOf([way(1, NORTH.slice(0, 51)), way(2, line(at(500), N, 500), { t })]);
+  const says = (roads, opts) => spoken(drive(roads, { end: 480, ...opts })).map((r) => r.say);
+  const walk = roadsWith({ 'motor_vehicle:conditional': HK_WALK });
+  assert.deepEqual(says(walk, { now: FRI_20 }), ['Phía trước 150 mét, đường cấm ô tô']);
+  assert.deepEqual(says(walk, { now: SAT_12, vehicle: 'moto' }), ['Phía trước 150 mét, đường cấm xe máy']);
+  assert.deepEqual(says(walk, { now: NOON }), []);
+  const item = spoken(drive(walk, { end: 480, now: FRI_20 }))[0].fired[0];
+  assert.equal(item.code, 'P.103a');
+  assert.match(item.note, /theo giờ/);
+  for (const stale of [HN_A80, HCM_APR, HCM_DEC]) {
+    for (const now of [NOON, FRI_20, SAT_19, SEP_1_18]) assert.deepEqual(says(roadsWith({ 'motor_vehicle:conditional': stale }), { now }), [], stale);
+  }
+  // TP.HCM: motorcar:conditional chỉ cấm ô tô.
+  const car = roadsWith({ 'motorcar:conditional': 'no @ (06:00-20:00)' });
+  assert.deepEqual(says(car, { now: NOON }), ['Phía trước 150 mét, đường cấm ô tô']);
+  assert.deepEqual(says(car, { now: NOON, vehicle: 'moto' }), []);
+  assert.deepEqual(says(car, { now: new Date(2026, 10, 23, 21, 0) }), []);
+  // Cấm mọi xe theo giờ (vehicle:conditional): "đường cấm".
+  assert.deepEqual(says(roadsWith({ 'vehicle:conditional': HCM_WEEKEND }), { now: SAT_19 }), ['Phía trước 150 mét, đường cấm']);
+});
+
+test('cấm cố định có khung giờ được đi: trong khung giờ đó không báo cấm, ngoài giờ vẫn báo', () => {
+  const WED_23 = new Date(2026, 10, 25, 23, 0);
+  const roadsWith = (t) => roadsOf([way(1, NORTH.slice(0, 51)), way(2, line(at(500), N, 500), { t })]);
+  const says = (roads, opts) => spoken(drive(roads, { end: 480, ...opts })).map((r) => r.say);
+  const night = roadsWith({ motor_vehicle: 'no', 'motor_vehicle:conditional': 'yes @ (22:00-06:00)' });
+  assert.deepEqual(says(night, { now: WED_23 }), []);
+  assert.deepEqual(says(night, { now: WED_23, vehicle: 'moto' }), []);
+  assert.deepEqual(says(night, { now: NOON }), ['Phía trước 150 mét, đường cấm ô tô']);
+  const fixedItem = spoken(drive(night, { end: 480, now: NOON }))[0].fired[0];
+  assert.doesNotMatch(fixedItem.note, /theo giờ/, 'ngoài khung giờ được đi: lệnh cấm cố định, không phải cấm theo giờ');
+  // Khung giờ được đi không đọc được (ngày lễ): lệnh cấm cố định vẫn báo, như trước.
+  assert.deepEqual(says(roadsWith({ motor_vehicle: 'no', 'motor_vehicle:conditional': 'yes @ (PH)' }), { now: WED_23 }), [
+    'Phía trước 150 mét, đường cấm ô tô',
+  ]);
+  // Khung giờ được đi chỉ cho xe máy: ô tô vẫn bị cấm lúc 23:00.
+  const moto = roadsWith({ motor_vehicle: 'no', 'motorcycle:conditional': 'yes @ (22:00-06:00)' });
+  assert.deepEqual(says(moto, { now: WED_23, vehicle: 'moto' }), []);
+  assert.deepEqual(says(moto, { now: WED_23 }), ['Phía trước 150 mét, đường cấm ô tô']);
+  // Cấm chung cố định ("đường cấm") vẫn đọc như trước khi đường có thẻ theo giờ không liên quan lúc này.
+  assert.deepEqual(says(roadsWith({ access: 'no', 'motorcar:conditional': 'yes @ (Sa 08:00-09:00)' }), { now: NOON }), ['Phía trước 150 mét, đường cấm']);
+});
+
+/**
+ * Đường đôi: phía Đông (A rồi A2, một chiều lên Bắc), phía Tây (B2 rồi B, một chiều xuống Nam), cách nhau 15 m;
+ * đường M nối hai bên ở 500 m. Cấm quay đầu từ A qua M sang B (dựng qua parseOverpass như dữ liệu thật).
+ */
+function dualCarriageway(tags = { restriction: 'no_u_turn' }) {
+  const J0 = at(500);
+  const J1 = destination(J0, W, 15);
+  const geom = (pts) => pts.map(([lon, lat]) => ({ lon, lat }));
+  const data = parseOverpass({
+    elements: [
+      { type: 'way', id: 1, geometry: geom(NORTH.slice(0, 51)), tags: { highway: 'primary', oneway: 'yes' } },
+      { type: 'way', id: 2, geometry: geom(line(J0, N, 400)), tags: { highway: 'primary', oneway: 'yes' } },
+      { type: 'way', id: 3, geometry: geom([J0, J1]), tags: { highway: 'primary' } },
+      { type: 'way', id: 4, geometry: geom(line(J1, S, 500)), tags: { highway: 'primary', oneway: 'yes' } },
+      { type: 'way', id: 5, geometry: geom(line(destination(J1, N, 400), S, 400)), tags: { highway: 'primary', oneway: 'yes' } },
+      {
+        type: 'relation',
+        id: 77,
+        members: [
+          { type: 'way', ref: 1, role: 'from' },
+          { type: 'way', ref: 3, role: 'via' },
+          { type: 'way', ref: 4, role: 'to' },
+        ],
+        tags: { type: 'restriction', ...tags },
+      },
+    ],
+  });
+  assert.equal(data.restr.length, 1);
+  return { roads: roadsOf(data.ways, [], data.restr), J1 };
+}
+
+test('cấm quay đầu qua dải phân cách ("via" là đường): báo cho chiều của đường "from", chiều bên kia thì không', () => {
+  const { roads, J1 } = dualCarriageway();
+  const north = spoken(drive(roads, { end: 480 }));
+  assert.equal(north.length, 1);
+  assert.equal(north[0].say, 'Phía trước 150 mét, cấm quay đầu');
+  assert.equal(north[0].fired[0].code, 'P.124a');
+  // Đường bên kia đi xuống Nam qua đúng chỗ nối: không phải đường "from".
+  assert.deepEqual(spoken(drive(roads, { from: destination(J1, N, 400), brg: S, end: 700 })).map((r) => r.say), []);
+  // except=motorcycle và theo giờ như cấm rẽ qua nút.
+  const timed = dualCarriageway({ 'restriction:conditional': 'no_u_turn @ (06:00-09:00)', except: 'motorcycle' }).roads;
+  assert.equal(spoken(drive(timed, { end: 480, now: new Date(2026, 10, 23, 7, 0) })).length, 1);
+  assert.equal(spoken(drive(timed, { end: 480, now: new Date(2026, 10, 23, 7, 0), vehicle: 'moto' })).length, 0);
+  assert.equal(spoken(drive(timed, { end: 480, now: NOON })).length, 0);
+});
+
+test('roadLimit: theo chiều đi, không biết chiều thì số nhỏ hơn, đường một chiều lấy chiều được đi, theo giờ', async () => {
+  const { roadLimit } = await import('../js/signengine.js');
+  const plain = way(1, NORTH, { c: 50, m: 40 });
+  assert.deepEqual([1, -1, 0].map((d) => roadLimit(plain, 'car', d)), [50, 50, 50]);
+  assert.equal(roadLimit(plain, 'moto', 1), 40);
+  const dir = way(2, NORTH, { c: null, cf: 60, cb: 40, m: null, mf: 50, mb: 40 });
+  assert.deepEqual([1, -1, 0].map((d) => roadLimit(dir, 'car', d)), [60, 40, 40]);
+  assert.deepEqual([1, -1, 0].map((d) => roadLimit(dir, 'moto', d)), [50, 40, 40]);
+  assert.equal(roadLimit({ ...dir, o: 1 }, 'car', 0), 60, 'đường một chiều: chiều được đi');
+  assert.equal(roadLimit({ ...dir, o: -1 }, 'car', 0), 40);
+  const oneSide = way(3, NORTH, { c: null, cf: 60, cb: null });
+  assert.deepEqual([1, -1, 0].map((d) => roadLimit(oneSide, 'car', d)), [60, null, null], 'một chiều không biết: im lặng');
+  const night = way(4, NORTH, { c: 60, m: 60, t: { 'maxspeed:conditional': '40 @ (22:00-06:00); 30 @ (sunrise-sunset); 20 @ (Jan 1 00:00-23:59)' } });
+  assert.equal(roadLimit(night, 'car', 1, NOON), 60);
+  assert.equal(roadLimit(night, 'car', 1, new Date(2026, 10, 23, 23, 0)), 40);
+  assert.equal(roadLimit(night, 'car', 1, new Date(2026, 0, 1, 12, 0)), 60, 'khung ngày tháng, giờ theo mặt trời: bỏ qua');
+  assert.equal(roadLimit(night, 'car', 1), 60, 'không có giờ: không xét điều kiện');
+  const motoOnly = way(5, NORTH, { c: 60, m: 60, t: { 'maxspeed:motorcycle:conditional': '40 @ (Mo-Fr 06:00-09:00)' } });
+  assert.equal(roadLimit(motoOnly, 'moto', 1, new Date(2026, 10, 23, 7, 0)), 40);
+  assert.equal(roadLimit(motoOnly, 'car', 1, new Date(2026, 10, 23, 7, 0)), 60);
+  assert.equal(roadLimit(null, 'car', 1), null);
+  // maxspeed:conditional chung không vượt lên trên giới hạn riêng của loại xe (thẻ riêng đứng trên thẻ chung).
+  const data = parseOverpass({
+    elements: [
+      {
+        type: 'way',
+        id: 31,
+        geometry: [{ lon: O[0], lat: O[1] }, { lon: at(300)[0], lat: at(300)[1] }],
+        tags: { highway: 'primary', maxspeed: '60', 'maxspeed:motorcycle': '50', 'maxspeed:conditional': '70 @ (22:00-06:00)' },
+      },
+      {
+        type: 'way',
+        id: 32,
+        geometry: [{ lon: O[0], lat: O[1] }, { lon: at(300)[0], lat: at(300)[1] }],
+        tags: { highway: 'primary', maxspeed: '60', 'maxspeed:motorcar:forward': '50', 'maxspeed:conditional': '40 @ (22:00-06:00)' },
+      },
+    ],
+  });
+  const [w31, w32] = data.ways;
+  const WED_23 = new Date(2026, 10, 25, 23, 0);
+  assert.deepEqual([w31.mx, w31.cx, w32.cx, w32.mx], [1, undefined, 1, undefined]);
+  assert.equal(roadLimit(w31, 'moto', 1, WED_23), 50);
+  assert.equal(roadLimit(w31, 'car', 1, WED_23), 70);
+  assert.equal(roadLimit(w31, 'moto', 1, NOON), 50);
+  assert.equal(roadLimit(w32, 'car', 1, WED_23), 50);
+  assert.equal(roadLimit(w32, 'moto', 1, WED_23), 40);
+  // Thẻ theo giờ riêng của loại xe vẫn dùng được.
+  assert.equal(roadLimit({ ...w31, t: { 'maxspeed:motorcycle:conditional': '40 @ (22:00-06:00)' } }, 'moto', 1, WED_23), 40);
+});
+
+test('đổi giới hạn tốc độ theo chiều đi (maxspeed:forward/backward)', () => {
+  const roads = roadsOf([
+    way(1, NORTH.slice(0, 31), { c: 50, m: 50 }),
+    way(2, NORTH.slice(30, 61), { c: null, m: null, cf: 60, cb: 40, mf: 60, mb: 40 }),
+    way(3, NORTH.slice(60), { c: 50, m: 50 }),
+  ]);
+  const north = spoken(drive(roads, { end: 900 })).map((r) => r.say);
+  assert.ok(north.some((x) => /tốc độ tối đa 60 ki lô mét trên giờ$/.test(x)), JSON.stringify(north));
+  assert.ok(!north.some((x) => /40 ki lô mét/.test(x)), JSON.stringify(north));
+  const south = spoken(drive(roads, { ...SOUTHBOUND, end: 900 })).map((r) => r.say);
+  assert.ok(south.some((x) => /tốc độ tối đa 40 ki lô mét trên giờ$/.test(x)), JSON.stringify(south));
+  assert.ok(!south.some((x) => /60 ki lô mét/.test(x)), JSON.stringify(south));
+});
+
+test('vào đường cao tốc từ đường thường: IE.452 "bắt đầu đường cao tốc", không kèm con số; từ nhánh nối hay cao tốc khác thì không', () => {
+  const entry = (h1, h2) => roadsOf([way(1, NORTH.slice(0, 51), { h: h1 }), way(2, line(at(500), N, 500), { h: h2 })]);
+  const said = spoken(drive(entry('trunk', 'motorway'), { end: 480 }));
+  assert.deepEqual(said.map((r) => r.say), ['Phía trước 150 mét, bắt đầu đường cao tốc']);
+  assert.deepEqual([said[0].fired[0].code, said[0].fired[0].value], ['IE.452', null]);
+  assert.deepEqual(spoken(drive(entry('primary', 'motorway_link'), { end: 480 })).map((r) => r.say), ['Phía trước 150 mét, bắt đầu đường cao tốc']);
+  for (const [a, b] of [['motorway_link', 'motorway'], ['motorway', 'motorway'], ['motorway', 'motorway_link'], ['motorway', 'trunk']]) {
+    assert.deepEqual(spoken(drive(entry(a, b), { end: 480 })).map((r) => r.say), [], `${a} → ${b}`);
+  }
+});
+
+test('IE.452 không đọc lại khi ra trạm dừng nghỉ (đường service) rồi vào lại cao tốc', () => {
+  const pieces = (classes) => {
+    let s0 = 0;
+    return roadsOf(
+      classes.map(([h, len], i) => {
+        const w = way(i + 1, line(at(s0), N, len), { h, o: 1 });
+        s0 += len;
+        return w;
+      })
+    );
+  };
+  const says = (roads) => spoken(drive(roads, { end: 950, speed: 20 })).map((r) => r.say).filter((x) => /cao tốc/.test(x));
+  assert.deepEqual(says(pieces([['motorway', 300], ['service', 200], ['motorway_link', 150], ['motorway', 350]])), []);
+  assert.deepEqual(says(pieces([['motorway_link', 300], ['service', 200], ['motorway_link', 150], ['motorway', 350]])), []);
+  // Hành lang bắt đầu ở đường service: không biết xe đến từ đâu, im.
+  assert.deepEqual(says(pieces([['service', 300], ['motorway_link', 300], ['motorway', 400]])), []);
+  // Từ đường thường qua đường gom vào nhánh nối: vẫn báo.
+  assert.deepEqual(says(pieces([['trunk', 300], ['service', 100], ['motorway_link', 200], ['motorway', 400]])), [
+    'Phía trước 150 mét, bắt đầu đường cao tốc',
+  ]);
+  assert.deepEqual(says(pieces([['primary', 200], ['primary_link', 200], ['motorway_link', 200], ['motorway', 400]])), [
+    'Phía trước 150 mét, bắt đầu đường cao tốc',
+  ]);
+});
+
+test('R.306 không đọc lại sau đoạn cầu không ghi minspeed; trị số khác thì đọc', () => {
+  const corridor = (ms3) =>
+    roadsOf([
+      way(1, line(O, N, 300), { h: 'motorway_link', o: 1 }),
+      way(2, line(at(300), N, 300), { h: 'motorway', o: 1, c: 100, t: { minspeed: '60' } }),
+      way(3, line(at(600), N, 60), { h: 'motorway', o: 1, c: 100 }), // cầu
+      way(4, line(at(660), N, 340), { h: 'motorway', o: 1, c: 100, t: { minspeed: ms3 } }),
+    ]);
+  const r306 = (roads) => spoken(drive(roads, { end: 980, speed: 22 })).filter((r) => r.fired.some((it) => it.code === 'R.306'));
+  const same = r306(corridor('60'));
+  assert.equal(same.length, 1, JSON.stringify(same.map((r) => [r.x, r.say])));
+  assert.ok(same[0].x < 300);
+  const other = r306(corridor('80'));
+  assert.equal(other.length, 2);
+  assert.match(other[1].say, /tốc độ tối thiểu 80 ki lô mét trên giờ/);
+  // Ra khỏi cao tốc rồi vào cao tốc khác cùng minspeed: đọc lại.
+  const roads = roadsOf([
+    way(1, line(O, N, 300), { h: 'motorway', o: 1, c: 100, t: { minspeed: '60' } }),
+    way(2, line(at(300), N, 300), { h: 'trunk', o: 1, c: 80 }),
+    way(3, line(at(600), N, 400), { h: 'motorway', o: 1, c: 100, t: { minspeed: '60' } }),
+  ]);
+  assert.equal(r306(roads).length, 1, 'đọc lại khi vào cao tốc thứ hai');
+});
+
+test('tốc độ tối thiểu (R.306), đường ngầm (W.216a) trên đường; đường thu phí chỉ hiện, không đọc', () => {
+  const next = (t) => roadsOf([way(1, NORTH.slice(0, 51)), way(2, line(at(500), N, 500), { t })]);
+  const min = spoken(drive(next({ minspeed: '60' }), { end: 480 }));
+  assert.deepEqual(min.map((r) => r.say), ['Phía trước 150 mét, tốc độ tối thiểu 60 ki lô mét trên giờ']);
+  assert.equal(min[0].fired[0].code, 'R.306');
+  assert.deepEqual(spoken(drive(next({ ford: 'yes' }), { end: 480 })).map((r) => r.say), ['Phía trước 150 mét, đường ngầm, chú ý nước']);
+  assert.deepEqual(spoken(drive(next({ minspeed: 'none', ford: 'no' }), { end: 480 })), []);
+  const toll = drive(next({ toll: 'yes' }), { end: 480 });
+  assert.deepEqual(spoken(toll), []);
+  assert.ok(toll.some((r) => r.upcoming.some((it) => it.kind === 'toll' && it.title === 'Đường có thu phí')), 'vẫn hiện trong danh sách sắp tới');
+  // Nút ford=yes trên đường.
+  const node = spoken(drive(straight([feat(1, at(400), { ford: 'yes' })]), { end: 380 }));
+  assert.deepEqual(node.map((r) => r.say), ['Phía trước 150 mét, đường ngầm, chú ý nước']);
 });

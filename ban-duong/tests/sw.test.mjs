@@ -11,7 +11,7 @@ const SW_SOURCE = readFileSync(join(ROOT, 'sw.js'), 'utf8');
 const ORIGIN = 'https://app.test';
 const SCOPE = `${ORIGIN}/ban-duong/`;
 // Tên bộ nhớ đệm vỏ ứng dụng gắn VERSION và phạm vi của service worker.
-const SHELL_NAME = 'banduong-shell-v13@/ban-duong/';
+const SHELL_NAME = 'banduong-shell-v14@/ban-duong/';
 
 // Tệp giai đoạn 2 (đang được viết song song). Khi chưa có, kiểm tra "có trên đĩa" chỉ là todo, không làm đỏ bộ thử.
 const PHASE2_FILES = ['js/camctl.js', 'js/camui.js', 'js/evalcrops.js'];
@@ -173,7 +173,7 @@ function loadSw({ fetchImpl, now } = {}) {
 
 test('VERSION đã tăng và tên bộ nhớ đệm ML cố định, không gắn VERSION', () => {
   const { sw } = loadSw();
-  assert.equal(sw.VERSION, 'v13');
+  assert.equal(sw.VERSION, 'v14');
   assert.equal(sw.SHELL, SHELL_NAME);
   assert.equal(sw.ML, 'banduong-ml-1');
   assert.ok(!sw.ML.startsWith('banduong-shell-'));
@@ -342,6 +342,33 @@ test('vỏ ứng dụng: như trước, ưu tiên mạng; mất mạng thì dùn
   assert.ok(miss.error);
   // Không phải GET: không can thiệp.
   assert.equal((await t.dispatchFetch(`${SCOPE}js/main.js`, { method: 'POST' })).handled, false);
+});
+
+test('data/community.json: nạp trước lúc cài, nhưng khi chạy luôn ưu tiên mạng (bản mới tới ngay); mất mạng dùng bản đã lưu gần nhất', async () => {
+  const DATA = `${SCOPE}data/community.json`;
+  let body = '{"schema":1,"updated":"2026-11-27","items":[]}';
+  let online = true;
+  const t = loadSw({
+    fetchImpl: (req) => {
+      if (!online) throw new TypeError('offline');
+      return netResponse(new URL(req.url).pathname === '/ban-duong/data/community.json' ? body : 'x', { url: req.url });
+    },
+  });
+  assert.ok(t.sw.SHELL_FILES.includes('data/community.json'));
+  await t.dispatchLifecycle('install');
+  const shell = t.caches.get(SHELL_NAME);
+  assert.ok(shell.added.some((r) => r.url === DATA), 'phải nạp trước để lần mở đầu khi mất mạng vẫn có');
+  await shell.put(DATA, new Response(body)); // bản nạp lúc cài (addAll của bộ nhớ đệm giả không tự lưu)
+
+  // Chủ ứng dụng đăng bản mới (không đổi VERSION): lần tải sau nhận ngay bản mới, không phải bản đã nạp trước.
+  body = '{"schema":1,"updated":"2026-12-01","items":[]}';
+  const fresh = await t.dispatchFetch(DATA, { cache: 'no-cache' });
+  assert.equal(await fresh.response.text(), body);
+  assert.equal(t.fetched.at(-1), DATA);
+
+  online = false;
+  const off = await t.dispatchFetch(DATA, { cache: 'no-cache' });
+  assert.equal(await off.response.text(), body, 'mất mạng: bản đã lưu gần nhất');
 });
 
 test('vỏ ứng dụng: câu trả lời không ok không được lưu', async () => {
@@ -515,7 +542,7 @@ test('kích hoạt: chỉ xoá vỏ ứng dụng cũ của chính phạm vi này
   const other = `${ORIGIN}/other/`;
   await (await t.caches.open('banduong-shell-v10-other')).put(other, home(other));
   // Tên mới: bản cũ của phạm vi này xoá; của phạm vi khác giữ; tên đúng bản này giữ.
-  for (const name of ['banduong-shell-v11@/ban-duong/', 'banduong-shell-v12@/ban-duong/', 'banduong-shell-v12@/other/', 'banduong-shell-v99@/ban-duong/x/', SHELL_NAME, 'banduong-ml-1', 'banduong-tiles-v1']) {
+  for (const name of ['banduong-shell-v11@/ban-duong/', 'banduong-shell-v12@/ban-duong/', 'banduong-shell-v13@/ban-duong/', 'banduong-shell-v12@/other/', 'banduong-shell-v99@/ban-duong/x/', SHELL_NAME, 'banduong-ml-1', 'banduong-tiles-v1']) {
     await t.caches.open(name);
   }
   await t.dispatchLifecycle('activate');
@@ -523,7 +550,7 @@ test('kích hoạt: chỉ xoá vỏ ứng dụng cũ của chính phạm vi này
     'banduong-ml-1',
     'banduong-shell-v10-other',
     'banduong-shell-v12@/other/',
-    'banduong-shell-v13@/ban-duong/',
+    SHELL_NAME,
     'banduong-shell-v99@/ban-duong/x/',
     'banduong-tiles-v1',
   ]);

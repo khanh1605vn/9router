@@ -1,1 +1,6 @@
 /dist/
+# Dữ liệu cộng đồng (data/community.json) là tệp của ứng dụng, phải vào kho dù .gitignore gốc bỏ mọi data/. Chỉ mở
+# đúng tệp đó: tệp khác lỡ đặt vào data/ vẫn bị bỏ, không vào kho, không lên GitHub Pages hay APK.
+!/data/
+/data/*
+!/data/community.json
