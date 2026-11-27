@@ -1,0 +1,22 @@
+# Gradle và Android Studio
+.gradle/
+build/
+/app/build/
+local.properties
+.idea/
+*.iml
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Khoá ký: không bao giờ đưa vào kho mã (chỉ dùng khoá debug của máy)
+*.jks
+*.keystore
+*.p12
+keystore.properties
+signing.properties
+
+# Tệp tạo ra khi build
+*.apk
+*.aab

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Khai báo ứng dụng dùng Car App Library (mẫu giao diện) trên Android Auto. -->
+<automotiveApp>
+    <uses name="template" />
+</automotiveApp>

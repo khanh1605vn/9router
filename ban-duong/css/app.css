@@ -1,0 +1,772 @@
+/* Bạn Đường — bản đồ phủ kín màn hình; mọi điều khiển nổi bên trên.
+   Màu lấy từ hệ thống biển báo đường bộ Việt Nam: xanh lam biển chỉ dẫn, xanh lục cao tốc,
+   vàng biển cảnh báo, đỏ viền biển cấm. */
+
+:root {
+  --sign-blue: #0a57a4;
+  --sign-blue-ink: #063f7a;
+  --sign-green: #0b7a45;
+  --sign-red: #d5202a;
+  --sign-yellow: #ffd21f;
+  --amber: #e08a00;
+  --ink: #10202f;
+  --ink-2: #4b5c6c;
+  --ink-3: #8291a0;
+  --surface: #ffffff;
+  --surface-2: #eef2f6;
+  --line: #dde4ea;
+  --shadow: 0 6px 22px rgba(16, 32, 47, 0.2);
+  --shadow-sm: 0 2px 8px rgba(16, 32, 47, 0.22);
+  --ui: "Be Vietnam Pro", system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --num: "Barlow Condensed", "Be Vietnam Pro", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --sheet-h: 96px;
+  --speedo-h: 84px; /* chiều cao đồng hồ tốc độ, để dải biển kế tiếp nằm ngay phía trên */
+  --col-w: 360px; /* bề rộng cột điều khiển bên trái ở giao diện màn hình ô tô */
+  --gap: 12px;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --sign-blue: #1668bd;
+  --ink: #edf2f7;
+  --ink-2: #b4c1cd;
+  --ink-3: #8090a0;
+  --surface: #17222e;
+  --surface-2: #223141;
+  --line: #2f3f50;
+  --shadow: 0 6px 22px rgba(0, 0, 0, 0.55);
+  --shadow-sm: 0 2px 8px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  overscroll-behavior: none;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: 400 15px/1.45 var(--ui);
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+}
+
+button, input, select { font: inherit; color: inherit; }
+/* Chỉ iOS (-webkit-touch-callout): ô chọn, ô nhập chữ dưới 16px làm Safari tự phóng to trang khi chạm vào. */
+@supports (-webkit-touch-callout: none) {
+  select, textarea, input:not([type="checkbox"]):not([type="radio"]):not([type="range"]) { font-size: max(16px, 1em); }
+}
+button { cursor: pointer; border: 0; background: none; padding: 0; touch-action: manipulation; }
+:focus-visible { outline: 3px solid var(--sign-yellow); outline-offset: 2px; }
+svg { display: block; flex: none; }
+h2, h3, p { margin: 0; }
+
+#map {
+  position: fixed;
+  inset: 0;
+  background: var(--surface-2);
+  /* Giữ tay trên bản đồ (chọn điểm) không bật kính lúp, bôi chọn chữ hay menu của iOS. */
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+/* Mở từ Màn hình chính trên iPhone: thanh trạng thái trong suốt (black-translucent) nằm đè lên bản đồ, chữ trắng. Dải
+   tối mờ cao đúng vùng tai thỏ giúp đọc được giờ, pin trên bản đồ sáng; máy không có vùng này thì cao 0. */
+body::before {
+  content: "";
+  position: fixed;
+  z-index: 50;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: env(safe-area-inset-top, 0px);
+  background: rgba(10, 20, 30, 0.42);
+  pointer-events: none;
+}
+.map-inverted .maplibregl-canvas { filter: invert(1) hue-rotate(180deg) brightness(0.95) contrast(0.9); }
+.maplibregl-ctrl-bottom-right { bottom: calc(var(--sheet-h) + 4px); right: calc(66px + env(safe-area-inset-right, 0px)); }
+.maplibregl-ctrl-attrib { font: 11px/1.4 var(--ui); }
+
+/* ---------- Vùng trên: ô tìm kiếm, biển chỉ dẫn, cảnh báo ---------- */
+
+#top {
+  position: fixed;
+  z-index: 5;
+  top: 0;
+  left: 0;
+  right: 0;
+  max-width: 540px;
+  margin: 0 auto;
+  padding: calc(env(safe-area-inset-top, 0px) + 10px) max(12px, env(safe-area-inset-right, 0px)) 0 max(12px, env(safe-area-inset-left, 0px));
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  pointer-events: none;
+}
+#top > * { pointer-events: auto; }
+
+.searchbar { display: flex; gap: 10px; align-items: center; }
+.search-trigger {
+  flex: 1;
+  min-width: 0;
+  height: 50px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--surface);
+  border-radius: 25px;
+  box-shadow: var(--shadow);
+  color: var(--ink-2);
+  text-align: left;
+}
+.search-hint { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.icon-btn {
+  width: 50px;
+  height: 50px;
+  flex: none;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  color: var(--ink);
+}
+.icon-btn.quiet { width: 44px; height: 44px; background: transparent; box-shadow: none; color: var(--ink-2); }
+.icon-btn.quiet:active { background: var(--surface-2); }
+
+/* Biển chỉ dẫn: nền xanh, viền trắng lùi vào trong như biển thật. */
+.sign {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  background: var(--sign-blue);
+  color: #fff;
+  box-shadow: var(--shadow);
+}
+.sign::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  border-radius: 12px;
+  pointer-events: none;
+}
+.sign.expressway { background: var(--sign-green); }
+.sign-icon { flex: none; width: 60px; height: 60px; display: grid; place-items: center; }
+.sign-body { min-width: 0; }
+.sign-dist { font: 700 38px/1 var(--num); letter-spacing: 0.01em; font-variant-numeric: tabular-nums; }
+.sign-instr { margin-top: 4px; font-weight: 600; font-size: 17px; line-height: 1.25; text-wrap: balance; }
+.sign-then {
+  align-self: flex-start;
+  margin-top: -4px;
+  padding: 6px 12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: 10px;
+  background: var(--sign-blue-ink);
+  color: #fff;
+  font-size: 13.5px;
+  font-weight: 500;
+  box-shadow: var(--shadow-sm);
+}
+
+/* Cảnh báo: nền vàng chữ đen như biển cảnh báo. */
+.alert {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px 10px 10px;
+  border-radius: 16px;
+  background: var(--sign-yellow);
+  color: #151515;
+  box-shadow: var(--shadow);
+  animation: drop 0.25s ease-out;
+}
+.alert-icon {
+  flex: none;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--sign-red);
+  color: #fff;
+}
+.alert-body { flex: 1; min-width: 0; }
+.alert-title { font-weight: 700; font-size: 15.5px; line-height: 1.25; }
+.alert-meter { margin-top: 6px; height: 5px; border-radius: 3px; background: rgba(0, 0, 0, 0.16); overflow: hidden; }
+.alert-meter i { display: block; height: 100%; width: 0; background: var(--sign-red); border-radius: 3px; transition: width 0.4s linear; }
+.alert-dist { flex: none; font: 700 30px/1 var(--num); font-variant-numeric: tabular-nums; }
+/* Biển báo: hình biển thay cho huy hiệu tròn đỏ; bấm vào để xem chi tiết. */
+.alert-icon.is-sign { width: 50px; height: 50px; border-radius: 0; background: none; }
+.alert-icon.is-sign svg { filter: drop-shadow(0 1px 1.5px rgba(0, 0, 0, 0.28)); }
+.alert.tappable { cursor: pointer; }
+.alert.tappable:active { filter: brightness(0.96); }
+
+@keyframes drop { from { transform: translateY(-12px); opacity: 0; } to { transform: none; opacity: 1; } }
+
+/* ---------- Nút nổi và đồng hồ tốc độ ---------- */
+
+#side {
+  position: fixed;
+  z-index: 4;
+  right: max(12px, env(safe-area-inset-right, 0px));
+  bottom: calc(var(--sheet-h) + 12px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.fab {
+  width: 50px;
+  height: 50px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow);
+}
+.fab:active { transform: scale(0.95); }
+.fab.active { background: var(--sign-blue); color: #fff; }
+.fab.off { color: var(--ink-3); }
+.fab.text { font: 700 20px/1 var(--num); color: var(--sign-blue); }
+:root[data-theme="dark"] .fab.text { color: #8cc4ff; }
+
+#speedo {
+  position: fixed;
+  z-index: 4;
+  left: max(12px, env(safe-area-inset-left, 0px));
+  bottom: calc(var(--sheet-h) + 12px);
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  pointer-events: none;
+}
+.speed {
+  width: 84px;
+  height: 84px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: #14212e;
+  color: #fff;
+  border: 4px solid #fff;
+  box-shadow: var(--shadow);
+}
+.speed span { font: 700 38px/0.95 var(--num); font-variant-numeric: tabular-nums; }
+.speed small { font-size: 11px; font-weight: 500; opacity: 0.8; }
+.speed.near { border-color: var(--sign-yellow); }
+.speed.over { background: var(--sign-red); border-color: #fff; animation: pulse 0.9s ease-in-out infinite; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 10px rgba(213, 32, 42, 0.35); } }
+
+/* Biển giới hạn tốc độ: tròn trắng viền đỏ. */
+.limit {
+  width: 62px;
+  height: 62px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #fff;
+  border: 7px solid var(--sign-red);
+  color: #111;
+  box-shadow: var(--shadow);
+  font: 700 27px/1 var(--num);
+  font-variant-numeric: tabular-nums;
+}
+.limit.custom { border-style: dashed; border-color: var(--amber); }
+
+/* Dải biển kế tiếp: ngay trên đồng hồ tốc độ, chữ số to để liếc là đọc được. */
+.sign-strip {
+  position: fixed;
+  z-index: 4;
+  left: max(12px, env(safe-area-inset-left, 0px));
+  bottom: calc(var(--sheet-h) + 12px + var(--speedo-h) + 10px);
+  display: flex;
+  gap: 8px;
+  pointer-events: none;
+}
+.strip-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px 4px 4px;
+  border-radius: 26px;
+  background: var(--surface);
+  color: var(--ink);
+  box-shadow: var(--shadow-sm);
+}
+.strip-dist { font: 700 22px/1 var(--num); font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* ---------- Bảng dưới ---------- */
+
+#sheet {
+  position: fixed;
+  z-index: 6;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  max-width: 540px;
+  margin: 0 auto;
+  padding: 14px max(14px, env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px)) max(14px, env(safe-area-inset-left, 0px));
+  background: var(--surface);
+  border-radius: 20px 20px 0 0;
+  box-shadow: 0 -4px 22px rgba(16, 32, 47, 0.18);
+}
+.view { display: flex; flex-direction: column; gap: var(--gap); }
+.row { display: flex; align-items: center; gap: 10px; }
+.row.top { align-items: flex-start; }
+.row.wrap { flex-wrap: wrap; }
+.grow { flex: 1; }
+.min0 { min-width: 0; }
+
+.title { font-size: 18px; font-weight: 700; line-height: 1.3; overflow-wrap: anywhere; }
+.sub { color: var(--ink-2); font-size: 13.5px; overflow-wrap: anywhere; }
+.status-line { color: var(--ink-2); font-size: 13.5px; }
+.status-line.warn { color: var(--sign-red); font-weight: 500; }
+
+.chips { display: flex; gap: 8px; }
+.chip, .btn {
+  min-height: 46px;
+  padding: 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-radius: 23px;
+  background: var(--surface-2);
+  color: var(--ink);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.chip:active, .btn:active { filter: brightness(0.94); }
+.btn.primary { background: var(--sign-blue); color: #fff; }
+.btn.danger { background: transparent; color: var(--sign-red); box-shadow: inset 0 0 0 2px currentColor; }
+.btn.compact { width: 46px; padding: 0; flex: none; }
+.btn:disabled { opacity: 0.55; cursor: default; }
+
+.segmented { display: flex; padding: 4px; border-radius: 14px; background: var(--surface-2); }
+.segmented button {
+  flex: 1;
+  min-height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-radius: 10px;
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.segmented button[aria-pressed="true"] { background: var(--surface); color: var(--sign-blue); box-shadow: var(--shadow-sm); }
+:root[data-theme="dark"] .segmented button[aria-pressed="true"] { color: #8cc4ff; }
+
+.route-list { display: flex; gap: 10px; overflow-x: auto; padding: 2px; margin: -2px; scrollbar-width: none; }
+.route-list::-webkit-scrollbar { display: none; }
+.route-card {
+  flex: 1 0 150px;
+  max-width: 260px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--surface-2);
+  box-shadow: inset 0 0 0 2px transparent;
+  text-align: left;
+}
+.route-card[aria-pressed="true"] { background: var(--surface); box-shadow: inset 0 0 0 2px var(--sign-blue); }
+.route-time { font: 700 26px/1.05 var(--num); }
+.route-meta { color: var(--ink-2); font-size: 13px; }
+.route-via { margin-top: 2px; color: var(--ink-2); font-size: 12.5px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.tag { padding: 1px 7px; border-radius: 8px; font-size: 11.5px; font-weight: 600; background: var(--sign-yellow); color: #151515; }
+.tag.green { background: var(--sign-green); color: #fff; }
+
+.eta { display: flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.nowrap { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.eta span { font: 700 32px/1 var(--num); font-variant-numeric: tabular-nums; }
+.eta small { color: var(--ink-2); font-size: 13px; }
+.car-line { margin-top: 2px; color: var(--ink-2); font-size: 13.5px; font-variant-numeric: tabular-nums; }
+
+/* ---------- Bảng toàn màn hình: tìm kiếm, cài đặt, các bước ---------- */
+
+.panel {
+  position: fixed;
+  z-index: 20;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  padding-top: env(safe-area-inset-top, 0px);
+}
+.panel-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px max(10px, env(safe-area-inset-right, 0px)) 8px max(6px, env(safe-area-inset-left, 0px));
+  border-bottom: 1px solid var(--line);
+}
+.panel-title { font-size: 18px; font-weight: 700; }
+.panel-body {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 8px max(16px, env(safe-area-inset-right, 0px)) calc(24px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+}
+#searchInput {
+  width: 100%;
+  height: 46px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 23px;
+  background: var(--surface-2);
+  outline: none;
+  font-size: 16px; /* dưới 16px thì iOS tự phóng to trang khi gõ */
+}
+#searchInput:focus-visible { box-shadow: inset 0 0 0 2px var(--sign-blue); }
+
+.list-label { margin: 14px 0 4px; color: var(--ink-2); font-size: 13px; font-weight: 700; }
+.result {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+}
+.result-icon { flex: none; width: 38px; height: 38px; display: grid; place-items: center; border-radius: 50%; background: var(--surface-2); color: var(--ink-2); }
+.result-text { flex: 1; min-width: 0; }
+.result-name { font-weight: 600; overflow-wrap: anywhere; }
+.result-addr { color: var(--ink-2); font-size: 13px; overflow-wrap: anywhere; }
+.result-dist { flex: none; color: var(--ink-3); font-size: 13px; font-variant-numeric: tabular-nums; }
+.empty { padding: 28px 8px; color: var(--ink-2); text-align: center; }
+
+/* Tiêu đề mục viết hoa đúng chính tả (chỉ chữ đầu), phân biệt bằng cỡ chữ, độ đậm và màu. */
+.settings h3 { margin: 22px 0 8px; color: var(--ink-2); font-size: 13px; font-weight: 700; }
+.settings h3:first-child { margin-top: 10px; }
+.opt { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+.opt > span { flex: 1; min-width: 0; font-weight: 500; }
+.opt small { display: block; margin-top: 2px; color: var(--ink-2); font-size: 12.5px; font-weight: 400; }
+.opt select { flex: none; height: 40px; padding: 0 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+.note { margin: 8px 0; color: var(--ink-2); font-size: 13px; }
+.note.warn { color: var(--sign-red); font-weight: 500; }
+.settings .segmented { margin-bottom: 4px; }
+.sign-opt .opt-art { flex: none; width: 34px; height: 34px; display: grid; place-items: center; }
+
+/* Kết nối với ô tô */
+.obd-card { margin: 4px 0 10px; padding: 12px 14px; border-radius: 14px; background: var(--surface-2); }
+.obd-status { font-weight: 600; }
+.obd-status.ok { color: var(--sign-green); }
+:root[data-theme="dark"] .obd-status.ok { color: #5fd197; }
+.obd-live { margin-top: 4px; color: var(--ink-2); font-size: 14px; font-variant-numeric: tabular-nums; }
+.obd-actions { margin-bottom: 4px; }
+.obd-actions .btn { white-space: normal; text-align: center; line-height: 1.25; }
+.dtc-list { display: flex; flex-wrap: wrap; gap: 8px; margin: 6px 0; padding: 0; list-style: none; }
+.dtc-list li { padding: 4px 10px; border-radius: 8px; background: var(--surface-2); font: 700 19px/1.2 var(--num); letter-spacing: 0.03em; }
+
+/* Chi tiết biển báo (bấm vào thanh cảnh báo) */
+.sign-detail { display: flex; align-items: center; gap: 16px; }
+.sign-detail-art { flex: none; }
+.sign-detail-dist { margin-top: 2px; font: 700 28px/1.1 var(--num); font-variant-numeric: tabular-nums; }
+
+.switch {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: none;
+  position: relative;
+  width: 50px;
+  height: 30px;
+  margin: 0;
+  border-radius: 15px;
+  background: var(--ink-3);
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+  transition: transform 0.15s;
+}
+.switch:checked { background: var(--sign-green); }
+.switch:checked::after { transform: translateX(20px); }
+.switch:disabled { opacity: 0.45; cursor: default; }
+
+.trip-list { display: flex; flex-direction: column; }
+.trip { display: flex; justify-content: space-between; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 13.5px; }
+.trip b { font-weight: 600; }
+.trip span { color: var(--ink-2); text-align: right; }
+
+.step-list { list-style: none; margin: 0; }
+.step { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.step-icon { flex: none; width: 40px; height: 40px; display: grid; place-items: center; border-radius: 10px; background: var(--sign-blue); color: #fff; }
+.step.current .step-text { font-weight: 700; }
+.step-text { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.step-dist { flex: none; color: var(--ink-2); font: 600 17px/1 var(--num); }
+
+/* ---------- Hộp thoại, thông báo ---------- */
+
+.modal {
+  position: fixed;
+  z-index: 30;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  background: rgba(10, 20, 30, 0.45);
+}
+.modal-card {
+  width: 100%;
+  max-width: 540px;
+  max-height: 86%;
+  overflow-y: auto;
+  padding: 16px max(16px, env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px));
+  border-radius: 20px 20px 0 0;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+/* Thẻ hộp thoại nhận tiêu điểm khi mở (main.js openModal) chỉ để trình đọc màn hình và phím Tab bắt đầu từ trong hộp. */
+.modal-card:focus { outline: none; }
+.report-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(98px, 1fr)); gap: 10px; }
+.report-btn { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 12px 6px; border-radius: 14px; background: var(--surface-2); font-size: 13px; font-weight: 600; text-align: center; line-height: 1.25; }
+.report-badge { width: 46px; height: 46px; display: grid; place-items: center; border-radius: 50%; color: #fff; }
+.stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.stat { padding: 12px; border-radius: 14px; background: var(--surface-2); }
+.stat b { display: block; font: 700 28px/1.05 var(--num); }
+.stat span { color: var(--ink-2); font-size: 12.5px; }
+
+#toast {
+  position: fixed;
+  z-index: 40;
+  left: 50%;
+  bottom: calc(var(--sheet-h) + 16px);
+  transform: translate(-50%, 12px);
+  width: max-content;
+  max-width: min(92vw, 460px);
+  padding: 10px 16px;
+  border-radius: 14px;
+  background: #14212e;
+  color: #fff;
+  font-size: 14px;
+  text-align: center;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.2s, transform 0.2s;
+}
+#toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+/* ---------- Ký hiệu trên bản đồ ---------- */
+
+.puck svg { filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.45)); overflow: visible; }
+.puck-arrow { fill: #1b6fd8; stroke: #fff; stroke-width: 3.5; stroke-linejoin: round; }
+.puck-dot { display: none; fill: #1b6fd8; stroke: #fff; stroke-width: 4; }
+.puck.no-heading .puck-arrow { display: none; }
+.puck.no-heading .puck-dot { display: block; }
+.dest-pin svg { filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.4)); overflow: visible; }
+.dest-pin path { fill: var(--sign-red); stroke: #fff; stroke-width: 2; }
+.dest-pin circle { fill: #fff; }
+
+/* ---------- Camera nhận diện biển (thử nghiệm) ---------- */
+
+/* Nút camera nhỏ cạnh các nút bản đồ: xanh lục khi camera đang mở, xám khi tạm dừng, gạch chéo khi cần bật lại.
+   Hổ phách khi camera đang mở mà hình không dùng được (bị che, quá tối, quá sáng). */
+.fab.cam-chip.cam-on { background: var(--sign-green); color: #fff; }
+.fab.cam-chip.cam-on.cam-warn { background: var(--amber); color: #10202f; } /* biểu tượng tối cố định (6,2:1), không dùng --ink vì nó sáng ở chế độ tối */
+.fab.cam-chip.cam-paused { color: var(--ink-3); }
+.fab.cam-chip.cam-off { color: var(--ink-2); }
+
+/* Biển do camera ghi nhận trên thanh vàng, dải biển và hộp chi tiết. Biển chưa xác nhận: viền nét đứt và chú thích. */
+.alert.quiet { outline: 2.5px dashed rgba(0, 0, 0, 0.62); outline-offset: -6px; }
+.alert-cap { display: block; margin-top: 1px; font-size: 12.5px; font-weight: 600; line-height: 1.25; opacity: 0.78; }
+.alert-icon, .strip-art { position: relative; }
+.strip-art { display: block; }
+.cam-badge {
+  position: absolute;
+  right: -4px;
+  bottom: -3px;
+  width: 20px;
+  height: 20px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: #14212e;
+  color: #fff;
+  box-shadow: 0 0 0 2px #fff;
+  pointer-events: none;
+}
+.strip-item.quiet { outline: 2px dashed var(--ink-2); outline-offset: -3px; }
+.learned-cap { display: inline-block; align-self: flex-start; padding: 2px 10px; border-radius: 10px; border: 1.5px dashed var(--ink-2); color: var(--ink); font-weight: 600; }
+.limit.camera { grid-auto-flow: row; align-content: center; gap: 0; }
+.limit-src { font: 600 9px/1 var(--ui); letter-spacing: 0.01em; }
+
+/* Mục trong Cài đặt */
+.cam-count { color: var(--ink); font-weight: 600; font-size: 14px; }
+.cam-actions { margin: 4px 0; }
+.obd-status.warn { color: var(--sign-red); }
+/* Chữ đỏ cảnh báo trên nền tối: --sign-red (#d5202a) chỉ đạt 3,1:1 trên --surface tối, nên dùng đỏ sáng (7:1).
+   Không đổi chính --sign-red vì nó còn là nền sau chữ trắng (thanh cảnh báo, đồng hồ quá tốc độ). */
+:root[data-theme="dark"] .obd-status.warn,
+:root[data-theme="dark"] .note.warn,
+:root[data-theme="dark"] .status-line.warn { color: #ff8a8f; }
+.cam-intro .note { margin: 0; color: var(--ink); font-size: 14px; }
+.cam-intro .note b { font-weight: 700; }
+.cam-sub { margin: 8px 0 0; color: var(--ink-2); font-size: 13px; font-weight: 700; }
+
+/* "Kiểm tra camera": hình xem trước đúng tỉ lệ khung, đường chân trời kéo được. */
+.cam-preview { position: relative; width: 100%; aspect-ratio: 16 / 9; max-height: 52vh; margin: 0 auto; border-radius: 14px; overflow: hidden; background: #0b1016; }
+.cam-preview video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; }
+.cam-preview-msg { position: absolute; inset: 0; display: grid; place-items: center; padding: 16px; color: #fff; font-size: 14px; text-align: center; }
+.cam-aim { position: absolute; inset: 0; cursor: grab; touch-action: none; }
+.cam-aim:active { cursor: grabbing; }
+/* Viền tập trung vẽ vào trong (khung xem trước cắt phần tràn), trắng có quầng tối để khác đường chân trời vàng. */
+.cam-aim:focus-visible { outline: 3px solid #fff; outline-offset: -5px; box-shadow: inset 0 0 0 5px rgba(0, 0, 0, 0.55); border-radius: inherit; }
+.cam-horizon { position: absolute; left: 0; right: 0; height: 0; border-top: 2px dashed var(--sign-yellow); box-shadow: 0 1px 0 rgba(0, 0, 0, 0.55); }
+.cam-foe { position: absolute; width: 30px; height: 30px; margin: -15px 0 0 -15px; border: 3px solid var(--sign-yellow); border-radius: 50%; box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.5); }
+.cam-pick { display: flex; flex-direction: column; gap: 6px; font-weight: 500; }
+.cam-pick select { width: 100%; height: 44px; padding: 0 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); }
+html.car-ui .cam-pick select { height: 56px; }
+.cam-stats .stat b { font-size: 24px; font-variant-numeric: tabular-nums; }
+.cam-extra .note { margin: 4px 0; }
+
+/* Danh sách "Biển camera ghi nhận" */
+.cam-review { gap: 0; }
+.lrow { display: flex; flex-direction: column; gap: 8px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.lrow-main { display: flex; align-items: center; gap: 12px; }
+.lrow-art { flex: none; width: 44px; height: 44px; display: grid; place-items: center; }
+.lrow.quiet .lrow-art { opacity: 0.85; }
+.lrow-text { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 3px; }
+.lrow-name { font-weight: 600; line-height: 1.3; overflow-wrap: anywhere; }
+.lrow-meta { color: var(--ink-2); font-size: 12.5px; overflow-wrap: anywhere; }
+.lrow-dist { flex: none; color: var(--ink-2); font: 600 18px/1 var(--num); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.lstatus { padding: 1px 8px; border-radius: 8px; font-size: 12px; font-weight: 600; line-height: 1.5; }
+.lstatus.ok { background: var(--sign-green); color: #fff; }
+.lstatus.quiet { border: 1.5px dashed var(--ink-2); color: var(--ink); }
+.lrow-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+@media (min-width: 440px) { .lrow-actions { padding-left: 56px; } }
+.btn.small { min-height: 46px; min-width: 46px; padding: 0 12px; gap: 5px; border-radius: 23px; font-size: 13.5px; } /* vùng bấm như .btn */
+
+/* Lớp biển camera ghi nhận đang hiện trên bản đồ */
+.layer-pill { align-self: flex-start; display: flex; align-items: center; border-radius: 24px; background: var(--surface); color: var(--ink); box-shadow: var(--shadow-sm); }
+.layer-pill-main { min-height: 44px; padding: 0 4px 0 14px; display: inline-flex; align-items: center; gap: 8px; font-weight: 600; font-size: 14px; }
+/* Nút "Có phiên bản mới" của ứng dụng Android */
+.app-update .layer-pill-main > span:first-child { color: var(--sign-green); }
+.app-update .layer-pill-main:disabled { opacity: 1; cursor: default; }
+.app-update { max-width: 100%; }
+.ios-hint .layer-pill-main > span:first-child { color: var(--sign-blue); }
+:root[data-theme="dark"] .ios-hint .layer-pill-main > span:first-child { color: #8cc4ff; }
+.ios-steps { margin: 0; padding-left: 22px; display: flex; flex-direction: column; gap: 8px; line-height: 1.45; }
+.app-update .layer-pill-main { min-height: 48px; padding-right: 8px; text-align: left; }
+
+/* Màn hình hẹp (360 px): thu gọn hàng nút ở bảng dưới để không tràn mép. */
+@media (max-width: 380px) {
+  .chips { gap: 6px; }
+  .chips .chip, .chips .btn { padding: 0 11px; gap: 6px; }
+}
+
+/* Màn hình rộng: bảng toàn màn hình thành cột bên trái. */
+@media (min-width: 760px) {
+  .panel { right: auto; width: 420px; box-shadow: var(--shadow); }
+}
+
+/* Điện thoại xoay ngang: thu gọn biển chỉ dẫn để còn chỗ cho bản đồ. */
+@media (max-height: 460px) {
+  #top { margin: 0; max-width: 400px; }
+  .sign { padding: 8px 12px; }
+  .sign-icon { width: 44px; height: 44px; }
+  .sign-icon svg { width: 44px; height: 44px; }
+  .sign-dist { font-size: 28px; }
+  .sign-instr { font-size: 15px; }
+  :root { --speedo-h: 68px; }
+  .speed { width: 68px; height: 68px; }
+  .speed span { font-size: 30px; }
+  .limit { width: 52px; height: 52px; font-size: 22px; border-width: 6px; }
+  /* Không đủ chỗ giữa thanh cảnh báo và đồng hồ tốc độ: chỉ giữ thanh cảnh báo. */
+  html:not(.car-ui) .sign-strip { display: none; }
+  /* Thanh cảnh báo đang hiện thì ẩn dòng "Sau đó…" để cột bên trái không đè lên đồng hồ tốc độ. */
+  html:not(.car-ui) #top:has(#alertBar:not([hidden])) #navThen { display: none; }
+}
+
+/* ---------- Giao diện màn hình ô tô (màn hình ngang trên xe) ----------
+   Thanh trên và bảng dưới gộp thành một cột bên trái; bản đồ, đồng hồ tốc độ, dải biển và các nút nổi
+   dùng phần còn lại. Chữ và vùng bấm lớn hơn để thao tác khi xe đỗ và liếc nhanh khi đang chạy. */
+html.car-ui #top {
+  right: auto;
+  width: calc(var(--col-w) + env(safe-area-inset-left, 0px));
+  max-width: none;
+  margin: 0;
+  padding: calc(env(safe-area-inset-top, 0px) + 12px) 12px 0 max(12px, env(safe-area-inset-left, 0px));
+}
+html.car-ui #sheet {
+  right: auto;
+  width: calc(var(--col-w) + env(safe-area-inset-left, 0px));
+  max-width: none;
+  margin: 0;
+  padding: 16px 14px calc(16px + env(safe-area-inset-bottom, 0px)) max(14px, env(safe-area-inset-left, 0px));
+  border-radius: 0 20px 0 0;
+}
+html.car-ui #side {
+  right: max(16px, env(safe-area-inset-right, 0px));
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  gap: 12px;
+}
+html.car-ui .fab { width: 60px; height: 60px; }
+html.car-ui .fab svg { width: 28px; height: 28px; }
+html.car-ui .fab.text { font-size: 24px; }
+html.car-ui #speedo,
+html.car-ui .sign-strip { left: calc(var(--col-w) + 16px + env(safe-area-inset-left, 0px)); }
+html.car-ui #speedo { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+html.car-ui .sign-strip { bottom: calc(16px + env(safe-area-inset-bottom, 0px) + var(--speedo-h) + 12px); }
+html.car-ui .maplibregl-ctrl-bottom-right { bottom: 4px; right: 88px; }
+html.car-ui #toast { left: calc(50% + var(--col-w) / 2); bottom: 24px; }
+html.car-ui .sign-dist { font-size: 46px; }
+html.car-ui .sign-instr { font-size: 20px; }
+html.car-ui .sign-then { font-size: 16px; }
+html.car-ui .alert-title { font-size: 18px; }
+html.car-ui .alert-cap { font-size: 15px; opacity: 0.9; }
+html.car-ui .alert-dist { font-size: 38px; }
+html.car-ui .search-trigger { height: 56px; border-radius: 28px; }
+html.car-ui .icon-btn,
+html.car-ui .icon-btn.quiet { width: 56px; height: 56px; }
+html.car-ui .chip,
+html.car-ui .btn { min-height: 56px; border-radius: 28px; }
+html.car-ui .btn.compact { width: 56px; }
+html.car-ui .segmented button { min-height: 56px; }
+html.car-ui .opt { min-height: 60px; }
+html.car-ui .opt select { height: 56px; }
+html.car-ui .chips,
+html.car-ui .row.actions { flex-wrap: wrap; }
+html.car-ui .btn.small { min-height: 56px; min-width: 56px; border-radius: 28px; padding: 0 16px; }
+html.car-ui .layer-pill-main { min-height: 56px; }
+html.car-ui .app-update .layer-pill-main { min-height: 60px; font-size: 16px; padding-left: 18px; }
+html.car-ui .lrow-actions { gap: 8px; }
+html.car-ui .cam-badge { width: 22px; height: 22px; }
+/* Biển giới hạn lớn hơn trên màn hình ô tô để dòng "Camera" (nguồn của giới hạn) đọc được khi liếc: đĩa trắng 62 px
+   chứa vừa chữ 12 px; vẫn nằm trong hàng đồng hồ tốc độ 84 px. Màn hình thấp (≤ 460 px) giữ biển 52 px như cũ. */
+@media (min-height: 461px) {
+  html.car-ui .limit { width: 78px; height: 78px; border-width: 8px; font-size: 32px; }
+  html.car-ui .limit-src { font-size: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .speed.over, .alert { animation: none; }
+  * { transition: none !important; }
+}

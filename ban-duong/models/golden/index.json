@@ -1,0 +1,369 @@
+{
+ "version": 1,
+ "background": "procedural",
+ "note": "Ảnh vào là PNG RGB 8 bit, nền vẽ thủ tục (không có ảnh chụp nào); giá trị đưa vào mô hình = byte / 255 (float32). Đầu ra float32 little-endian, không có phần đầu, theo thứ tự hàng (C). So sánh từng phần tử với sai khác tuyệt đối ≤ tol = 2 bước lượng tử int8 của đầu ra đó.",
+ "models": {
+  "cls": {
+   "file": "sign-cls.int8.tflite",
+   "input": [
+    1,
+    48,
+    48,
+    3
+   ],
+   "outputs": {
+    "logits": [
+     1,
+     181
+    ]
+   },
+   "tol": {
+    "logits": 1.1635169982910156
+   },
+   "cases": [
+    {
+     "input": "cls-00.png",
+     "outputs": {
+      "logits": "cls-00.logits.bin"
+     },
+     "label": 2
+    },
+    {
+     "input": "cls-01.png",
+     "outputs": {
+      "logits": "cls-01.logits.bin"
+     },
+     "label": 87
+    },
+    {
+     "input": "cls-02.png",
+     "outputs": {
+      "logits": "cls-02.logits.bin"
+     },
+     "label": 130
+    },
+    {
+     "input": "cls-03.png",
+     "outputs": {
+      "logits": "cls-03.logits.bin"
+     },
+     "label": 126
+    },
+    {
+     "input": "cls-04.png",
+     "outputs": {
+      "logits": "cls-04.logits.bin"
+     },
+     "label": 6
+    },
+    {
+     "input": "cls-05.png",
+     "outputs": {
+      "logits": "cls-05.logits.bin"
+     },
+     "label": 70
+    },
+    {
+     "input": "cls-06.png",
+     "outputs": {
+      "logits": "cls-06.logits.bin"
+     },
+     "label": 8
+    },
+    {
+     "input": "cls-07.png",
+     "outputs": {
+      "logits": "cls-07.logits.bin"
+     },
+     "label": 123
+    },
+    {
+     "input": "cls-08.png",
+     "outputs": {
+      "logits": "cls-08.logits.bin"
+     },
+     "label": 120
+    },
+    {
+     "input": "cls-09.png",
+     "outputs": {
+      "logits": "cls-09.logits.bin"
+     },
+     "label": 64
+    },
+    {
+     "input": "cls-10.png",
+     "outputs": {
+      "logits": "cls-10.logits.bin"
+     },
+     "label": 19
+    },
+    {
+     "input": "cls-11.png",
+     "outputs": {
+      "logits": "cls-11.logits.bin"
+     },
+     "label": 85
+    },
+    {
+     "input": "cls-12.png",
+     "outputs": {
+      "logits": "cls-12.logits.bin"
+     },
+     "label": 9
+    },
+    {
+     "input": "cls-13.png",
+     "outputs": {
+      "logits": "cls-13.logits.bin"
+     },
+     "label": 170
+    },
+    {
+     "input": "cls-14.png",
+     "outputs": {
+      "logits": "cls-14.logits.bin"
+     },
+     "label": 31
+    },
+    {
+     "input": "cls-15.png",
+     "outputs": {
+      "logits": "cls-15.logits.bin"
+     },
+     "label": 81
+    },
+    {
+     "input": "cls-16.png",
+     "outputs": {
+      "logits": "cls-16.logits.bin"
+     },
+     "label": 111
+    },
+    {
+     "input": "cls-17.png",
+     "outputs": {
+      "logits": "cls-17.logits.bin"
+     },
+     "label": 82
+    },
+    {
+     "input": "cls-18.png",
+     "outputs": {
+      "logits": "cls-18.logits.bin"
+     },
+     "label": 172
+    },
+    {
+     "input": "cls-19.png",
+     "outputs": {
+      "logits": "cls-19.logits.bin"
+     },
+     "label": 132
+    }
+   ]
+  },
+  "det": {
+   "file": "sign-det.int8.tflite",
+   "input": [
+    1,
+    352,
+    640,
+    3
+   ],
+   "outputs": {
+    "heat": [
+     1,
+     44,
+     80,
+     11
+    ],
+    "reg": [
+     1,
+     44,
+     80,
+     4
+    ]
+   },
+   "tol": {
+    "reg": 0.039625540375709534,
+    "heat": 0.0078125
+   },
+   "cases": [
+    {
+     "input": "det-00.png",
+     "outputs": {
+      "heat": "det-00.heat.bin",
+      "reg": "det-00.reg.bin"
+     },
+     "boxes": [
+      [
+       23,
+       194,
+       10,
+       11,
+       "invtriangle"
+      ],
+      [
+       184,
+       1,
+       108,
+       108,
+       "bluering"
+      ],
+      [
+       182,
+       124,
+       112,
+       52,
+       "plate"
+      ],
+      [
+       319,
+       98,
+       29,
+       27,
+       "invtriangle"
+      ],
+      [
+       319,
+       130,
+       29,
+       13,
+       "bluerect"
+      ],
+      [
+       319,
+       146,
+       29,
+       29,
+       "noentry"
+      ],
+      [
+       494,
+       219,
+       50,
+       45,
+       "triangle"
+      ],
+      [
+       66,
+       18,
+       97,
+       103,
+       "bluering"
+      ],
+      [
+       63,
+       135,
+       103,
+       76,
+       "plate"
+      ]
+     ],
+     "geo": "A"
+    },
+    {
+     "input": "det-01.png",
+     "outputs": {
+      "heat": "det-01.heat.bin",
+      "reg": "det-01.reg.bin"
+     },
+     "boxes": [
+      [
+       106,
+       86,
+       44,
+       49,
+       "ring"
+      ],
+      [
+       600,
+       104,
+       32,
+       34,
+       "end"
+      ],
+      [
+       398,
+       86,
+       95,
+       95,
+       "end"
+      ]
+     ],
+     "geo": "A"
+    },
+    {
+     "input": "det-02.png",
+     "outputs": {
+      "heat": "det-02.heat.bin",
+      "reg": "det-02.reg.bin"
+     },
+     "boxes": [
+      [
+       132,
+       117,
+       71,
+       65,
+       "triangle"
+      ],
+      [
+       447,
+       117,
+       24,
+       24,
+       "triangle"
+      ],
+      [
+       447,
+       146,
+       25,
+       24,
+       "invtriangle"
+      ],
+      [
+       447,
+       173,
+       24,
+       25,
+       "ring"
+      ]
+     ],
+     "geo": "A"
+    },
+    {
+     "input": "det-03.png",
+     "outputs": {
+      "heat": "det-03.heat.bin",
+      "reg": "det-03.reg.bin"
+     },
+     "boxes": [
+      [
+       269.46,
+       25.1,
+       25.11,
+       25.42,
+       "bluering"
+      ],
+      [
+       218.93,
+       80.5,
+       42.39,
+       39.76,
+       "triangle"
+      ],
+      [
+       607.89,
+       42.37,
+       15.98,
+       15.97,
+       "octagon"
+      ]
+     ],
+     "geo": "B"
+    }
+   ]
+  }
+ }
+}

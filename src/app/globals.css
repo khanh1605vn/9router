@@ -1,5 +1,7 @@
 /* source() sets scan base to src/ for both webpack + Turbopack; auto-detection still skips binaries + gitignore */
 @import "tailwindcss" source("../../");
+/* ban-duong/ is a separate static app that happens to live in this repo — keep its files out of the class scan */
+@source not "../../ban-duong";
 
 @custom-variant dark (&:where(.dark, .dark *));
 

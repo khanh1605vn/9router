@@ -10,6 +10,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Separate static app with its own vendored bundle; not part of the Next.js project.
+    "ban-duong/**",
   ]),
 ]);
 

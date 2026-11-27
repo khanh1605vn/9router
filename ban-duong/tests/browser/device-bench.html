@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Đo nhận diện biển trên máy</title>
+<!--
+  Trang đo bộ nhận diện biển của Bạn Đường trên điện thoại hay màn hình ô tô thật (PLAN §8.2). Mở qua HTTPS cùng chỗ với
+  ứng dụng: https://<máy chủ>/tests/browser/device-bench.html. Đo thời gian xử lý mỗi khung của hai bản dựng wasm
+  (compat, relaxed) trên camera sau (hoặc cảnh tổng hợp nếu không dùng được camera), có hoặc không có tải nền, và chạy
+  dài 30 phút. Khung hình chỉ đi thẳng vào bộ nhận diện rồi bị bỏ; kết quả chỉ hiện trên trang này.
+  Cũng dùng cho kịch bản S10, S11 của tests/browser/run.mjs (?harness=1 chỉ bỏ qua giao diện, cùng mã đo).
+-->
+<style>
+  :root {
+    --bg: #f4f6f8; --card: #ffffff; --text: #14202b; --muted: #5b6875; --line: #d9e0e6; --accent: #0b6bcb; --warn: #b3261e; --ok: #1f7a3d;
+    color-scheme: light dark;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0f151b; --card: #18212a; --text: #e6edf3; --muted: #9aa8b5; --line: #2a3742; --accent: #5aa7f0; --warn: #f2867d; --ok: #6cc58a; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 760px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 1.35rem; margin: 8px 0 4px; }
+  h2 { font-size: 1.05rem; margin: 0 0 8px; }
+  p { margin: 6px 0; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; margin: 12px 0; }
+  .muted { color: var(--muted); font-size: 0.92rem; }
+  .warn { color: var(--warn); }
+  .ok { color: var(--ok); }
+  label { display: flex; gap: 8px; align-items: center; margin: 6px 0; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  button { font: inherit; border: 1px solid var(--accent); color: var(--accent); background: transparent; border-radius: 999px; padding: 8px 16px; min-height: 44px; cursor: pointer; }
+  button.primary { background: var(--accent); color: #fff; }
+  button:disabled { opacity: 0.45; cursor: default; }
+  input[type=number] { width: 6em; font: inherit; padding: 4px 6px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--text); }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+  th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th:first-child, td:first-child, th:nth-child(2), td:nth-child(2) { text-align: left; }
+  #status { min-height: 1.5em; }
+  pre { white-space: pre-wrap; word-break: break-word; font-size: 0.8rem; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Đo nhận diện biển trên máy này</h1>
+  <p class="muted">Trang này chạy bộ nhận diện biển của Bạn Đường ngay trên máy để đo thời gian xử lý mỗi khung hình với hai bản dựng (compat và relaxed). Hình từ camera chỉ đi thẳng vào bộ nhận diện rồi bị bỏ: không lưu, không gửi đi đâu. Kết quả chỉ hiện trên màn hình này.</p>
+  <p class="warn">Chỉ đo khi xe đã đỗ. Không cầm máy khi lái xe.</p>
+
+  <section class="card" id="env">
+    <h2>Máy và bản cài</h2>
+    <p id="envText" class="muted">Đang kiểm tra…</p>
+  </section>
+
+  <section class="card">
+    <h2>Đo độ trễ</h2>
+    <label><input type="radio" name="src" value="camera" checked> Camera sau (trình duyệt sẽ hỏi quyền khi bấm đo)</label>
+    <label><input type="radio" name="src" value="synthetic"> Cảnh tổng hợp (không dùng camera)</label>
+    <label><input type="checkbox" id="optLoad"> Thêm tải nền (giả lập máy đang bận việc khác)</label>
+    <label>Số khung mỗi lần đo <input type="number" id="optFrames" min="20" max="2000" step="10" value="200"></label>
+    <div class="row">
+      <button class="primary" id="btnRun" type="button">Đo cả hai bản dựng</button>
+      <button id="btnSoak" type="button">Chạy dài 30 phút</button>
+      <button id="btnStop" type="button" disabled>Dừng</button>
+    </div>
+    <p id="status" role="status" class="muted"></p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Bản dựng</th><th>Lượt quét</th><th>Số khung</th><th>p50 (ms)</th><th>p90 (ms)</th><th>p99 (ms)</th></tr></thead>
+        <tbody id="rows"></tbody>
+      </table>
+    </div>
+    <p class="muted">Lượt A: ô 640×352 quanh điểm tụ. Lượt A + B: thêm cả khung thu nhỏ. Ứng dụng chạy 3 khung mỗi giây và chỉ lên 5 khung mỗi giây khi p90 dưới 60 ms.</p>
+  </section>
+
+  <section class="card">
+    <h2>Chạy dài</h2>
+    <p class="muted">Máy nóng lên thì thời gian xử lý tăng; trang web không đọc được nhiệt độ máy. Cột cuối so với phút đầu tiên.</p>
+    <div class="scroll">
+      <table>
+        <thead><tr><th>Phút</th><th>Bản dựng</th><th>Khung/giây</th><th>p50 (ms)</th><th>p90 (ms)</th><th>So với phút đầu</th></tr></thead>
+        <tbody id="soakRows"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Kiểm tra khớp vectơ mẫu</h2>
+    <p class="muted">So đầu ra của bộ nhận diện trên máy này với đầu ra mẫu đi kèm mô hình (models/golden).</p>
+    <div class="row"><button id="btnParity" type="button">Kiểm tra</button></div>
+    <p id="parityText" class="muted"></p>
+  </section>
+
+  <section class="card">
+    <h2>Kết quả để gửi cho nhóm phát triển</h2>
+    <p class="muted">Chỉ có số đo và thông tin máy (trình duyệt, số nhân, bộ nhớ, cỡ khung hình), không có hình ảnh hay vị trí. Bạn tự quyết định có chép và gửi đi hay không.</p>
+    <div class="row"><button id="btnCopy" type="button">Chép kết quả</button></div>
+    <pre id="json"></pre>
+  </section>
+</main>
+
+<script src="scene.js"></script>
+<script type="module">
+  import { BUILDS, cameraSource, latency, modelsReady, parity, soak, startLoad, syntheticSource, DEFAULT_FRAMES, SOAK_MINUTES } from './bench.js';
+
+  const $ = (id) => document.getElementById(id);
+  const harness = new URLSearchParams(location.search).has('harness');
+  const report = { started: new Date().toISOString(), device: {}, latency: [], soak: [], parity: [] };
+  let stopFlag = false;
+  let busy = false;
+  const stop = () => stopFlag;
+  const fmt = (x) => (x == null ? '–' : String(x).replace('.', ','));
+
+  function env() {
+    const m = modelsReady();
+    const wa = typeof WebAssembly === 'object';
+    report.device = {
+      userAgent: navigator.userAgent,
+      cores: navigator.hardwareConcurrency || null,
+      memoryGB: navigator.deviceMemory || null,
+      secure: isSecureContext,
+      imageCapture: typeof ImageCapture === 'function',
+      models: m.ok,
+    };
+    const lines = [];
+    lines.push(`Nhân xử lý: ${report.device.cores ?? 'không rõ'}${report.device.memoryGB ? ` · bộ nhớ khoảng ${report.device.memoryGB} GB` : ''}.`);
+    if (!isSecureContext) lines.push('Trang chưa mở qua HTTPS nên không dùng được camera; chỉ đo được trên cảnh tổng hợp.');
+    if (!wa) lines.push('Trình duyệt không chạy được WebAssembly.');
+    lines.push(m.ok ? 'Bản cài đã có dữ liệu nhận diện biển.' : 'Bản cài này chưa có dữ liệu nhận diện biển, nên chưa đo được.');
+    $('envText').textContent = lines.join(' ');
+    $('envText').className = m.ok ? 'muted' : 'warn';
+    return m.ok;
+  }
+
+  function setBusy(on) {
+    busy = on;
+    for (const id of ['btnRun', 'btnSoak', 'btnParity']) $(id).disabled = on || !modelsReady().ok;
+    $('btnStop').disabled = !on;
+  }
+
+  function addRow(tbody, cells) {
+    const tr = document.createElement('tr');
+    for (const c of cells) {
+      const td = document.createElement('td');
+      td.textContent = c;
+      tr.append(td);
+    }
+    $(tbody).append(tr);
+  }
+
+  function showJson() {
+    $('json').textContent = JSON.stringify(report, null, 2);
+  }
+
+  /** Nguồn khung: camera sau nếu chọn và dùng được (gọi trong lần bấm), không thì cảnh tổng hợp. */
+  async function source() {
+    const want = document.querySelector('input[name=src]:checked').value;
+    if (want === 'camera' && isSecureContext && navigator.mediaDevices?.getUserMedia) {
+      try {
+        const cam = await cameraSource();
+        $('status').textContent = `Đang dùng camera ${cam.width ?? '?'}×${cam.height ?? '?'}.`;
+        return cam;
+      } catch (err) {
+        $('status').textContent = `Không dùng được camera (${err?.name || 'lỗi'}). Đo trên cảnh tổng hợp.`;
+      }
+    }
+    return syntheticSource();
+  }
+
+  async function runAll() {
+    if (busy) return;
+    setBusy(true);
+    stopFlag = false;
+    const frames = Math.max(20, Math.min(2000, Number($('optFrames').value) || DEFAULT_FRAMES));
+    const withLoad = $('optLoad').checked;
+    const src = await source();
+    const stopLoad = withLoad ? startLoad() : null;
+    try {
+      for (const build of BUILDS) {
+        if (stopFlag) break;
+        const out = await latency({
+          build,
+          frames,
+          source: src,
+          stop,
+          onProgress: (p) => {
+            $('status').textContent = `Bản dựng ${p.build}, lượt ${p.key === 'AB' ? 'A + B' : 'A'}: ${p.done}/${p.frames} khung.`;
+          },
+        });
+        out.load = withLoad;
+        report.latency.push(out);
+        for (const [key, v] of Object.entries(out.passes)) addRow('rows', [`${out.build}${withLoad ? ' (có tải nền)' : ''}`, key === 'AB' ? 'A + B' : 'A', v.n, fmt(v.p50), fmt(v.p90), fmt(v.p99)]);
+      }
+      $('status').textContent = stopFlag ? 'Đã dừng.' : 'Đã đo xong.';
+    } catch (err) {
+      $('status').textContent = `Không đo được: ${err?.code || err?.message || err}.`;
+    } finally {
+      stopLoad?.();
+      src.close();
+      setBusy(false);
+      showJson();
+    }
+  }
+
+  async function runSoak() {
+    if (busy) return;
+    setBusy(true);
+    stopFlag = false;
+    const src = await source();
+    const stopLoad = $('optLoad').checked ? startLoad() : null;
+    $('status').textContent = `Đang chạy dài ${SOAK_MINUTES} phút với bản dựng relaxed (hoặc compat nếu máy không hỗ trợ). Giữ màn hình sáng.`;
+    let lock = null;
+    try {
+      lock = await navigator.wakeLock?.request('screen');
+    } catch {
+      lock = null;
+    }
+    try {
+      let out;
+      try {
+        out = await soak({ build: 'relaxed', source: src, stop, onTick: (r) => addRow('soakRows', [r.minute, 'relaxed', fmt(r.fps), fmt(r.p50), fmt(r.p90), fmt(r.slower)]) });
+      } catch (err) {
+        if (err?.code !== 'unsupported') throw err;
+        out = await soak({ build: 'compat', source: src, stop, onTick: (r) => addRow('soakRows', [r.minute, 'compat', fmt(r.fps), fmt(r.p50), fmt(r.p90), fmt(r.slower)]) });
+      }
+      report.soak.push(out);
+      $('status').textContent = stopFlag ? 'Đã dừng chạy dài.' : 'Đã chạy dài xong.';
+    } catch (err) {
+      $('status').textContent = `Không chạy được: ${err?.code || err?.message || err}.`;
+    } finally {
+      lock?.release?.().catch?.(() => {});
+      stopLoad?.();
+      src.close();
+      setBusy(false);
+      showJson();
+    }
+  }
+
+  async function runParity() {
+    if (busy) return;
+    setBusy(true);
+    const lines = [];
+    try {
+      for (const build of BUILDS) {
+        try {
+          const out = await parity({ build });
+          report.parity.push(out);
+          lines.push(`${out.build}: ${out.ok ? 'khớp' : 'không khớp'} ở ${out.cases} trường hợp${out.ok ? '' : ` (${out.failed.length} đầu ra vượt sai số cho phép)`}.`);
+        } catch (err) {
+          lines.push(`${build}: không chạy được (${err?.code || err?.message || err}).`);
+        }
+      }
+    } finally {
+      $('parityText').textContent = lines.join(' ');
+      setBusy(false);
+      showJson();
+    }
+  }
+
+  $('btnRun').addEventListener('click', runAll);
+  $('btnSoak').addEventListener('click', runSoak);
+  $('btnParity').addEventListener('click', runParity);
+  $('btnStop').addEventListener('click', () => {
+    stopFlag = true;
+  });
+  $('btnCopy').addEventListener('click', async () => {
+    showJson();
+    try {
+      await navigator.clipboard.writeText($('json').textContent);
+      $('status').textContent = 'Đã chép kết quả.';
+    } catch {
+      $('status').textContent = 'Không chép được. Hãy chọn và chép phần chữ bên dưới.';
+    }
+  });
+
+  const ready = env();
+  setBusy(false);
+  showJson();
+  // Cho tests/browser/run.mjs (S10, S11): cùng các hàm đo, không qua giao diện.
+  globalThis.bdBench = { ready: true, modelsReady: ready, parity, latency, soak, harness };
+</script>
+</body>
+</html>
